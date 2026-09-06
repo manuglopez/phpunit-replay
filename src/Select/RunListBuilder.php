@@ -25,6 +25,7 @@ final class RunListBuilder
     /** @var list<string>|null memoised directory walk (project-relative candidates) */
     private ?array $candidates = null;
 
+    /** @param array{migration?: Rule, sibling?: Rule, blade?: Rule} $extraRules Laravel-only rules, docs/INTERNALS.md "Laravel" */
     public function __construct(
         private readonly Graph $graph,
         private readonly TestPaths $testPaths,
@@ -32,13 +33,14 @@ final class RunListBuilder
         private readonly ConfigurationReader $reader,
         private readonly Policy $policy,
         private readonly string $projectRoot,
+        private readonly array $extraRules = [],
     ) {
     }
 
     /** @param list<string> $changed project-relative changed files */
     public function build(array $changed, string $branch): RunList
     {
-        $selection = Selector::default($this->graph, $this->testPaths, $this->watch, $this->projectRoot)
+        $selection = Selector::default($this->graph, $this->testPaths, $this->watch, $this->projectRoot, $this->extraRules)
             ->affected($changed);
 
         $results = $this->graph->results($branch);

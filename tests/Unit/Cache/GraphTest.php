@@ -471,6 +471,10 @@ final class GraphTest extends TestCase
         $graph->setResult('main', 'T1', $this->makeResult());
         $graph->setResult('main', 'T2', $this->makeResult());
         $graph->setResult('feature', 'T3', $this->makeResult());
+        $graph->replaceTestTables([
+            'tests/FooTest.php' => ['users', 'posts'],
+            'tests/BarTest.php' => ['users'],
+        ]);
 
         self::assertSame([
             'files' => 2,
@@ -478,6 +482,7 @@ final class GraphTest extends TestCase
             'edges' => 3,
             'branches' => 2,
             'results' => 3,
+            'tables' => 2,
         ], $graph->stats());
     }
 

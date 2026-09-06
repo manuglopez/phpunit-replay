@@ -21,6 +21,8 @@ use Manuglopez\Replay\Console\ExplainFormatter;
 use Manuglopez\Replay\Hermeticity\DivergenceLog;
 use Manuglopez\Replay\Hermeticity\Policy;
 use Manuglopez\Replay\Hermeticity\Quarantine;
+use Manuglopez\Replay\Laravel\LaravelDetector;
+use Manuglopez\Replay\Laravel\LaravelIntegration;
 use Manuglopez\Replay\PHPUnit\ConfigurationReader;
 use Manuglopez\Replay\PHPUnit\ConfigurationWriter;
 use Manuglopez\Replay\Record\DriverDetector;
@@ -288,7 +290,13 @@ final class RunPipeline
             $partial = RunPartial::load($this->runDir);
 
             if ($partial !== null) {
-                $updater = new GraphUpdater($this->graph, $this->root ?? '', new ContentKey($this->root ?? ''), $this->quarantine);
+                $root = $this->root ?? '';
+
+                if (LaravelDetector::enabled($root, $this->config)) {
+                    $partial = LaravelIntegration::augment($partial, $root);
+                }
+
+                $updater = new GraphUpdater($this->graph, $root, new ContentKey($root), $this->quarantine);
                 $updater->apply($partial, $this->branch, recordsEdges: false, complete: false);
                 $this->store->save($this->graph);
                 $this->quarantine->save($this->stateDir);
@@ -332,6 +340,10 @@ final class RunPipeline
             Warnings::warn('the PHPUnit run produced no run partial; nothing recorded');
 
             return $exitCode;
+        }
+
+        if (LaravelDetector::enabled($root, $this->config)) {
+            $partial = LaravelIntegration::augment($partial, $root);
         }
 
         $complete = ! (bool) ($partial->meta['truncated'] ?? false) && in_array($exitCode, [0, 1], true);
@@ -396,6 +408,10 @@ final class RunPipeline
             Warnings::warn('the PHPUnit run produced no run partial; nothing verified');
 
             return $exitCode;
+        }
+
+        if (LaravelDetector::enabled($root, $this->config)) {
+            $partial = LaravelIntegration::augment($partial, $root);
         }
 
         $complete = ! (bool) ($partial->meta['truncated'] ?? false) && in_array($exitCode, [0, 1], true);
@@ -618,6 +634,10 @@ final class RunPipeline
             return $exitCode;
         }
 
+        if (LaravelDetector::enabled($root, $this->config)) {
+            $partial = LaravelIntegration::augment($partial, $root);
+        }
+
         $complete = ! (bool) ($partial->meta['truncated'] ?? false) && in_array($exitCode, [0, 1], true);
 
         $updater = new GraphUpdater($graph, $root, new ContentKey($root), $this->quarantine);
@@ -678,6 +698,7 @@ final class RunPipeline
             $this->reader,
             new Policy($graph, $this->config, $this->quarantine, $root),
             $root,
+            LaravelIntegration::rulesFor($graph, $root, $this->config),
         );
 
         $list = $builder->build($changed, $branch);

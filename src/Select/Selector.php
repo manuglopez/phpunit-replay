@@ -20,11 +20,26 @@ final class Selector
     ) {
     }
 
-    public static function default(Graph $graph, TestPaths $testPaths, WatchPatterns $watch, string $projectRoot): self
-    {
+    /**
+     * @param array{migration?: Rule, sibling?: Rule, blade?: Rule} $extraRules Laravel-only
+     *        rules (SPEC.md §7.2, docs/INTERNALS.md "Laravel"), inserted in SPEC order:
+     *        Migration first, PhpEdge, TestFile, then Sibling and Blade, then Watch last.
+     *        Absent keys are simply skipped, so `[]` (the default, and every non-Laravel
+     *        project) reproduces the plain chain.
+     */
+    public static function default(
+        Graph $graph,
+        TestPaths $testPaths,
+        WatchPatterns $watch,
+        string $projectRoot,
+        array $extraRules = [],
+    ): self {
         return new self($graph, $testPaths, $watch, $projectRoot, [
+            ...(isset($extraRules['migration']) ? [$extraRules['migration']] : []),
             new Rules\PhpEdgeRule(),
             new Rules\TestFileRule(),
+            ...(isset($extraRules['sibling']) ? [$extraRules['sibling']] : []),
+            ...(isset($extraRules['blade']) ? [$extraRules['blade']] : []),
             new Rules\WatchRule(),
         ]);
     }

@@ -10,6 +10,7 @@ use Manuglopez\Replay\Change\Git;
 use Manuglopez\Replay\Config;
 use Manuglopez\Replay\Console\ExplainFormatter;
 use Manuglopez\Replay\Console\Runner\ProjectLocator;
+use Manuglopez\Replay\Laravel\LaravelIntegration;
 use Manuglopez\Replay\Select\RunList;
 use Manuglopez\Replay\Select\Selector;
 use Manuglopez\Replay\Select\TestPaths;
@@ -72,7 +73,8 @@ final class ExplainCommand extends Command
         $path = $input->getArgument('path');
         $rel = self::relativize($root, $cwd, $path);
 
-        $selection = Selector::default($graph, $testPaths, $watch, $root)->affected([$rel]);
+        $extraRules = LaravelIntegration::rulesFor($graph, $root, $config);
+        $selection = Selector::default($graph, $testPaths, $watch, $root, $extraRules)->affected([$rel]);
         $runList = new RunList($selection, [], [], []);
 
         $lines = (new ExplainFormatter())->lines($runList);

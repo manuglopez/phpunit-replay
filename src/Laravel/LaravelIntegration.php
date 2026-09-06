@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Manuglopez\Replay\Laravel;
 
 use Manuglopez\Replay\Cache\Graph;
+use Manuglopez\Replay\Config;
 use Manuglopez\Replay\PHPUnit\ReplayState;
 use Manuglopez\Replay\PHPUnit\Subscribers\ArmLaravelTrackersOnPrepared;
 use Manuglopez\Replay\PHPUnit\Subscribers\FlushUsesDatabaseOnExecutionFinished;
@@ -48,6 +49,19 @@ final class LaravelIntegration
         ];
     }
 
+    /**
+     * Convenience wrapper around {@see LaravelDetector::enabled()} and {@see self::rules()}
+     * for the three call sites that need "the Laravel rules, or none" in one step
+     * (`Select\RunListBuilder`/`Console\Runner\RunPipeline`, `PHPUnit\ReplayState::bootInProcess()`
+     * via its `prepareReplay()`, `Console\Commands\ExplainCommand`).
+     *
+     * @return array{migration: Rule, sibling: Rule, blade: Rule}|array{}
+     */
+    public static function rulesFor(Graph $graph, string $projectRoot, Config $config): array
+    {
+        return LaravelDetector::enabled($projectRoot, $config) ? self::rules($graph, $projectRoot) : [];
+    }
+
     /** @return list<Subscriber> */
     public static function subscribers(Recorder $recorder): array
     {
@@ -86,6 +100,16 @@ final class LaravelIntegration
             $tables[$testFile] = $merged;
         }
 
-        return new RunPartial($partial->edges, $partial->results, $tables, $partial->meta, $partial->usesDatabase);
+        // Named arguments: RunPartial has grown fields since this call was first written
+        // (notCacheable, SPEC.md §8) and a positional rebuild silently drops whichever one
+        // is newest — see LaravelIntegrationTest::test_augment_preserves_not_cacheable_entries.
+        return new RunPartial(
+            edges: $partial->edges,
+            results: $partial->results,
+            tables: $tables,
+            meta: $partial->meta,
+            usesDatabase: $partial->usesDatabase,
+            notCacheable: $partial->notCacheable,
+        );
     }
 }

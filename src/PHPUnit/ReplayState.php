@@ -20,6 +20,8 @@ use Manuglopez\Replay\Config;
 use Manuglopez\Replay\Console\Runner\Warnings;
 use Manuglopez\Replay\Hermeticity\Policy;
 use Manuglopez\Replay\Hermeticity\Quarantine;
+use Manuglopez\Replay\Laravel\LaravelDetector;
+use Manuglopez\Replay\Laravel\LaravelIntegration;
 use Manuglopez\Replay\PHPUnit\Decision\Decision;
 use Manuglopez\Replay\PHPUnit\Decision\ReplayIncomplete;
 use Manuglopez\Replay\PHPUnit\Decision\ReplayPass;
@@ -102,6 +104,8 @@ final class ReplayState
     private static string $defaultBranch = 'main';
 
     private static bool $persist = false;
+
+    private static ?Config $config = null;
 
     /** @var array<string, Decision> */
     private static array $decisions = [];
@@ -191,6 +195,7 @@ final class ReplayState
         self::$head = $git->currentSha();
         self::$defaultBranch = $defaultBranch;
         self::$persist = $persist;
+        self::$config = $config;
         self::$quarantine = Quarantine::load($stateDir);
         self::$quarantine->setReleaseAfter($config->quarantineReleaseAfter);
 
@@ -413,6 +418,12 @@ final class ReplayState
             notCacheable: self::$notCacheable?->all() ?? [],
         );
 
+        // Laravel integration (SPEC.md §10): widens database test tables the same way the
+        // wrapper does (Console\Runner\RunPipeline) before folding the partial into the graph.
+        if (LaravelDetector::enabled($root, self::$config ?? Config::defaults())) {
+            $partial = LaravelIntegration::augment($partial, $root);
+        }
+
         $updater = new GraphUpdater($graph, $root, new ContentKey($root), self::$quarantine);
         $updater->apply($partial, self::$branch, recordsEdges: $recordsEdges, complete: $complete);
 
@@ -502,6 +513,7 @@ final class ReplayState
         self::$head = null;
         self::$defaultBranch = 'main';
         self::$persist = false;
+        self::$config = null;
         self::$decisions = [];
         self::$replayed = [];
         self::$counters = ['affected' => 0, 'uncached' => 0, 'replayed' => 0, 'quarantined' => 0];
@@ -625,8 +637,15 @@ final class ReplayState
         $reader = self::$reader ?? new ConfigurationReader($configuration);
 
         self::$policy = $policy;
-        self::$runList = (new RunListBuilder($graph, $testPaths, $watch, $reader, $policy, $root))
-            ->build($changed, $branch);
+        self::$runList = (new RunListBuilder(
+            $graph,
+            $testPaths,
+            $watch,
+            $reader,
+            $policy,
+            $root,
+            LaravelIntegration::rulesFor($graph, $root, $config),
+        ))->build($changed, $branch);
 
         Warnings::debug('changed: ' . ($changed === [] ? '(none)' : implode(', ', $changed)));
     }

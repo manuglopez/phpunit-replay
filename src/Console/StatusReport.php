@@ -37,6 +37,7 @@ final readonly class StatusReport
         public int $files,
         public int $testFiles,
         public int $edges,
+        public int $tables,
         public int $graphBytes,
         public ?array $graphFingerprint,
         public array $currentFingerprint,
@@ -70,6 +71,7 @@ final readonly class StatusReport
         $lines[] = 'files:      ' . $this->files;
         $lines[] = 'test files: ' . $this->testFiles;
         $lines[] = 'edges:      ' . $this->edges;
+        $lines[] = 'tables:     ' . $this->tables;
         $lines[] = 'graph.json: ' . Format::bytes($this->graphBytes);
         $lines[] = '';
         $lines[] = 'results:';
