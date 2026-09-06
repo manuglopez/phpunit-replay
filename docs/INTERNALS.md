@@ -692,3 +692,25 @@ final class Cache\Remote\ObjectStore               // put/get of objects/<shard>
 ### README additions (phase 3)
 
 Section "Sharing the cache with your team" with a comparison table and setup steps for: local only (default), shared folder (`file://`), HTTP (S3/MinIO presigned, nginx WebDAV), **dedicated git repository** (recommended when no object storage exists: create empty repo, give CI a deploy key, `remote => 'git@github.com:org/project-replay-cache.git'`, `remote_push`, GC job), and CI artifacts (`baseline-path` + actions/cache). Each with prerequisites, what gets shared, failure behaviour (never breaks the run), and size expectations.
+
+### Nearest baseline (`baseline_branches`) — phase 3
+
+Config: `'baseline_branches' => ['develop', 'main']` (list, ordered by preference; `default_branch` remains
+as an alias for the first entry; when both are set `baseline_branches` wins). Env `PHPUNIT_REPLAY_BASELINE_BRANCHES`
+(comma-separated).
+
+```php
+final class Change\BaselineResolver
+{
+    public function __construct(Git $git, Graph $graph, ?ObjectStore $remote, Config $config);
+    /** @return array{branch: string, sha: string, source: 'own'|'local'|'remote', distance: int}|null */
+    public function resolve(string $currentBranch, string $head): ?array;
+}
+```
+Algorithm: candidates = [current branch (own baseline)] + `baseline_branches`; for each with a known sha
+(local graph first, then `graph/<key>/<branch>.json` from the remote), keep those where
+`git merge-base --is-ancestor <sha> <head>`; `distance` = `git diff --name-only <sha>..<head> | count`;
+pick the smallest distance (ties → order of preference); own baseline wins when its distance is ≤ the best
+candidate's. `Graph::results()` reads for the current branch then fall back to the resolved branch's results
+(replacing the single `defaultBranch` fallback). `status`/`--explain` print `baseline develop@abc1234 (nearest, 3 files away)`.
+Detached HEAD: candidates only. No candidate is an ancestor → fresh record (as today).

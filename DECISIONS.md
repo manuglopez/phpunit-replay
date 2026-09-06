@@ -189,3 +189,12 @@ append-only content-addressed files (no conflicts by construction), publishes `g
 from CI (`remote_push=all`), and is garbage-collected by `prune --remote` (monthly shards +
 orphan squash). Setup, usage and alternatives (shared folder, HTTP, CI artifacts) are documented
 in the README. Contracts in docs/INTERNALS.md "Phase 3 contracts".
+
+## D-039 — Nearest-baseline selection for git-flow (`baseline_branches`)
+
+Owner request (2026-09-07): teams working on `develop` and releasing to `main` need feature branches to
+inherit `develop`'s baseline and hotfixes to inherit `main`'s. Phase 3 adds `baseline_branches`
+(ordered candidates); the baseline with the smallest `git diff --name-only <sha>..HEAD` among ancestors
+wins (`Change\BaselineResolver`). `default_branch` stays as the single-candidate shorthand. Recommended
+CI: `develop` and `main` both run `run --allow-ci-baseline && push --graph`; only structural drift forces
+a full record. Contract in docs/INTERNALS.md "Nearest baseline".
