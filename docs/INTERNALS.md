@@ -318,6 +318,7 @@ final class Record\RunWriter
     /** writes edges.json, results.json, tables.json, meta.json atomically */
     public function flush(Recorder $recorder, ResultCollector $collector, array $meta): bool;
 }
+// FlushOnExecutionFinished(RunWriter $writer, Recorder $recorder, ResultCollector $collector, \Closure $meta)
 final readonly class Record\RunPartial
 {
     /** @param array<string, list<string>> $edges rel→rel  @param array<string, TestResultArray> $results (file rel)  @param array<string, list<string>> $tables */
@@ -394,7 +395,7 @@ final class PHPUnit\ConfigurationReader       // thin, version-tolerant reads of
     public function configurationFile(): ?string;
 }
 final class PHPUnit\ReplayExtension implements \PHPUnit\Runner\Extension\Extension  // SPEC §6.1
-final class PHPUnit\ReplayState                                                 // static singleton; phase 1: boot(Config, Configuration) → mode; owns Recorder/ResultCollector/RunWriter
+final class PHPUnit\ReplayState  // static holder booted by the extension: boot(Mode $mode, string $root, string $stateDir, string $runId, ?CoverageDriver $driver); accessors mode()/root()/stateDir()/runId()/recorder()/collector()/runWriter()/startedAt(); reset() for tests
 ```
 
 Environment variables (wrapper → extension): `PHPUNIT_REPLAY_MODE`, `PHPUNIT_REPLAY_STATE_DIR`, `PHPUNIT_REPLAY_RUN_ID`, `PHPUNIT_REPLAY_ROOT`, `PHPUNIT_REPLAY_DEBUG`. `PHPUNIT_REPLAY=0` disables everything.
@@ -407,10 +408,12 @@ final readonly class Config                  // SPEC §9 keys
     public ?string $stateDir; public ?string $remote; public ?string $remoteToken; public ?string $defaultBranch;
     /** @var array<string, string|list<string>> */ public array $watch; /** @var list<string> */ public array $neverCache;
     public int $quarantineReleaseAfter; public string $laravel; public bool $junitMerge;
+    public string $mode; public bool $hermeticityHeuristics;
     public static function defaults(): self;
     public static function load(string $projectRoot): self;           // phpunit-replay.php if present (returns array), else defaults; then env overrides
     public static function fromArray(array $values): self;
     public static function fromExtensionParameters(\PHPUnit\Runner\Extension\ParameterCollection $parameters): self;
+    public static function isKnownMode(string $mode): bool;
     public function mergeEnv(array $server): self;
 }
 ```

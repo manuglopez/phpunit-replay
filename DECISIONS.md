@@ -62,3 +62,39 @@ them to the graph. In-process mode calls the same service at `ExecutionFinished`
 The repository lives at `github.com/manuglopez/phpunit-replay` and the Composer package is
 `manuglopez/phpunit-replay` (owner's instruction, 2026-09-06). The PHP namespace stays
 `Manuglopez\Replay` (owner's instruction; SPEC §1 said `Orlegitech\Replay`); the CLI binary stays `phpunit-replay`.
+
+## D-009 — pcov needs `pcov.directory` explicitly
+
+pcov 1.0.12 instruments nothing when `pcov.directory` is unset even though phpinfo shows a cwd-derived value; the wrapper passes `-d pcov.directory=<root>` (SPEC §2.4 already required it) and the package's own `composer test` script passes `-d pcov.directory=.`; `FixtureProject::phpunit()` does the same. Unit test `PcovDriverTest` skips with a message when the directory is not set.
+
+## D-010 — `Recorder::beginTest()` closes a dangling test instead of ignoring a nested begin
+
+PHPUnit emits `Test\Finished` only when `wasPrepared()` is true (`vendor/phpunit/phpunit/src/Framework/TestRunner/TestRunner.php`, `testFinished` guarded by `wasPrepared()`), and a `setUp()` throwing `SkippedTest`/`IncompleteTest` never sets it, so the next `PreparationStarted` must flush the previous test's coverage. Deviates from Pest's Recorder.
+
+## D-011 — `Config` carries `mode` and `hermeticity_heuristics` keys beyond SPEC §9's array example
+
+`Config::isKnownMode()` accepts `auto|record|replay|off|record-subset|results-only` (the last two are wrapper→extension values).
+
+## D-012 — `ConfigurationReader::fromXmlFile()` prepends `--configuration <file>` to the CLI parameters
+
+`sebastian/cli-parser` discards element 0 as `$argv[0]`; `includeTestSuites()` (PHPUnit 12) vs `includeTestSuite()` (11.5) is bridged with try/catch instead of `method_exists` because PHPStan proves `method_exists` always true on 12.
+
+## D-013 — `ReplayState::boot()` takes `(Mode, root, stateDir, runId, ?CoverageDriver)` rather than `(Config, Configuration)` as sketched in SPEC §6.1
+
+The extension resolves everything from env vars set by the wrapper. In-process mode (phase 2) will add a `Config`-based boot path.
+
+## D-014 — `TestPaths::fromConfiguration()` has no `['Test.php']` last-resort fallback
+
+PHPUnit's `Configuration::testSuffixes()` is typed non-empty, so the branch would be dead code under PHPStan max.
+
+## D-015 — Watch defaults for Symfony map every pattern to all test directories, same as Laravel
+
+SPEC §7.2.6 lists both with the same `→ tests` shape.
+
+## D-016 — `FlushOnExecutionFinished` takes a `Closure` meta provider
+
+PHP forbids `callable` typed properties. `ResultCollector::merge()` from Pest was dropped (unused).
+
+## D-017 — Remote pushes from automated sessions use the HTTPS remote with `gh auth git-credential` as a repo-local credential helper
+
+The developer's SSH setup (passphrase-protected key behind the GNOME keyring agent) cannot answer prompts from a non-interactive session.
