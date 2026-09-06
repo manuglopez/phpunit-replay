@@ -159,3 +159,23 @@ Testing `--parallel` (SPEC §13) requires Paratest; users install it themselves 
 ## D-032 — Paratest's main process bootstraps the extension during test discovery
 
 The wrapper passes the same ini flags to that process so it finds the coverage driver and stays silent (before the fix it printed a harmless `no coverage driver` warning). `--parallel` / `-p [N]` accept a space-separated value; the argv pre-splitter in `Console\Application` peeks the next token for those two options.
+
+## D-033 — Flip detection (quarantine) ignores transitions whose OLD cached status was failure/error
+
+Cached failures always re-run (SPEC §6.2), so "failed, fixed, passes again" is the normal heal path, not a flip — otherwise Scenario 5 would quarantine the test it just healed. Same exclusion in `verify`'s divergence check.
+
+## D-034 — `Quarantine::testIds()` returns only currently quarantined ids
+
+Returns only ids with `flips >= 1` and not released; released/stable entries stay in `flaky.json` for history but do not force re-runs.
+
+## D-035 — `Graph::pruneMissingTestFiles()` checks existence only for file-shaped `not_cacheable` entries
+
+File paths are checked; `Class::method` ids are kept (they were silently deleted on every complete pass before).
+
+## D-036 — `RunPipeline::verify()` does its own cached-vs-actual comparison and books divergences once
+
+It does not hand a `Quarantine` to its `GraphUpdater`, so one event is booked once. Divergences persist in `<stateDir>/divergence.json` (`runs`, last 500 `entries`).
+
+## D-037 — Merge of the hermeticity branch over Paratest/Laravel
+
+`RunPartial` carries both `usesDatabase` and `notCacheable`; every partial file (including `not_cacheable.json`) goes through `RunWriter::pathFor()` so Paratest workers never collide. `ReplayState::persistInProcess()` builds `RunPartial` with named arguments after a positional-argument slip was caught. Known gap: `LaravelIntegration::augment()` rebuilt `RunPartial` positionally and dropped `notCacheable`.
