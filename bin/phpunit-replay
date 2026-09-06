@@ -1,0 +1,8 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+// Placeholder; replaced by the Symfony Console application in Phase 1.
+fwrite(STDERR, "phpunit-replay: not implemented yet\n");
+exit(1);
