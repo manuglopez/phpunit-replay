@@ -130,3 +130,20 @@ Stack traces of failing tests in suites using the trait do not show `Replayable.
 ## D-025 — `PHPUNIT_REPLAY_MODE=replay` makes the extension return silently
 
 The wrapper drives replay by file selection; in-process replay is chosen by the extension itself when no wrapper env is present.
+
+## D-026 — laravel-lite fixture runs Laravel 13.30.1 / PHPUnit 12.5
+
+`composer create-project laravel/laravel` resolves today; not Laravel 12 as SPEC-era notes assumed.
+The fixture's `vendor/` is gitignored and installed with `composer install` inside `tests/Fixtures/Projects/laravel-lite` (README there). Laravel integration tests `markTestSkipped` when missing. The package itself has no `illuminate/*` dependency: Laravel classes are reached through `class_exists`/string class names/`object`-typed dynamic calls.
+
+## D-027 — `FixtureProject::laravelLite()` copies the fixture `vendor/` instead of symlinking
+
+PHP resolves `__DIR__`/`__FILE__` of included files to symlink-followed paths; a symlinked `vendor` rooted every autoloaded class (app's `App\` namespace included, via Laravel's `Application::inferBasePath()`) under the original fixture path, and pcov (scoped to copy root) saw almost nothing. Only `vendor/manuglopez/phpunit-replay` is recreated as an absolute symlink. `TempDir::copyTree()` recreates symlinks instead of following them (following recursed into the package itself).
+
+## D-028 — `uses_database.json` collects test files using RefreshDatabase/DatabaseMigrations/DatabaseTransactions
+
+Collected by `Laravel\UsesDatabaseCollector` and flushed by `FlushUsesDatabaseOnExecutionFinished`, additive to existing `RunWriter`/`RunPartial` (missing file → `[]`). `LaravelIntegration::augment()` reads it to add every migration table to database-using test files (SPEC §10 MigrationTables, conservative).
+
+## D-029 — Laravel entry points centralised in `Laravel\LaravelIntegration`
+
+`shouldArm`, `subscribers`, `rules`, `augment` all centralised there. `ReplayExtension` arms trackers when `shouldArm($root)` is true (Container class loaded and `artisan` present). Rule wiring into `Selector::default()` and `augment()` into persist paths done in wiring step after hermeticity work lands.
