@@ -563,7 +563,7 @@ public static function markReplayed(string $testId, Decision $decision): void;  
 public static function counters(): array{affected:int, uncached:int, replayed:int, quarantined:int, executed:int}
 public static function isDependsProvider(string $className, string $methodName): bool;   // MetadataRegistry::parser()->forClass($className): any DependsOnMethod metadata targeting $methodName (cache per class)
 public static function persistInProcess(): void;   // at TestRunner\ExecutionFinished: build RunPartial in memory (replayed ids → cached result restored: status/time/assertions/message), GraphUpdater::apply(recordsEdges = driver && !resultsOnly, complete = !truncated), BaselineWriter::commit, Quarantine save
-public static function summaryLine(): ?string;     // printed by PrintSummaryOnTestRunnerFinished (TestRunner\Finished, AFTER PHPUnit's own result output — verify in vendor/phpunit/phpunit/src/TextUI/Application.php)
+public static function summaryLine(): ?string;     // printed by PrintSummaryOnApplicationFinished (Application\Finished — the only event emitted after PHPUnit prints its result; see D-018)
 ```
 
 Trait `PHPUnit\Replayable` (public API: `isReplaying(): bool`; everything else prefixed `__replay`):

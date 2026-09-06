@@ -98,3 +98,35 @@ PHP forbids `callable` typed properties. `ResultCollector::merge()` from Pest wa
 ## D-017 — Remote pushes from automated sessions use the HTTPS remote with `gh auth git-credential` as a repo-local credential helper
 
 The developer's SSH setup (passphrase-protected key behind the GNOME keyring agent) cannot answer prompts from a non-interactive session.
+
+## D-018 — In-process summary line is printed on `Application\Finished`, not `TestRunner\Finished`
+
+`vendor/phpunit/phpunit/src/TextUI/TestRunner.php:66-67` emits `testRunnerExecutionFinished()`/`testRunnerFinished()` inside `TestRunner::run()`, before `Application.php:281` prints the result; `applicationFinished()` (`Application.php:310`) is the only event after the report. Subscriber `PrintSummaryOnApplicationFinished`.
+
+## D-019 — In-process "complete" flag = `!truncated && mode !== ResultsOnly`
+
+The shell exit code does not exist yet at `TestRunner\ExecutionFinished` (computed at `Application.php:305`), so failing runs still publish the baseline — same outcome as the wrapper for exit 1.
+
+## D-020 — `#[Depends]` providers are never replayed (SPEC §6.3)
+
+A replayed provider would hand `null` to dependents (verified in docs/spikes/in-process-replay.md B5). Consequence: a suite with such providers never reaches "0 executed" in in-process mode; the wrapper's filtered mode is unaffected because it selects whole files.
+
+## D-021 — `markReplayed()` is called for ReplaySkipped/ReplayIncomplete too
+
+Persisted results keep the original status/time/assertions/message (SPEC §6.3 last paragraph), not the synthetic run's.
+
+## D-022 — `PHPUnit\ReplayableTestCase` (abstract, uses the trait) exists for PHPStan `trait.unused` and as the "extend instead of compose" option
+
+Users can extend the abstract class instead of using the trait directly.
+
+## D-023 — `Graph::isNotCacheable()` matches both the raw and the `Paths::relative()`-normalised argument
+
+`setNotCacheable()` stores entries through `relative()`, which rewrites `App\Tests\FooTest::testBar` into `App/Tests/FooTest::testBar`.
+
+## D-024 — The extension registers `src/` with `PHPUnit\Util\ExcludeList::addDirectory()` at bootstrap
+
+Stack traces of failing tests in suites using the trait do not show `Replayable.php` frames.
+
+## D-025 — `PHPUNIT_REPLAY_MODE=replay` makes the extension return silently
+
+The wrapper drives replay by file selection; in-process replay is chosen by the extension itself when no wrapper env is present.
