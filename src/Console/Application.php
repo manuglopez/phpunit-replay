@@ -5,9 +5,12 @@ declare(strict_types=1);
 namespace Manuglopez\Replay\Console;
 
 use Manuglopez\Replay\Console\Commands\BaselinePathCommand;
+use Manuglopez\Replay\Console\Commands\ExplainCommand;
+use Manuglopez\Replay\Console\Commands\PruneCommand;
 use Manuglopez\Replay\Console\Commands\RecordCommand;
 use Manuglopez\Replay\Console\Commands\RunCommand;
 use Manuglopez\Replay\Console\Commands\StatusCommand;
+use Manuglopez\Replay\Console\Commands\VerifyCommand;
 use Manuglopez\Replay\Version;
 use Symfony\Component\Console\Application as BaseApplication;
 use Symfony\Component\Console\Input\ArgvInput;
@@ -39,7 +42,7 @@ use Symfony\Component\Console\Output\OutputInterface;
 final class Application extends BaseApplication
 {
     /** @var list<string> */
-    private const COMMAND_NAMES = ['run', 'record', 'status', 'baseline-path'];
+    private const COMMAND_NAMES = ['run', 'record', 'status', 'baseline-path', 'explain', 'prune', 'verify'];
 
     /** @var array<string, list<string>> command => its own recognised long options (without leading --) */
     private const OWN_LONG_OPTIONS = [
@@ -47,6 +50,9 @@ final class Application extends BaseApplication
         'record' => ['fresh', 'parallel'],
         'status' => [],
         'baseline-path' => [],
+        'explain' => [],
+        'prune' => ['flaky', 'branches', 'all'],
+        'verify' => [],
     ];
 
     /** @var list<string> long options every command recognises (Symfony's own global definition) */
@@ -66,6 +72,9 @@ final class Application extends BaseApplication
         $this->addCommand(new RecordCommand());
         $this->addCommand(new StatusCommand());
         $this->addCommand(new BaselinePathCommand());
+        $this->addCommand(new ExplainCommand());
+        $this->addCommand(new PruneCommand());
+        $this->addCommand(new VerifyCommand());
 
         $this->setDefaultCommand('run');
     }
@@ -102,6 +111,7 @@ final class Application extends BaseApplication
         $own = [];
         $passthrough = [];
         $inPassthrough = false;
+        $explainPathSeen = false;
         $count = count($rest);
 
         for ($i = 0; $i < $count; $i++) {
@@ -115,6 +125,15 @@ final class Application extends BaseApplication
 
             if ($token === '--') {
                 $inPassthrough = true;
+
+                continue;
+            }
+
+            // `explain` takes exactly one positional argument (the path itself), which
+            // must stay "own" rather than fall into the phpunit passthrough bucket below.
+            if ($command === 'explain' && ! $explainPathSeen && $token !== '' && $token[0] !== '-') {
+                $own[] = $token;
+                $explainPathSeen = true;
 
                 continue;
             }

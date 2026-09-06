@@ -18,6 +18,7 @@ use Manuglopez\Replay\Change\Git;
 use Manuglopez\Replay\Change\LastRunTree;
 use Manuglopez\Replay\Config;
 use Manuglopez\Replay\Console\ExplainFormatter;
+use Manuglopez\Replay\Hermeticity\DivergenceLog;
 use Manuglopez\Replay\Hermeticity\Policy;
 use Manuglopez\Replay\Hermeticity\Quarantine;
 use Manuglopez\Replay\PHPUnit\ConfigurationReader;
@@ -26,6 +27,7 @@ use Manuglopez\Replay\Record\DriverDetector;
 use Manuglopez\Replay\Record\RunPartial;
 use Manuglopez\Replay\Report\JUnitMerger;
 use Manuglopez\Replay\Report\Summary;
+use Manuglopez\Replay\Report\VerifySummary;
 use Manuglopez\Replay\Select\RunList;
 use Manuglopez\Replay\Select\RunListBuilder;
 use Manuglopez\Replay\Select\TestPaths;
@@ -87,6 +89,8 @@ final class RunPipeline
 
     private GraphStore $store;
 
+    private Quarantine $quarantine;
+
     private ?string $generatedXml = null;
 
     private ?string $runDir = null;
@@ -114,6 +118,34 @@ final class RunPipeline
             }
 
             return $this->runReplay($request);
+        } catch (Throwable $e) {
+            return $this->degrade($request, 'unexpected error (' . $e->getMessage() . '): degrading to a plain PHPUnit run');
+        } finally {
+            $this->cleanup();
+        }
+    }
+
+    /**
+     * `phpunit-replay verify` (SPEC.md §12.2): a full-suite recording pass that keeps the
+     * existing graph (rather than discarding it the way a plain `record` would) so every
+     * result can be compared against what a normal replay pass would have served from
+     * cache.
+     */
+    public function runVerify(RunRequest $request): int
+    {
+        $this->request = $request;
+        $this->startedAt = microtime(true);
+
+        try {
+            $reason = $this->resolveEnvironment($request);
+
+            if ($reason !== null) {
+                return $this->degrade($request, $reason);
+            }
+
+            $this->loadGraph($request);
+
+            return $this->verify($request);
         } catch (Throwable $e) {
             return $this->degrade($request, 'unexpected error (' . $e->getMessage() . '): degrading to a plain PHPUnit run');
         } finally {
@@ -162,6 +194,8 @@ final class RunPipeline
         $config = Config::load($root);
         $this->config = $config;
         $this->stateDir = StateDirectory::resolve($config->stateDir, $root);
+        $this->quarantine = Quarantine::load($this->stateDir);
+        $this->quarantine->setReleaseAfter($config->quarantineReleaseAfter);
 
         $branch = $this->git->currentBranch();
         $this->persist = $branch !== null;
@@ -254,9 +288,10 @@ final class RunPipeline
             $partial = RunPartial::load($this->runDir);
 
             if ($partial !== null) {
-                $updater = new GraphUpdater($this->graph, $this->root ?? '', new ContentKey($this->root ?? ''));
+                $updater = new GraphUpdater($this->graph, $this->root ?? '', new ContentKey($this->root ?? ''), $this->quarantine);
                 $updater->apply($partial, $this->branch, recordsEdges: false, complete: false);
                 $this->store->save($this->graph);
+                $this->quarantine->save($this->stateDir);
             }
         }
 
@@ -301,8 +336,9 @@ final class RunPipeline
 
         $complete = ! (bool) ($partial->meta['truncated'] ?? false) && in_array($exitCode, [0, 1], true);
 
-        $updater = new GraphUpdater($this->graph, $root, new ContentKey($root));
+        $updater = new GraphUpdater($this->graph, $root, new ContentKey($root), $this->quarantine);
         $updater->apply($partial, $this->branch, recordsEdges: true, complete: $complete);
+        $this->quarantine->save($this->stateDir);
 
         if ($this->fingerprintDrifted($partial)) {
             return $exitCode;
@@ -310,6 +346,138 @@ final class RunPipeline
 
         $this->persistAfterRun($updater, $complete, new ChangedFiles($root, $this->git));
         $this->printRecordSummary($partial);
+
+        return $exitCode;
+    }
+
+    /**
+     * SPEC.md §12.2: full suite, `record` mode, graph kept (unlike {@see self::runRecord()},
+     * which always starts from an empty one). Compares each new result against the one the
+     * graph already had for the same content key, so a normal replay pass would have served
+     * the cached result unchanged — any difference in result *class* is a divergence.
+     */
+    private function verify(RunRequest $request): int
+    {
+        if ($this->driverName === 'none') {
+            return $this->degrade($request, 'no coverage driver: install pcov or enable xdebug coverage');
+        }
+
+        $root = $this->root ?? $request->cwd;
+        $graph = $this->graph;
+
+        if ($graph === null) {
+            $graph = new Graph($root);
+            $graph->setFingerprint($this->fingerprint);
+            $graph->setDefaultBranch($this->defaultBranch);
+        }
+
+        $this->graph = $graph;
+        $oldResults = $graph->results($this->branch);
+
+        $xml = (new ConfigurationWriter())->withExtensionOnly($this->configFile);
+        $this->generatedXml = $xml;
+
+        $runId = self::newRunId();
+        $this->runDir = $this->stateDir . '/runs/' . $runId;
+
+        $exitCode = (new PhpunitProcess())->run(
+            $this->phpunitBin,
+            $xml,
+            $this->iniFlags,
+            $request->phpunitArgs,
+            true,
+            $this->baseEnv('record', $runId),
+            $root,
+        );
+
+        $partial = RunPartial::load($this->runDir);
+
+        if ($partial === null) {
+            Warnings::warn('the PHPUnit run produced no run partial; nothing verified');
+
+            return $exitCode;
+        }
+
+        $complete = ! (bool) ($partial->meta['truncated'] ?? false) && in_array($exitCode, [0, 1], true);
+
+        // No quarantine passed here: divergences are detected explicitly below (reason
+        // 'divergence', not the generic 'flip' GraphUpdater's own detection would use).
+        $updater = new GraphUpdater($graph, $root, new ContentKey($root));
+        $updater->apply($partial, $this->branch, recordsEdges: true, complete: $complete);
+
+        if ($this->fingerprintDrifted($partial)) {
+            return $exitCode;
+        }
+
+        $policy = new Policy($graph, $this->config, $this->quarantine, $root);
+
+        $wouldReplay = 0;
+        $divergenceEntries = [];
+
+        foreach ($graph->results($this->branch) as $testId => $new) {
+            $old = $oldResults[$testId] ?? null;
+
+            if ($old === null) {
+                continue;
+            }
+
+            $oldKey = $old['key'] ?? null;
+            $newKey = $new['key'] ?? null;
+
+            if ($oldKey === null || $newKey === null || $oldKey !== $newKey) {
+                continue;
+            }
+
+            $file = $new['file'] ?? '';
+            $excluded = $this->reader->shouldRerun($old['status']) || $file === '' || ! $policy->cacheable($file, $testId);
+
+            if (! $excluded) {
+                $wouldReplay++;
+            }
+
+            $oldClass = GraphUpdater::statusClass($old['status']);
+
+            if ($oldClass === 'fail') {
+                // A cached failure/error always reruns unconditionally regardless of the
+                // cache (SPEC §6.2), so it was never really "replayed" in the first
+                // place: recovering from one is not a divergence (GraphUpdater::detectFlip()
+                // excludes the same transition for the same reason).
+                continue;
+            }
+
+            if ($oldClass === GraphUpdater::statusClass($new['status'])) {
+                $this->quarantine->recordStable($testId);
+
+                continue;
+            }
+
+            $divergenceEntries[] = [
+                'testId' => $testId,
+                'k' => $newKey,
+                'cached' => $old['status'],
+                'actual' => $new['status'],
+                'sha' => $this->head,
+                'at' => time(),
+            ];
+
+            $this->quarantine->recordFlip($testId, $newKey, 'divergence');
+        }
+
+        $this->persistAfterRun($updater, $complete, new ChangedFiles($root, $this->git));
+        $this->quarantine->save($this->stateDir);
+
+        $lifetime = DivergenceLog::append($this->stateDir, $divergenceEntries);
+
+        $summary = new VerifySummary(
+            count($partial->results),
+            $wouldReplay,
+            count($divergenceEntries),
+            $lifetime['divergences'],
+            $lifetime['runs'],
+            $exitCode === 0 && $divergenceEntries === [],
+        );
+
+        fwrite(STDOUT, $summary->format() . PHP_EOL);
 
         return $exitCode;
     }
@@ -371,7 +539,7 @@ final class RunPipeline
         }
 
         if ($request->dryRun) {
-            $this->printSummary(0, $data['affected'], $data['uncached'], $data['replayed'], $data['saved'], true);
+            $this->printSummary(0, $data['affected'], $data['uncached'], $data['replayed'], $data['quarantined'], $data['saved'], true);
 
             return 0;
         }
@@ -379,14 +547,15 @@ final class RunPipeline
         if ($runList === []) {
             if ($changed !== []) {
                 if ($this->persist && (! $this->ciMode || $request->allowCiBaseline)) {
-                    (new GraphUpdater($graph, $root, new ContentKey($root)))
+                    (new GraphUpdater($graph, $root, new ContentKey($root), $this->quarantine))
                         ->finalizeBaseline($this->branch, $this->head, $this->git->branchNames());
                 }
 
                 $this->store->save($graph);
+                $this->quarantine->save($this->stateDir);
             }
 
-            $this->printSummary(0, 0, 0, $data['replayed'], $data['saved'], true);
+            $this->printSummary(0, 0, 0, $data['replayed'], $data['quarantined'], $data['saved'], true);
 
             if ($request->logJunit !== null) {
                 $merged = (new JUnitMerger())->merge(null, $graph->results($this->branch), $root);
@@ -451,8 +620,9 @@ final class RunPipeline
 
         $complete = ! (bool) ($partial->meta['truncated'] ?? false) && in_array($exitCode, [0, 1], true);
 
-        $updater = new GraphUpdater($graph, $root, new ContentKey($root));
+        $updater = new GraphUpdater($graph, $root, new ContentKey($root), $this->quarantine);
         $updater->apply($partial, $this->branch, recordsEdges: $recordsEdges, complete: $complete);
+        $this->quarantine->save($this->stateDir);
 
         if ($this->fingerprintDrifted($partial)) {
             return $exitCode;
@@ -487,6 +657,7 @@ final class RunPipeline
             $data['affected'],
             $data['uncached'],
             count($replayed),
+            $data['quarantined'],
             $savedSeconds,
             $exitCode === 0,
         );
@@ -505,7 +676,7 @@ final class RunPipeline
             $this->testPaths,
             $this->watch,
             $this->reader,
-            new Policy($graph, $this->config, Quarantine::load($this->stateDir), $root),
+            new Policy($graph, $this->config, $this->quarantine, $root),
             $root,
         );
 
@@ -556,7 +727,7 @@ final class RunPipeline
         return [$count, $saved];
     }
 
-    private function printSummary(int $executed, int $affected, int $uncached, int $replayed, float $saved, bool $success): void
+    private function printSummary(int $executed, int $affected, int $uncached, int $replayed, int $quarantined, float $saved, bool $success): void
     {
         $summary = new Summary(
             $executed,
@@ -564,7 +735,7 @@ final class RunPipeline
             $uncached,
             $replayed,
             0,
-            0,
+            $quarantined,
             $this->persist ? $this->branch : null,
             $this->persist ? $this->head : null,
             $saved,

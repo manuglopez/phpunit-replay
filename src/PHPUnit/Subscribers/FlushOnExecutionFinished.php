@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Manuglopez\Replay\PHPUnit\Subscribers;
 
 use Closure;
+use Manuglopez\Replay\Record\NotCacheableCollector;
 use Manuglopez\Replay\Record\Recorder;
 use Manuglopez\Replay\Record\ResultCollector;
 use Manuglopez\Replay\Record\RunWriter;
@@ -22,11 +23,12 @@ final readonly class FlushOnExecutionFinished implements ExecutionFinishedSubscr
         private Recorder $recorder,
         private ResultCollector $collector,
         private Closure $meta,
+        private ?NotCacheableCollector $notCacheable = null,
     ) {
     }
 
     public function notify(ExecutionFinished $event): void
     {
-        $this->runWriter->flush($this->recorder, $this->collector, ($this->meta)());
+        $this->runWriter->flush($this->recorder, $this->collector, ($this->meta)(), $this->notCacheable);
     }
 }

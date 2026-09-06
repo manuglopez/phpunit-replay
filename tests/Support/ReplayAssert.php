@@ -71,6 +71,11 @@ final class ReplayAssert
         return self::firstMatch('/(\d+) uncached\)/', $stdout);
     }
 
+    public static function quarantinedCount(string $stdout): int
+    {
+        return self::firstMatch('/(\d+) quarantined/', $stdout);
+    }
+
     private static function firstMatch(string $pattern, string $subject): int
     {
         if (preg_match($pattern, $subject, $matches) === 1) {

@@ -36,7 +36,7 @@ final class RunList
      * @param list<string> $rerun test files with at least one result that must be re-run
      * @param list<string> $quarantined test files with at least one non-cacheable test
      * @param array<string, int> $rerunStatuses test file => the status that forced the re-run
-     * @param array<string, string> $quarantineReasons test file => why it is not cacheable
+     * @param array<string, Reason> $quarantineReasons test file => why it is not cacheable
      */
     public function __construct(
         public readonly Selection $selection,
@@ -93,7 +93,7 @@ final class RunList
         }
 
         if (in_array($testFileRel, $this->quarantined, true)) {
-            $reasons[] = new Reason('Quarantine', $this->quarantineReasons[$testFileRel] ?? 'not cacheable');
+            $reasons[] = $this->quarantineReasons[$testFileRel] ?? new Reason('Quarantine', 'not cacheable');
         }
 
         return $reasons;

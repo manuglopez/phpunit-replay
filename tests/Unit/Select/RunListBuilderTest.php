@@ -169,7 +169,9 @@ final class RunListBuilderTest extends TestCase
 
         self::assertSame(['tests/FooTest.php'], $list->quarantined);
         self::assertSame(['tests/FooTest.php'], $list->files());
-        self::assertSame('Quarantine', $list->reasonsFor('tests/FooTest.php')[0]->rule);
+        // The `#[NotCacheable]` attribute and the automatic quarantine are reported
+        // under distinct rule names (SPEC.md §8, docs/INTERNALS.md "Hermeticity").
+        self::assertSame('NotCacheable', $list->reasonsFor('tests/FooTest.php')[0]->rule);
         self::assertSame('attribute', $list->reasonsFor('tests/FooTest.php')[0]->trigger);
     }
 

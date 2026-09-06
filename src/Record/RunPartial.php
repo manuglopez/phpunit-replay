@@ -20,6 +20,7 @@ final readonly class RunPartial
      * @param array<string, list<string>> $tables
      * @param array<string, mixed> $meta
      * @param list<string> $usesDatabase project-relative test files using a database-refreshing trait (Laravel, SPEC.md §10)
+     * @param list<string> $notCacheable project-relative test files and `Class::method` ids
      */
     public function __construct(
         public array $edges,
@@ -27,6 +28,7 @@ final readonly class RunPartial
         public array $tables,
         public array $meta,
         public array $usesDatabase = [],
+        public array $notCacheable = [],
     ) {
     }
 
@@ -55,12 +57,16 @@ final readonly class RunPartial
         $usesDatabaseJson = self::readMerged($runDir, 'uses_database.json');
         $rawUsesDatabase = $usesDatabaseJson !== null ? Json::decodeArray($usesDatabaseJson) : null;
 
+        $notCacheableJson = self::readMerged($runDir, 'not_cacheable.json');
+        $rawNotCacheable = $notCacheableJson !== null ? Json::decodeArray($notCacheableJson) : null;
+
         return new self(
             self::normalizeStringListMap($rawEdges ?? []),
             self::normalizeResults($rawResults),
             self::normalizeStringListMap($rawTables ?? []),
             self::normalizeMeta($rawMeta),
             self::normalizeStringList($rawUsesDatabase ?? []),
+            self::normalizeStringList($rawNotCacheable ?? []),
         );
     }
 
@@ -71,8 +77,9 @@ final readonly class RunPartial
      * back into a single logical file before the caller's normal decode/normalise pipeline
      * runs, so a single non-parallel `<basename>` and a merged Paratest run look identical
      * from here on. `meta.json` and `results.json` have their own merge rule; every other
-     * basename (`edges.json`, `tables.json`, `uses_database.json`, and any future one written
-     * the same way) is a generic union — no change needed here when one is added.
+     * basename (`edges.json`, `tables.json`, `uses_database.json`, `not_cacheable.json`, and
+     * any future one written the same way) is a generic union — no change needed here when
+     * one is added.
      */
     private static function readMerged(string $runDir, string $basename): ?string
     {
@@ -167,9 +174,9 @@ final readonly class RunPartial
     }
 
     /**
-     * Everything else: a plain list is merged as a deduplicated list (`uses_database.json`);
-     * a map is merged key by key, concatenating and deduplicating list values (`edges.json`,
-     * `tables.json`, and any future basename of the same shape).
+     * Everything else: a plain list is merged as a deduplicated list (`uses_database.json`,
+     * `not_cacheable.json`); a map is merged key by key, concatenating and deduplicating list
+     * values (`edges.json`, `tables.json`, and any future basename of the same shape).
      *
      * @param list<array<mixed>|null> $partials
      * @return array<mixed>

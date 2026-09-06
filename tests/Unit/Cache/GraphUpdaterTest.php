@@ -7,6 +7,7 @@ namespace Manuglopez\Replay\Tests\Unit\Cache;
 use Manuglopez\Replay\Cache\ContentKey;
 use Manuglopez\Replay\Cache\Graph;
 use Manuglopez\Replay\Cache\GraphUpdater;
+use Manuglopez\Replay\Hermeticity\Quarantine;
 use Manuglopez\Replay\Record\RunPartial;
 use Manuglopez\Replay\Tests\Support\TempDir;
 use PHPUnit\Framework\TestCase;
@@ -46,9 +47,9 @@ final class GraphUpdaterTest extends TestCase
         return $result;
     }
 
-    private function updater(Graph $graph): GraphUpdater
+    private function updater(Graph $graph, ?Quarantine $quarantine = null): GraphUpdater
     {
-        return new GraphUpdater($graph, $this->root, new ContentKey($this->root));
+        return new GraphUpdater($graph, $this->root, new ContentKey($this->root), $quarantine);
     }
 
     public function test_apply_with_edges_and_results_sets_edges_results_and_keys(): void
@@ -167,5 +168,262 @@ final class GraphUpdaterTest extends TestCase
         self::assertSame('new-feature-sha', $graph->recordedSha('feature'));
         self::assertTrue($graph->isBaselineComplete('feature'));
         self::assertEqualsCanonicalizing(['main', 'feature'], $graph->branches());
+    }
+
+    // -- hermeticity: flip detection (SPEC.md §8.3) -------------------------
+
+    public function test_apply_records_a_flip_when_the_content_key_is_unchanged_but_the_status_class_changes(): void
+    {
+        $this->write('tests/FooTest.php');
+        $this->write('src/Foo.php');
+
+        $graph = new Graph($this->root);
+        $quarantine = new Quarantine();
+
+        $first = new RunPartial(
+            edges: ['tests/FooTest.php' => ['src/Foo.php']],
+            results: ['Foo::test_it' => $this->makeResult(status: 0, file: 'tests/FooTest.php')],
+            tables: [],
+            meta: [],
+        );
+
+        $this->updater($graph, $quarantine)->apply($first, 'main', recordsEdges: true, complete: false);
+
+        self::assertFalse($quarantine->isQuarantined('Foo::test_it'));
+
+        // Same file contents (so the recomputed content key is identical), but the
+        // result flips from pass (class "pass") to failure (class "fail").
+        $second = new RunPartial(
+            edges: ['tests/FooTest.php' => ['src/Foo.php']],
+            results: ['Foo::test_it' => $this->makeResult(status: 7, file: 'tests/FooTest.php', message: 'boom')],
+            tables: [],
+            meta: [],
+        );
+
+        $this->updater($graph, $quarantine)->apply($second, 'main', recordsEdges: true, complete: false);
+
+        self::assertTrue($quarantine->isQuarantined('Foo::test_it'));
+        $entry = $quarantine->all()['Foo::test_it'];
+        self::assertSame(1, $entry['flips']);
+        self::assertSame(0, $entry['stable']);
+        self::assertSame('flip', $entry['reason']);
+    }
+
+    public function test_apply_records_a_stable_pass_when_the_status_class_is_unchanged(): void
+    {
+        $this->write('tests/FooTest.php');
+        $this->write('src/Foo.php');
+
+        $graph = new Graph($this->root);
+        $quarantine = new Quarantine();
+
+        $passing = new RunPartial(
+            edges: ['tests/FooTest.php' => ['src/Foo.php']],
+            results: ['Foo::test_it' => $this->makeResult(status: 0, file: 'tests/FooTest.php')],
+            tables: [],
+            meta: [],
+        );
+        $this->updater($graph, $quarantine)->apply($passing, 'main', recordsEdges: true, complete: false);
+
+        $failing = new RunPartial(
+            edges: ['tests/FooTest.php' => ['src/Foo.php']],
+            results: ['Foo::test_it' => $this->makeResult(status: 7, file: 'tests/FooTest.php', message: 'boom')],
+            tables: [],
+            meta: [],
+        );
+        $this->updater($graph, $quarantine)->apply($failing, 'main', recordsEdges: true, complete: false);
+
+        self::assertSame(1, $quarantine->all()['Foo::test_it']['flips']);
+
+        // Recovering from a cached failure/error is excluded from flip/stable tracking
+        // entirely (SPEC §15 scenario 5: a cached "fail" class always reruns
+        // unconditionally, so this transition is expected, not a signal either way).
+        $recovering = new RunPartial(
+            edges: ['tests/FooTest.php' => ['src/Foo.php']],
+            results: ['Foo::test_it' => $this->makeResult(status: 0, file: 'tests/FooTest.php')],
+            tables: [],
+            meta: [],
+        );
+        $this->updater($graph, $quarantine)->apply($recovering, 'main', recordsEdges: true, complete: false);
+
+        $entry = $quarantine->all()['Foo::test_it'];
+        self::assertSame(1, $entry['flips'], 'recovering from a cached failure is not itself a flip');
+        self::assertSame(0, $entry['stable']);
+
+        // Now the cached status is "pass" again: the same content key producing the
+        // same class ("pass") once more is a genuine stable pass.
+        $stillPassing = new RunPartial(
+            edges: ['tests/FooTest.php' => ['src/Foo.php']],
+            results: ['Foo::test_it' => $this->makeResult(status: 0, file: 'tests/FooTest.php')],
+            tables: [],
+            meta: [],
+        );
+        $this->updater($graph, $quarantine)->apply($stillPassing, 'main', recordsEdges: true, complete: false);
+
+        $entry = $quarantine->all()['Foo::test_it'];
+        self::assertSame(1, $entry['flips']);
+        self::assertSame(1, $entry['stable']);
+    }
+
+    public function test_apply_does_not_detect_a_flip_when_recovering_from_a_cached_failure(): void
+    {
+        $this->write('tests/FooTest.php');
+        $this->write('src/Foo.php');
+
+        $graph = new Graph($this->root);
+        $quarantine = new Quarantine();
+
+        // Recorded failing from the start (as in SPEC §15 scenario 5): there is no
+        // "old" result yet, so nothing is tracked on this first pass.
+        $failing = new RunPartial(
+            edges: ['tests/FooTest.php' => ['src/Foo.php']],
+            results: ['Foo::test_it' => $this->makeResult(status: 7, file: 'tests/FooTest.php', message: 'boom')],
+            tables: [],
+            meta: [],
+        );
+        $this->updater($graph, $quarantine)->apply($failing, 'main', recordsEdges: true, complete: false);
+
+        self::assertSame([], $quarantine->all());
+
+        // Same content key, now passing: recovering from a cached "fail" class must
+        // never quarantine the test (it would otherwise force it to run forever).
+        $recovered = new RunPartial(
+            edges: ['tests/FooTest.php' => ['src/Foo.php']],
+            results: ['Foo::test_it' => $this->makeResult(status: 0, file: 'tests/FooTest.php')],
+            tables: [],
+            meta: [],
+        );
+        $this->updater($graph, $quarantine)->apply($recovered, 'main', recordsEdges: true, complete: false);
+
+        self::assertFalse($quarantine->isQuarantined('Foo::test_it'));
+        self::assertSame([], $quarantine->all());
+    }
+
+    public function test_apply_does_not_detect_a_flip_when_the_content_key_changed_too(): void
+    {
+        $this->write('tests/FooTest.php');
+        $this->write('src/Foo.php', "<?php\n\$x = 1;\n");
+
+        $graph = new Graph($this->root);
+        $quarantine = new Quarantine();
+
+        $first = new RunPartial(
+            edges: ['tests/FooTest.php' => ['src/Foo.php']],
+            results: ['Foo::test_it' => $this->makeResult(status: 0, file: 'tests/FooTest.php')],
+            tables: [],
+            meta: [],
+        );
+        $this->updater($graph, $quarantine)->apply($first, 'main', recordsEdges: true, complete: false);
+
+        // The dependency's *code* changes (not just a comment), so the recomputed
+        // content key differs too: this is an ordinary "the test now covers different
+        // code" case, not a flip.
+        $this->write('src/Foo.php', "<?php\n\$x = 2;\n");
+
+        $second = new RunPartial(
+            edges: ['tests/FooTest.php' => ['src/Foo.php']],
+            results: ['Foo::test_it' => $this->makeResult(status: 7, file: 'tests/FooTest.php', message: 'boom')],
+            tables: [],
+            meta: [],
+        );
+        $this->updater($graph, $quarantine)->apply($second, 'main', recordsEdges: true, complete: false);
+
+        self::assertSame([], $quarantine->all());
+    }
+
+    public function test_apply_without_a_quarantine_never_detects_flips(): void
+    {
+        $this->write('tests/FooTest.php');
+        $this->write('src/Foo.php');
+
+        $graph = new Graph($this->root);
+
+        $first = new RunPartial(
+            edges: ['tests/FooTest.php' => ['src/Foo.php']],
+            results: ['Foo::test_it' => $this->makeResult(status: 0, file: 'tests/FooTest.php')],
+            tables: [],
+            meta: [],
+        );
+        $this->updater($graph)->apply($first, 'main', recordsEdges: true, complete: false);
+
+        $second = new RunPartial(
+            edges: ['tests/FooTest.php' => ['src/Foo.php']],
+            results: ['Foo::test_it' => $this->makeResult(status: 7, file: 'tests/FooTest.php', message: 'boom')],
+            tables: [],
+            meta: [],
+        );
+
+        // No quarantine passed to updater(): must not throw, and there is nothing else to assert on.
+        $this->updater($graph)->apply($second, 'main', recordsEdges: true, complete: false);
+
+        $result = $graph->result('main', 'Foo::test_it');
+        self::assertNotNull($result);
+        self::assertSame(7, $result['status']);
+    }
+
+    // -- hermeticity: not_cacheable merge (SPEC.md §8) -----------------------
+
+    public function test_apply_keeps_a_not_cacheable_entry_for_a_file_the_run_did_not_touch(): void
+    {
+        $this->write('tests/FooTest.php');
+        $this->write('tests/BarTest.php');
+        $this->write('src/Foo.php');
+
+        $graph = new Graph($this->root);
+        $graph->setNotCacheable(['tests/FooTest.php', 'tests/BarTest.php']);
+
+        $partial = new RunPartial(
+            edges: ['tests/FooTest.php' => ['src/Foo.php']],
+            results: ['Foo::test_it' => $this->makeResult(file: 'tests/FooTest.php')],
+            tables: [],
+            meta: [],
+            notCacheable: ['tests/FooTest.php'],
+        );
+
+        $this->updater($graph)->apply($partial, 'main', recordsEdges: true, complete: false);
+
+        self::assertTrue($graph->isNotCacheable('tests/FooTest.php'));
+        self::assertTrue($graph->isNotCacheable('tests/BarTest.php'));
+    }
+
+    public function test_apply_drops_a_not_cacheable_entry_for_an_executed_file_the_partial_no_longer_declares(): void
+    {
+        $this->write('tests/FooTest.php');
+        $this->write('src/Foo.php');
+
+        $graph = new Graph($this->root);
+        $graph->setNotCacheable(['tests/FooTest.php']);
+
+        $partial = new RunPartial(
+            edges: ['tests/FooTest.php' => ['src/Foo.php']],
+            results: ['Foo::test_it' => $this->makeResult(file: 'tests/FooTest.php')],
+            tables: [],
+            meta: [],
+            notCacheable: [],
+        );
+
+        $this->updater($graph)->apply($partial, 'main', recordsEdges: true, complete: false);
+
+        self::assertFalse($graph->isNotCacheable('tests/FooTest.php'));
+    }
+
+    public function test_apply_adds_a_new_not_cacheable_id_declared_by_the_partial(): void
+    {
+        $this->write('tests/FooTest.php');
+        $this->write('src/Foo.php');
+
+        $graph = new Graph($this->root);
+
+        $partial = new RunPartial(
+            edges: ['tests/FooTest.php' => ['src/Foo.php']],
+            results: ['Foo::test_it' => $this->makeResult(file: 'tests/FooTest.php')],
+            tables: [],
+            meta: [],
+            notCacheable: ['Foo::test_it'],
+        );
+
+        $this->updater($graph)->apply($partial, 'main', recordsEdges: true, complete: false);
+
+        self::assertTrue($graph->isNotCacheable('Foo::test_it'));
     }
 }

@@ -6,6 +6,7 @@ namespace Manuglopez\Replay\Cache;
 
 use Manuglopez\Replay\Support\Json;
 use Manuglopez\Replay\Support\Paths;
+use Manuglopez\Replay\Version;
 
 /**
  * Derived from Pest (© Nuno Maduro, MIT). @see https://github.com/pestphp/pest/blob/17d709e/src/Plugins/Tia/Graph.php
@@ -414,7 +415,6 @@ final class Graph
         $known = array_unique(array_merge(
             array_keys($this->edges),
             array_keys($this->testTables),
-            $this->notCacheable,
         ));
 
         $edgesChanged = false;
@@ -432,6 +432,18 @@ final class Graph
             unset($this->testTables[$testRel]);
 
             $this->notCacheable = array_values(array_diff($this->notCacheable, [$testRel]));
+        }
+
+        // `not_cacheable` may also hold `Class::method` ids (SPEC.md §8 rule 1, a
+        // method-level attribute) alongside file paths (a class-level one): an id is not
+        // a path `is_file()` could ever meaningfully check, so only file-shaped entries
+        // are pruned here for being gone from disk.
+        foreach ($this->notCacheable as $entry) {
+            if (str_contains($entry, '::') || is_file($this->absolute($entry))) {
+                continue;
+            }
+
+            $this->notCacheable = array_values(array_diff($this->notCacheable, [$entry]));
         }
 
         if ($edgesChanged) {
@@ -833,6 +845,7 @@ final class Graph
 
         $payload = [
             'schema' => self::SCHEMA,
+            'generator' => 'manuglopez/phpunit-replay ' . Version::ID,
             'fingerprint' => $this->fingerprint,
             'files' => $sortedFiles,
             'edges' => $edges,

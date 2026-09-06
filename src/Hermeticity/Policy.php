@@ -6,14 +6,13 @@ namespace Manuglopez\Replay\Hermeticity;
 
 use Manuglopez\Replay\Cache\Graph;
 use Manuglopez\Replay\Config;
+use Manuglopez\Replay\Support\Glob;
 
 /**
- * Whether a given test may be replayed from cache at all (SPEC.md §8).
- *
- * Skeleton: only rule 1 (the `#[NotCacheable]` attribute, persisted in the graph's
- * `not_cacheable` section) is honoured. The `never_cache` globs (rule 2), the
- * automatic quarantine (rule 3) and the optional heuristics (rule 4) are wired into
- * the constructor but not consulted yet; they belong to the hermeticity work.
+ * Whether a given test may be replayed from cache at all (SPEC.md §8): the `#[NotCacheable]`
+ * attribute (persisted in the graph's `not_cacheable` section), the `never_cache` glob
+ * config, and automatic quarantine. Rule 4 (the optional heuristics) is not implemented:
+ * SPEC §8 keeps it advisory only ("no se descachea automáticamente").
  */
 final class Policy
 {
@@ -43,13 +42,25 @@ final class Policy
     /** @param string $testId `Class::method`, or `Class::method#dataSetName` for a data set. */
     public function cacheable(string $testFileRel, string $testId): bool
     {
-        return ! $this->graph->isNotCacheable($testFileRel) && ! $this->graph->isNotCacheable($testId);
+        return $this->reason($testFileRel, $testId) === null;
     }
 
-    /** `'attribute'` when the graph marks the file or the test id as non-cacheable, else null. */
+    /** `'attribute'` | `'never_cache'` | `'quarantine'` | `null` (cacheable). */
     public function reason(string $testFileRel, string $testId): ?string
     {
-        return $this->cacheable($testFileRel, $testId) ? null : 'attribute';
+        if ($this->graph->isNotCacheable($testFileRel) || $this->graph->isNotCacheable($testId)) {
+            return 'attribute';
+        }
+
+        if ($this->matchesNeverCache($testFileRel)) {
+            return 'never_cache';
+        }
+
+        if ($this->quarantine->isQuarantined($testId)) {
+            return 'quarantine';
+        }
+
+        return null;
     }
 
     /**
@@ -65,7 +76,7 @@ final class Policy
         $files = [];
 
         foreach ($allTestFiles as $testFile) {
-            if ($this->graph->isNotCacheable($testFile)) {
+            if (! $this->cacheable($testFile, $testFile)) {
                 $files[$testFile] = true;
             }
         }
@@ -76,7 +87,7 @@ final class Policy
             }
 
             foreach ($testIds as $testId) {
-                if ($this->graph->isNotCacheable($testId)) {
+                if (! $this->cacheable($testFile, $testId)) {
                     $files[$testFile] = true;
 
                     break;
@@ -88,5 +99,16 @@ final class Policy
         sort($out);
 
         return $out;
+    }
+
+    private function matchesNeverCache(string $testFileRel): bool
+    {
+        foreach ($this->config->neverCache as $pattern) {
+            if (Glob::matches($pattern, $testFileRel)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 }
