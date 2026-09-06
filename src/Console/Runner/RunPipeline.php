@@ -241,8 +241,7 @@ final class RunPipeline
         $runId = self::newRunId();
         $this->runDir = $this->stateDir . '/runs/' . $runId;
 
-        $exitCode = (new PhpunitProcess())->run(
-            $this->phpunitBin,
+        $exitCode = $this->runPhpunit(
             $xml,
             [],
             $request->phpunitArgs,
@@ -283,8 +282,7 @@ final class RunPipeline
         $runId = self::newRunId();
         $this->runDir = $this->stateDir . '/runs/' . $runId;
 
-        $exitCode = (new PhpunitProcess())->run(
-            $this->phpunitBin,
+        $exitCode = $this->runPhpunit(
             $xml,
             $this->iniFlags,
             $request->phpunitArgs,
@@ -436,8 +434,7 @@ final class RunPipeline
             $phpunitArgsForRun[] = $junitPath;
         }
 
-        $exitCode = (new PhpunitProcess())->run(
-            $this->phpunitBin,
+        $exitCode = $this->runPhpunit(
             $xml,
             $recordsEdges ? $this->iniFlags : [],
             $phpunitArgsForRun,
@@ -645,6 +642,32 @@ final class RunPipeline
             $this->ciMode,
             $this->request->allowCiBaseline,
         );
+    }
+
+    /**
+     * The one branch that decides between {@see PhpunitProcess} and {@see ParatestProcess}
+     * (SPEC.md §13, `--parallel`/`-p`): every other call site in this class hands off here
+     * instead of constructing a process runner directly.
+     *
+     * @param list<string> $iniFlags
+     * @param list<string> $phpunitArgs
+     * @param array<string, string> $env
+     */
+    private function runPhpunit(
+        ?string $configFile,
+        array $iniFlags,
+        array $phpunitArgs,
+        bool $appendNoCoverage,
+        array $env,
+        string $cwd,
+    ): int {
+        if ($this->request->parallel === null) {
+            return (new PhpunitProcess())->run($this->phpunitBin, $configFile, $iniFlags, $phpunitArgs, $appendNoCoverage, $env, $cwd);
+        }
+
+        $paratestBin = ($this->root ?? $cwd) . '/vendor/bin/paratest';
+
+        return (new ParatestProcess())->run($paratestBin, $this->phpunitBin, $configFile, $iniFlags, $phpunitArgs, $appendNoCoverage, $env, $cwd, $this->request->parallel);
     }
 
     private function degrade(RunRequest $request, string $reason): int

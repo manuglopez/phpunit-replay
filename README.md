@@ -124,6 +124,29 @@ explicit path, `--covers`, `--uses` — disables the selection logic for that ru
 exactly what you asked for, and the extension only refreshes results for the tests that ran
 (edges and the baseline sha are left untouched).
 
+### Parallel (Paratest)
+
+Add `--parallel`/`-p` to `run` (the default command) or `record` to run the same filtered
+configuration through [Paratest](https://github.com/paratestphp/paratest) instead of a single
+`vendor/bin/phpunit` process:
+
+```sh
+phpunit-replay --parallel          # Paratest's own auto-detected process count
+phpunit-replay -p 4                # 4 worker processes
+phpunit-replay record -p 4         # a full parallel recording pass
+```
+
+Paratest is an optional `require-dev` dependency (`brianium/paratest`). When `--parallel`/`-p`
+is given but `vendor/bin/paratest` isn't installed, the wrapper warns on stderr and falls back
+to a sequential PHPUnit run rather than failing.
+
+Each worker writes its own `runs/<run-id>/worker-<TEST_TOKEN>-*.json` partial instead of a
+single one; the wrapper merges them back together before updating the graph — edges by union,
+results last-write-wins, everything else (tables, database usage) by union — so the recorded
+baseline and the summary line are the same regardless of how many processes ran it. The
+coverage driver's ini flags travel to Paratest's own worker processes via `--passthru-php`
+(Paratest's own process is never instrumented).
+
 ### In-process mode (planned, phase 2)
 
 For situations where PHPUnit needs to see the whole suite regardless — an IDE launching `phpunit`

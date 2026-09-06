@@ -24,6 +24,7 @@ final class RecordCommand extends Command
             ->setName('record')
             ->setDescription('Runs the full suite and records a fresh baseline.')
             ->addOption('fresh', null, InputOption::VALUE_NONE, 'Ignore any cached baseline before recording.')
+            ->addOption('parallel', 'p', InputOption::VALUE_OPTIONAL, 'Run through Paratest. N processes, or Paratest\'s own auto-detected count when omitted (SPEC §13).', false)
             ->addArgument('phpunit-args', InputArgument::IS_ARRAY | InputArgument::OPTIONAL, 'Everything forwarded to vendor/bin/phpunit.')
         ;
 
@@ -45,6 +46,7 @@ final class RecordCommand extends Command
             logJunit: null,
             allowCiBaseline: false,
             record: true,
+            parallel: RunRequest::parseParallel($input->getOption('parallel')),
         );
 
         return (new RunPipeline())->run($request);

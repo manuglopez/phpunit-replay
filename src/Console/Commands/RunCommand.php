@@ -30,6 +30,7 @@ final class RunCommand extends Command
             ->addOption('dry-run', null, InputOption::VALUE_NONE, 'Print what would run without running it; implies --explain.')
             ->addOption('log-junit', null, InputOption::VALUE_REQUIRED, 'Write a merged JUnit report (real + replayed results) to FILE.')
             ->addOption('allow-ci-baseline', null, InputOption::VALUE_NONE, 'Allow a CI run to publish a branch baseline (SPEC §12.1).')
+            ->addOption('parallel', 'p', InputOption::VALUE_OPTIONAL, 'Run through Paratest. N processes, or Paratest\'s own auto-detected count when omitted (SPEC §13).', false)
             ->addOption('in-process', null, InputOption::VALUE_NONE, 'Accepted for forward compatibility: in-process mode arrives in phase 2.')
             ->addOption('filtered', null, InputOption::VALUE_NONE, 'Run in filtered mode (the default, and phase 1\'s only mode).')
             ->addArgument('phpunit-args', InputArgument::IS_ARRAY | InputArgument::OPTIONAL, 'Everything forwarded to vendor/bin/phpunit.')
@@ -59,6 +60,7 @@ final class RunCommand extends Command
             logJunit: is_string($logJunit) ? $logJunit : null,
             allowCiBaseline: $input->getOption('allow-ci-baseline') === true,
             record: false,
+            parallel: RunRequest::parseParallel($input->getOption('parallel')),
         );
 
         return (new RunPipeline())->run($request);

@@ -17,10 +17,13 @@ final class RunWriter
 {
     private bool $truncated = false;
 
+    private readonly string $workerPrefix;
+
     public function __construct(
         private readonly string $runDir,
         private readonly string $projectRoot,
     ) {
+        $this->workerPrefix = self::resolveWorkerPrefix();
     }
 
     /** ExecutionAborted / Bail: the run did not complete a full pass. */
@@ -33,6 +36,24 @@ final class RunWriter
     public function isTruncated(): bool
     {
         return $this->truncated;
+    }
+
+    /**
+     * `<runDir>/<basename>`, prefixed `worker-<TEST_TOKEN>-` when Paratest set that env var
+     * (SPEC.md §13): every file this writer produces goes through here so a Paratest worker
+     * never collides with its siblings, and {@see \Manuglopez\Replay\Record\RunPartial::load()}
+     * can discover and merge them back together.
+     */
+    private function pathFor(string $basename): string
+    {
+        return $this->runDir . '/' . $this->workerPrefix . $basename;
+    }
+
+    private static function resolveWorkerPrefix(): string
+    {
+        $token = getenv('TEST_TOKEN');
+
+        return (is_string($token) && $token !== '') ? 'worker-' . $token . '-' : '';
     }
 
     /**
@@ -57,10 +78,10 @@ final class RunWriter
             return false;
         }
 
-        $ok = AtomicFile::write($this->runDir . '/edges.json', $edgesJson);
-        $ok = AtomicFile::write($this->runDir . '/results.json', $resultsJson) && $ok;
-        $ok = AtomicFile::write($this->runDir . '/tables.json', $tablesJson) && $ok;
-        $ok = AtomicFile::write($this->runDir . '/meta.json', $metaJson) && $ok;
+        $ok = AtomicFile::write($this->pathFor('edges.json'), $edgesJson);
+        $ok = AtomicFile::write($this->pathFor('results.json'), $resultsJson) && $ok;
+        $ok = AtomicFile::write($this->pathFor('tables.json'), $tablesJson) && $ok;
+        $ok = AtomicFile::write($this->pathFor('meta.json'), $metaJson) && $ok;
 
         return $ok;
     }
@@ -94,7 +115,7 @@ final class RunWriter
             return false;
         }
 
-        return AtomicFile::write($this->runDir . '/uses_database.json', $json);
+        return AtomicFile::write($this->pathFor('uses_database.json'), $json);
     }
 
     /**

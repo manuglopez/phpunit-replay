@@ -30,6 +30,7 @@ final class RunWriterTest extends TestCase
     {
         TempDir::remove($this->projectRoot);
         TempDir::remove($this->runDir);
+        putenv('TEST_TOKEN');
 
         parent::tearDown();
     }
@@ -213,5 +214,42 @@ final class RunWriterTest extends TestCase
         $partial = RunPartial::load($this->runDir);
         self::assertNotNull($partial);
         self::assertSame(['tests/PostsTest.php', 'tests/UsersTest.php'], $partial->usesDatabase);
+    }
+
+    #[Test]
+    public function flush_prefixes_every_file_with_worker_test_token_when_the_env_var_is_set(): void
+    {
+        putenv('TEST_TOKEN=3');
+
+        $recorder = new Recorder(new FakeCoverageDriver([]));
+        $collector = new ResultCollector();
+        $writer = new RunWriter($this->runDir, $this->projectRoot);
+        $writer->flush($recorder, $collector, ['driver' => 'fake']);
+        $writer->writeUsesDatabase([]);
+
+        self::assertFileDoesNotExist($this->runDir . '/edges.json');
+        self::assertFileDoesNotExist($this->runDir . '/results.json');
+        self::assertFileDoesNotExist($this->runDir . '/tables.json');
+        self::assertFileDoesNotExist($this->runDir . '/meta.json');
+        self::assertFileDoesNotExist($this->runDir . '/uses_database.json');
+
+        self::assertFileExists($this->runDir . '/worker-3-edges.json');
+        self::assertFileExists($this->runDir . '/worker-3-results.json');
+        self::assertFileExists($this->runDir . '/worker-3-tables.json');
+        self::assertFileExists($this->runDir . '/worker-3-meta.json');
+        self::assertFileExists($this->runDir . '/worker-3-uses_database.json');
+    }
+
+    #[Test]
+    public function flush_does_not_prefix_files_when_test_token_is_not_set(): void
+    {
+        putenv('TEST_TOKEN');
+
+        $recorder = new Recorder(new FakeCoverageDriver([]));
+        $collector = new ResultCollector();
+        (new RunWriter($this->runDir, $this->projectRoot))->flush($recorder, $collector, ['driver' => 'fake']);
+
+        self::assertFileExists($this->runDir . '/results.json');
+        self::assertFileDoesNotExist($this->runDir . '/worker--results.json');
     }
 }
