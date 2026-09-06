@@ -198,3 +198,19 @@ inherit `develop`'s baseline and hotfixes to inherit `main`'s. Phase 3 adds `bas
 wins (`Change\BaselineResolver`). `default_branch` stays as the single-candidate shorthand. Recommended
 CI: `develop` and `main` both run `run --allow-ci-baseline && push --graph`; only structural drift forces
 a full record. Contract in docs/INTERNALS.md "Nearest baseline".
+
+## D-040 — `LaravelDetector::enabled()` is file/config based
+
+`Laravel\LaravelDetector::enabled()` checks for `artisan` and `laravel` config being `auto`/`on` because the wrapper runs with the package's own autoloader where no Illuminate class is loaded. `LaravelIntegration::shouldArm()` keeps the `class_exists(\Illuminate\Container\Container::class)` check for the only place that needs it — arming the runtime trackers inside the booted PHPUnit process.
+
+## D-041 — Summary counters all count tests
+
+`executed = affected + uncached + quarantined` (SPEC §3.1.10 example). Each executed test is classified by its file's primary reason in the `RunList`. `--dry-run` cannot classify tests before running, so it prints `Report\DryRunSummary`: `Replay  N test files would run (a affected, u uncached, q quarantined), R tests would replay`.
+
+## D-042 — `Selector::default()` and `RunListBuilder` accept optional extra rules
+
+`Selector::default()` and `RunListBuilder` accept optional extra rules; `LaravelIntegration::rulesFor()` returns the Laravel rules or none, used by the wrapper, the in-process state and `explain`. Rule order: Migration, PhpEdge, TestFile, Sibling, Blade, Watch.
+
+## D-043 — `Graph::stats()`/`status` gained a `tables` counter
+
+`Graph::stats()`/`status` gained a `tables` counter; `LaravelIntegration::augment()` rebuilds `RunPartial` with named arguments so every field (incl. `notCacheable`) survives. Augmentation runs in every persist path (wrapper record/replay/results-only/verify and in-process) only when Laravel is enabled for the project.
