@@ -424,3 +424,53 @@ final class Tests\Support\FixtureProject // copies tests/Fixtures/Projects/<name
 ```
 
 Unit tests never touch `$HOME`; they pass an explicit `stateDir` inside a TempDir.
+
+## Wave 2 additions
+
+### Graph updating (SPEC §7.3) — single implementation shared by wrapper and extension
+
+```php
+final class Cache\GraphUpdater
+{
+    public function __construct(Graph $graph, string $projectRoot, ContentKey $contentKey);
+    /**
+     * Applies a run partial. $complete = the run covered everything it was asked to and was not truncated.
+     * - always: merge results of test files the graph knows (or all, when $recordsEdges); recompute `key` for touched test files
+     * - when $recordsEdges: replaceEdges for executed test files, markKnownTestFiles(executed files), replaceTestTables
+     * - when $complete && $recordsEdges: pruneStaleResults(branch, touched, keep ids), pruneMissingTestFiles, pruneResultsForMissingFiles
+     * @return array{touched: list<string>, results: int, edges: int}
+     */
+    public function apply(RunPartial $partial, string $branch, bool $recordsEdges, bool $complete): array;
+    /** After a complete pass: setRecordedSha + markBaselineComplete + pruneMissingBranches(keep). */
+    public function finalizeBaseline(string $branch, ?string $sha, array $keepBranches): void;
+}
+```
+
+### Generated PHPUnit configuration (filtered mode, SPEC §3.1.6)
+
+```php
+final class PHPUnit\ConfigurationWriter
+{
+    /**
+     * Loads the user's phpunit.xml(.dist) as DOM, replaces <testsuites>/<testsuite> with a single
+     * <testsuite name="phpunit-replay"> listing one <file> per entry of $testFiles (relative to the
+     * XML's directory), injects <extensions><bootstrap class="Manuglopez\Replay\PHPUnit\ReplayExtension"/>
+     * when absent, keeps everything else verbatim, and writes the result next to the source file
+     * as `.phpunit-replay.xml` (same directory → relative paths keep working). Returns the written path.
+     * @param list<string> $testFiles project-relative
+     */
+    public function write(string $sourceXml, array $testFiles, string $projectRoot): string;
+    public static function TEMP_BASENAME = '.phpunit-replay.xml';
+}
+```
+
+### Wrapper pipeline
+
+```php
+final class Console\Runner\PhpunitProcess     // builds+runs `php -d pcov.enabled=1 -d pcov.directory=<root> <root>/vendor/bin/phpunit -c <xml> --no-coverage <args>` with env; streams output through; returns exit code
+final class Console\Runner\RunPipeline        // SPEC §3.1 steps 1–12; every failure path = warn to stderr + run plain phpunit
+final class Report\Summary                    // formats "Replay  ✓ N executed (a affected, u uncached) · M replayed · q quarantined · baseline <branch>@<sha7> · saved Xs"
+final class Report\JUnitMerger                // merge(realJunitXml|null, array<string, TestResultArray> replayed, string $projectRoot): string  — adds <testcase ... ><properties><property name="replayed" value="true"/></properties>
+```
+
+Exit code of the wrapper is always PHPUnit's exit code (0 when nothing needed to run).
