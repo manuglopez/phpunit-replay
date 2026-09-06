@@ -9,9 +9,11 @@ use Manuglopez\Replay\Report\Format;
 /**
  * Renders `phpunit-replay status` (SPEC.md §11): project root, git identity, state
  * directory, coverage driver, framework auto-detection and, once a baseline exists,
- * graph statistics, per-branch results and fingerprint drift markers.
+ * graph statistics, per-branch results, fingerprint drift markers, quarantine,
+ * non-cacheable tests and the lifetime `verify` divergence count (SPEC.md §12.2).
  *
  * @phpstan-type BranchInfo array{sha: ?string, complete: bool, results: int}
+ * @phpstan-type QuarantineEntry array{firstSeen: int, flips: int, stable: int, lastKey: string, reason: string}
  */
 final readonly class StatusReport
 {
@@ -19,6 +21,8 @@ final readonly class StatusReport
      * @param array<string, BranchInfo> $branches
      * @param array<string, mixed>|null $graphFingerprint
      * @param array<string, mixed> $currentFingerprint
+     * @param array<string, QuarantineEntry> $quarantineEntries currently-quarantined ids only
+     * @param array{runs: int, divergences: int}|null $divergence null when `verify` has never run
      */
     public function __construct(
         public string $root,
@@ -37,6 +41,10 @@ final readonly class StatusReport
         public ?array $graphFingerprint,
         public array $currentFingerprint,
         public int $quarantined,
+        public array $quarantineEntries = [],
+        public int $notCacheableFiles = 0,
+        public int $notCacheableIds = 0,
+        public ?array $divergence = null,
     ) {
     }
 
@@ -81,7 +89,28 @@ final readonly class StatusReport
         $lines[] = '  structural:    ' . $this->fingerprintLine('structural');
         $lines[] = '  environmental: ' . $this->fingerprintLine('environmental');
         $lines[] = '';
-        $lines[] = 'quarantined: ' . $this->quarantined;
+        $lines[] = 'quarantined: ' . count($this->quarantineEntries);
+
+        foreach ($this->quarantineEntries as $testId => $entry) {
+            $lines[] = sprintf(
+                '  %s  flips=%d stable=%d reason=%s',
+                $testId,
+                $entry['flips'],
+                $entry['stable'],
+                $entry['reason'],
+            );
+        }
+
+        $lines[] = sprintf(
+            'not cacheable: %d (%d files, %d ids)',
+            $this->notCacheableFiles + $this->notCacheableIds,
+            $this->notCacheableFiles,
+            $this->notCacheableIds,
+        );
+
+        $lines[] = $this->divergence === null
+            ? 'divergences: never verified'
+            : sprintf('divergences: %d in %d verify runs', $this->divergence['divergences'], $this->divergence['runs']);
 
         return $lines;
     }

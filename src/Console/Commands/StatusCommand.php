@@ -10,6 +10,8 @@ use Manuglopez\Replay\Cache\StateDirectory;
 use Manuglopez\Replay\Change\Git;
 use Manuglopez\Replay\Config;
 use Manuglopez\Replay\Console\StatusReport;
+use Manuglopez\Replay\Hermeticity\DivergenceLog;
+use Manuglopez\Replay\Hermeticity\Quarantine;
 use Manuglopez\Replay\Record\DriverDetector;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\InputInterface;
@@ -52,6 +54,24 @@ final class StatusCommand extends Command
         $framework = self::detectFramework($root);
         $currentFingerprint = Fingerprint::compute($root, $loaded ?? 'none');
 
+        $quarantine = Quarantine::load($stateDir);
+        $quarantine->setReleaseAfter($config->quarantineReleaseAfter);
+
+        $quarantineEntries = [];
+
+        foreach ($quarantine->all() as $testId => $entry) {
+            if ($quarantine->isQuarantined($testId)) {
+                $quarantineEntries[$testId] = $entry;
+            }
+        }
+
+        ksort($quarantineEntries);
+
+        $divergenceLog = DivergenceLog::read($stateDir);
+        $divergence = $divergenceLog['runs'] > 0
+            ? ['runs' => $divergenceLog['runs'], 'divergences' => count($divergenceLog['entries'])]
+            : null;
+
         $store = new GraphStore($stateDir, $root);
         $graph = $store->load();
 
@@ -72,7 +92,9 @@ final class StatusCommand extends Command
                 graphBytes: 0,
                 graphFingerprint: null,
                 currentFingerprint: $currentFingerprint,
-                quarantined: 0,
+                quarantined: count($quarantineEntries),
+                quarantineEntries: $quarantineEntries,
+                divergence: $divergence,
             ))->lines());
 
             return Command::SUCCESS;
@@ -91,6 +113,17 @@ final class StatusCommand extends Command
 
         $graphBytes = @filesize($store->path());
 
+        $notCacheableFiles = 0;
+        $notCacheableIds = 0;
+
+        foreach ($graph->notCacheable() as $entry) {
+            if (str_contains($entry, '::')) {
+                $notCacheableIds++;
+            } else {
+                $notCacheableFiles++;
+            }
+        }
+
         $output->writeln((new StatusReport(
             root: $root,
             branch: $branch,
@@ -107,7 +140,11 @@ final class StatusCommand extends Command
             graphBytes: $graphBytes !== false ? $graphBytes : 0,
             graphFingerprint: $graph->fingerprint(),
             currentFingerprint: $currentFingerprint,
-            quarantined: 0,
+            quarantined: count($quarantineEntries),
+            quarantineEntries: $quarantineEntries,
+            notCacheableFiles: $notCacheableFiles,
+            notCacheableIds: $notCacheableIds,
+            divergence: $divergence,
         ))->lines());
 
         return Command::SUCCESS;
