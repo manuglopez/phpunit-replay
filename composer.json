@@ -3,7 +3,14 @@
     "description": "Test Impact Analysis and result replay for PHPUnit: run only what your changes affect, replay the rest from cache.",
     "type": "library",
     "license": "MIT",
-    "keywords": ["phpunit", "testing", "test-impact-analysis", "cache", "tia", "speed"],
+    "keywords": [
+        "phpunit",
+        "testing",
+        "test-impact-analysis",
+        "cache",
+        "tia",
+        "speed"
+    ],
     "require": {
         "php": "^8.2",
         "ext-json": "*",
@@ -32,14 +39,16 @@
             "Manuglopez\\Replay\\Tests\\": "tests/"
         }
     },
-    "bin": ["bin/phpunit-replay"],
+    "bin": [
+        "bin/phpunit-replay"
+    ],
     "config": {
         "sort-packages": true
     },
     "minimum-stability": "stable",
     "scripts": {
         "test": "php -d pcov.enabled=1 -d pcov.directory=. vendor/bin/phpunit",
-        "test:xdebug": "php -d pcov.enabled=0 -d zend_extension=${XDEBUG_SO} -d xdebug.mode=coverage vendor/bin/phpunit",
+        "test:xdebug": "PHP_INI_SCAN_DIR=${PHP_INI_SCAN_DIR:-/etc/php84/conf.d}:${XDEBUG_INI_DIR} php -d pcov.enabled=0 vendor/bin/phpunit",
         "stan": "vendor/bin/phpstan analyse --memory-limit=1G",
         "lint": "vendor/bin/pint --test",
         "fix": "vendor/bin/pint"

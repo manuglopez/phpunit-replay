@@ -48,7 +48,7 @@ parameters and is covered by the ported unit tests.
 The system `xdebug` package targets PHP 8.5 while `php` resolves to 8.4.23
 (`undefined symbol: php_globfree` when loading it). Xdebug 3.5.3 is compiled for 8.4 with
 `phpize84` in the session scratchpad and loaded with `-d zend_extension=<path>/xdebug.so -d xdebug.mode=coverage`
-for the Xdebug run of the suite (`composer test:xdebug` takes the path from `XDEBUG_SO`).
+for the Xdebug run of the suite. Because the wrapper spawns child PHP processes, the extension is loaded through an extra ini scan directory (`XDEBUG_INI_DIR` containing `zend_extension=…/xdebug.so`, `xdebug.mode=coverage`, `pcov.enabled=0`) exported as `PHP_INI_SCAN_DIR`, which children inherit; `composer test:xdebug` does exactly that.
 
 ## D-007 — All graph merging lives in one service
 
