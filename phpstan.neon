@@ -6,4 +6,7 @@ parameters:
         - bin
     excludePaths:
         - tests/Fixtures (?)
+    stubFiles:
+        - phpstan-stubs/pcov.stub
+        - phpstan-stubs/xdebug.stub
     treatPhpDocTypesAsCertain: false

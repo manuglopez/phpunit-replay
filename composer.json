@@ -38,7 +38,8 @@
     },
     "minimum-stability": "stable",
     "scripts": {
-        "test": "php -d pcov.enabled=1 vendor/bin/phpunit",
+        "test": "php -d pcov.enabled=1 -d pcov.directory=. vendor/bin/phpunit",
+        "test:xdebug": "php -d pcov.enabled=0 -d zend_extension=${XDEBUG_SO} -d xdebug.mode=coverage vendor/bin/phpunit",
         "stan": "vendor/bin/phpstan analyse --memory-limit=1G",
         "lint": "vendor/bin/pint --test",
         "fix": "vendor/bin/pint"
