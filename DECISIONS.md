@@ -56,3 +56,9 @@ The wrapper (filtered mode) and, in phase 2, the extension (in-process mode) bot
 (replace edges, merge results, prune, recompute `k`). Rather than two implementations, the
 extension writes run partials (`runs/<run-id>/*.json`) and a single `Cache\GraphUpdater` applies
 them to the graph. In-process mode calls the same service at `ExecutionFinished`.
+
+## D-008 — Package name `manuglopez/phpunit-replay`, namespace `Orlegitech\Replay`
+
+The repository lives at `github.com/manuglopez/phpunit-replay` and the Composer package is
+`manuglopez/phpunit-replay` (owner's instruction, 2026-09-06). The PHP namespace stays
+`Orlegitech\Replay` as in SPEC §1; the CLI binary stays `phpunit-replay`.

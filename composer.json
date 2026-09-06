@@ -1,5 +1,5 @@
 {
-    "name": "orlegitech/phpunit-replay",
+    "name": "manuglopez/phpunit-replay",
     "description": "Test Impact Analysis and result replay for PHPUnit: run only what your changes affect, replay the rest from cache.",
     "type": "library",
     "license": "MIT",
