@@ -32,8 +32,8 @@ final readonly class RunPartial
 
     public static function load(string $runDir): ?self
     {
-        $resultsJson = AtomicFile::read($runDir . '/results.json');
-        $metaJson = AtomicFile::read($runDir . '/meta.json');
+        $resultsJson = self::readMerged($runDir, 'results.json');
+        $metaJson = self::readMerged($runDir, 'meta.json');
 
         if ($resultsJson === null || $metaJson === null) {
             return null;
@@ -46,13 +46,13 @@ final readonly class RunPartial
             return null;
         }
 
-        $edgesJson = AtomicFile::read($runDir . '/edges.json');
+        $edgesJson = self::readMerged($runDir, 'edges.json');
         $rawEdges = $edgesJson !== null ? Json::decodeArray($edgesJson) : null;
 
-        $tablesJson = AtomicFile::read($runDir . '/tables.json');
+        $tablesJson = self::readMerged($runDir, 'tables.json');
         $rawTables = $tablesJson !== null ? Json::decodeArray($tablesJson) : null;
 
-        $usesDatabaseJson = AtomicFile::read($runDir . '/uses_database.json');
+        $usesDatabaseJson = self::readMerged($runDir, 'uses_database.json');
         $rawUsesDatabase = $usesDatabaseJson !== null ? Json::decodeArray($usesDatabaseJson) : null;
 
         return new self(
@@ -62,6 +62,189 @@ final readonly class RunPartial
             self::normalizeMeta($rawMeta),
             self::normalizeStringList($rawUsesDatabase ?? []),
         );
+    }
+
+    /**
+     * Paratest support (SPEC.md §13): each worker flushes its own
+     * `worker-<TEST_TOKEN>-<basename>` file instead of the plain `<basename>` (see
+     * {@see \Manuglopez\Replay\Record\RunWriter::pathFor()}); this transparently merges them
+     * back into a single logical file before the caller's normal decode/normalise pipeline
+     * runs, so a single non-parallel `<basename>` and a merged Paratest run look identical
+     * from here on. `meta.json` and `results.json` have their own merge rule; every other
+     * basename (`edges.json`, `tables.json`, `uses_database.json`, and any future one written
+     * the same way) is a generic union — no change needed here when one is added.
+     */
+    private static function readMerged(string $runDir, string $basename): ?string
+    {
+        $paths = self::workerPaths($runDir, $basename);
+
+        if ($paths === []) {
+            return AtomicFile::read($runDir . '/' . $basename);
+        }
+
+        $decoded = [];
+        $any = false;
+
+        foreach ($paths as $path) {
+            $content = AtomicFile::read($path);
+            $partial = $content !== null ? Json::decodeArray($content) : null;
+            $decoded[] = $partial;
+            $any = $any || $partial !== null;
+        }
+
+        if (! $any) {
+            return null;
+        }
+
+        $merged = match ($basename) {
+            'meta.json' => self::mergeMetaPartials($decoded),
+            'results.json' => self::mergeLastWriteWins($decoded),
+            default => self::mergeUnion($decoded),
+        };
+
+        return Json::encode($merged);
+    }
+
+    /** @return list<string> absolute paths to `worker-*-<basename>`, sorted by filename */
+    private static function workerPaths(string $runDir, string $basename): array
+    {
+        $matches = glob($runDir . '/worker-*-' . $basename) ?: [];
+        sort($matches);
+
+        return $matches;
+    }
+
+    /**
+     * meta: content of the first worker that decoded, except `truncated` which is true when
+     * any worker set it.
+     *
+     * @param list<array<mixed>|null> $partials
+     * @return array<string, mixed>
+     */
+    private static function mergeMetaPartials(array $partials): array
+    {
+        $first = null;
+        $truncated = false;
+
+        foreach ($partials as $partial) {
+            if (! is_array($partial)) {
+                continue;
+            }
+
+            $first ??= self::normalizeMeta($partial);
+            $truncated = $truncated || (bool) ($partial['truncated'] ?? false);
+        }
+
+        $first ??= [];
+        $first['truncated'] = $truncated;
+
+        return $first;
+    }
+
+    /**
+     * results: last write wins per testId, in worker-file sort order.
+     *
+     * @param list<array<mixed>|null> $partials
+     * @return array<string, mixed>
+     */
+    private static function mergeLastWriteWins(array $partials): array
+    {
+        $out = [];
+
+        foreach ($partials as $partial) {
+            if (! is_array($partial)) {
+                continue;
+            }
+
+            foreach ($partial as $key => $value) {
+                if (is_string($key)) {
+                    $out[$key] = $value;
+                }
+            }
+        }
+
+        return $out;
+    }
+
+    /**
+     * Everything else: a plain list is merged as a deduplicated list (`uses_database.json`);
+     * a map is merged key by key, concatenating and deduplicating list values (`edges.json`,
+     * `tables.json`, and any future basename of the same shape).
+     *
+     * @param list<array<mixed>|null> $partials
+     * @return array<mixed>
+     */
+    private static function mergeUnion(array $partials): array
+    {
+        $isList = null;
+        $listOut = [];
+        $mapOut = [];
+
+        foreach ($partials as $partial) {
+            if (! is_array($partial)) {
+                continue;
+            }
+
+            if (array_is_list($partial)) {
+                $isList ??= true;
+
+                foreach ($partial as $item) {
+                    $listOut[] = $item;
+                }
+
+                continue;
+            }
+
+            $isList ??= false;
+
+            foreach ($partial as $key => $value) {
+                if (! is_string($key)) {
+                    continue;
+                }
+
+                if (is_array($value)) {
+                    $existing = $mapOut[$key] ?? [];
+                    $mapOut[$key] = [...(is_array($existing) ? $existing : []), ...$value];
+                } else {
+                    $mapOut[$key] = $value;
+                }
+            }
+        }
+
+        if ($isList === false) {
+            foreach ($mapOut as $key => $value) {
+                if (is_array($value)) {
+                    $mapOut[$key] = self::dedupe($value);
+                }
+            }
+
+            return $mapOut;
+        }
+
+        return self::dedupe($listOut);
+    }
+
+    /**
+     * @param array<mixed> $list
+     * @return list<mixed>
+     */
+    private static function dedupe(array $list): array
+    {
+        $seen = [];
+        $out = [];
+
+        foreach ($list as $item) {
+            $key = is_scalar($item) ? (is_string($item) ? $item : var_export($item, true)) : serialize($item);
+
+            if (isset($seen[$key])) {
+                continue;
+            }
+
+            $seen[$key] = true;
+            $out[] = $item;
+        }
+
+        return $out;
     }
 
     /**

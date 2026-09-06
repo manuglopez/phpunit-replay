@@ -97,6 +97,12 @@ final class FixtureProject
         return $this->repo->root;
     }
 
+    /** True when this package's own vendor/bin/paratest is installed (SPEC.md §13, dev dependency). */
+    public static function paratestAvailable(): bool
+    {
+        return is_file(dirname(__DIR__, 2) . '/vendor/brianium/paratest/bin/paratest');
+    }
+
     /** Copies an overlay file from plain-variants onto the working copy. */
     public function applyVariant(string $variantFile, string $targetRel): void
     {
@@ -237,12 +243,32 @@ final class FixtureProject
         $packageRoot = dirname(__DIR__, 2);
         $packageAutoload = $packageRoot . '/vendor/autoload.php';
         $packagePhpunitBin = $packageRoot . '/vendor/phpunit/phpunit/phpunit';
+        $packageParatestBin = $packageRoot . '/vendor/brianium/paratest/bin/paratest';
 
         TempDir::write($root . '/vendor/autoload.php', self::autoloadShim($packageAutoload));
         TempDir::write($root . '/vendor/bin/phpunit', self::phpunitShim($packagePhpunitBin));
 
         if (! @chmod($root . '/vendor/bin/phpunit', 0o755)) {
             throw new RuntimeException('Cannot make ' . $root . '/vendor/bin/phpunit executable.');
+        }
+
+        // Paratest support (SPEC.md §13): only when the package itself has it installed
+        // (a dev dependency — composer install --no-dev environments won't have it).
+        // ParaTest\Options::getPhpunitBinary() resolves PHPUnit relative to wherever its own
+        // files physically live on disk ("a static non-customizable reference", its own words)
+        // rather than the current project's vendor/bin/phpunit, so this shim cannot redirect
+        // it to the fixture copy's own PHPUnit the way vendor/bin/phpunit's `_composer_autoload_path`
+        // trick does; empirically (see the parallel-support commit) that reference is never
+        // actually exercised by ParaTest's WrapperRunner (it runs PHPUnit in-process through
+        // its own `bin/phpunit-wrapper.php`), and the fixture's `App\`/`App\Tests\` classes load
+        // correctly regardless, because PHPUnit's own `bootstrap="vendor/autoload.php"`
+        // attribute in phpunit.xml is honoured the same way whichever binary launches it.
+        if (is_file($packageParatestBin)) {
+            TempDir::write($root . '/vendor/bin/paratest', self::paratestShim($packageParatestBin));
+
+            if (! @chmod($root . '/vendor/bin/paratest', 0o755)) {
+                throw new RuntimeException('Cannot make ' . $root . '/vendor/bin/paratest executable.');
+            }
         }
     }
 
@@ -297,5 +323,23 @@ final class FixtureProject
         PHP;
 
         return str_replace('__PACKAGE_PHPUNIT_BIN__', $packagePhpunitBin, $template);
+    }
+
+    /** @see self::installVendorShim() for why `_composer_autoload_path` is set but unused by ParaTest itself. */
+    private static function paratestShim(string $packageParatestBin): string
+    {
+        $template = <<<'PHP'
+        #!/usr/bin/env php
+        <?php
+
+        declare(strict_types=1);
+
+        $GLOBALS['_composer_autoload_path'] = __DIR__ . '/../autoload.php';
+
+        require '__PACKAGE_PARATEST_BIN__';
+
+        PHP;
+
+        return str_replace('__PACKAGE_PARATEST_BIN__', $packageParatestBin, $template);
     }
 }

@@ -43,8 +43,8 @@ final class Application extends BaseApplication
 
     /** @var array<string, list<string>> command => its own recognised long options (without leading --) */
     private const OWN_LONG_OPTIONS = [
-        'run' => ['fresh', 'no-remote', 'explain', 'dry-run', 'allow-ci-baseline', 'in-process', 'filtered'],
-        'record' => ['fresh'],
+        'run' => ['fresh', 'no-remote', 'explain', 'dry-run', 'allow-ci-baseline', 'in-process', 'filtered', 'parallel'],
+        'record' => ['fresh', 'parallel'],
         'status' => [],
         'baseline-path' => [],
     ];
@@ -54,6 +54,9 @@ final class Application extends BaseApplication
 
     /** @var list<string> single-character short options every command recognises */
     private const GLOBAL_SHORT_OPTIONS = ['h', 'V', 'q', 'n'];
+
+    /** @var list<string> commands whose own `-p[N]` shortcut is `--parallel` (SPEC §13) */
+    private const PARALLEL_SHORTCUT_COMMANDS = ['run', 'record'];
 
     public function __construct()
     {
@@ -99,8 +102,11 @@ final class Application extends BaseApplication
         $own = [];
         $passthrough = [];
         $inPassthrough = false;
+        $count = count($rest);
 
-        foreach ($rest as $token) {
+        for ($i = 0; $i < $count; $i++) {
+            $token = $rest[$i];
+
             if ($inPassthrough) {
                 $passthrough[] = $token;
 
@@ -115,6 +121,15 @@ final class Application extends BaseApplication
 
             if (self::isRecognised($command, $token)) {
                 $own[] = $token;
+
+                // `-p 2` / `--parallel 2`: Symfony's own ArgvInput, once it sees these two
+                // tokens back to back, peeks the second and consumes it as the option's value
+                // the same way (`addLongOption()`) — this only has to keep the pair together
+                // rather than letting the bare option go to $own and "2" fall through to
+                // $passthrough as an unrelated phpunit argument.
+                if (self::isBareParallelOption($command, $token) && isset($rest[$i + 1]) && self::looksLikeAnOptionValue($rest[$i + 1])) {
+                    $own[] = $rest[++$i];
+                }
 
                 continue;
             }
@@ -179,9 +194,29 @@ final class Application extends BaseApplication
                 return true;
             }
 
+            if (in_array($command, self::PARALLEL_SHORTCUT_COMMANDS, true) && preg_match('/^p\d*$/', $name) === 1) {
+                return true;
+            }
+
             return strlen($name) === 1 && in_array($name, self::GLOBAL_SHORT_OPTIONS, true);
         }
 
         return false;
+    }
+
+    /** `-p` or `--parallel` with no attached value — the two forms Symfony peeks a following token for. */
+    private static function isBareParallelOption(string $command, string $token): bool
+    {
+        if (! in_array($command, self::PARALLEL_SHORTCUT_COMMANDS, true)) {
+            return false;
+        }
+
+        return $token === '-p' || $token === '--parallel';
+    }
+
+    /** Mirrors `ArgvInput::addLongOption()`'s own peek: anything that doesn't itself look like an option. */
+    private static function looksLikeAnOptionValue(string $token): bool
+    {
+        return $token === '' || $token[0] !== '-';
     }
 }
