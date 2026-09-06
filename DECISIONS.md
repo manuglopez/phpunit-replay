@@ -147,3 +147,15 @@ Collected by `Laravel\UsesDatabaseCollector` and flushed by `FlushUsesDatabaseOn
 ## D-029 — Laravel entry points centralised in `Laravel\LaravelIntegration`
 
 `shouldArm`, `subscribers`, `rules`, `augment` all centralised there. `ReplayExtension` arms trackers when `shouldArm($root)` is true (Container class loaded and `artisan` present). Rule wiring into `Selector::default()` and `augment()` into persist paths done in wiring step after hermeticity work lands.
+
+## D-030 — `brianium/paratest` (v7.20.0) added as dev dependency only
+
+Testing `--parallel` (SPEC §13) requires Paratest; users install it themselves (`suggest`). The wrapper launches `vendor/bin/paratest -c <xml> [--processes N] --passthru-php="'-d' 'pcov.enabled=1' '-d' 'pcov.directory=<root>'"` — each ini flag shell-quoted and space-joined, the syntax Paratest's `Options::parsePassthru()` re-parses. Missing binary → warning and sequential fallback.
+
+## D-031 — Worker partials written as `runs/<id>/worker-<TEST_TOKEN>-<name>.json` when Paratest sets `TEST_TOKEN`
+
+`RunPartial::load()` merges them generically (edges/tables/lists by union, results last-write-wins, `truncated` if any worker was). Paratest's `WrapperRunner` runs PHPUnit in-process through `bin/phpunit-wrapper.php`, so the fixture only needed a `vendor/bin/paratest` shim setting `$GLOBALS['_composer_autoload_path']`.
+
+## D-032 — Paratest's main process bootstraps the extension during test discovery
+
+The wrapper passes the same ini flags to that process so it finds the coverage driver and stays silent (before the fix it printed a harmless `no coverage driver` warning). `--parallel` / `-p [N]` accept a space-separated value; the argv pre-splitter in `Console\Application` peeks the next token for those two options.
