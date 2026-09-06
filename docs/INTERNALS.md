@@ -511,3 +511,124 @@ Every "degrade" below means: print one line to STDERR prefixed `phpunit-replay: 
 - MODE `results-only`: ResultCollector subscribers + flush.
 - `meta` written by flush: `{driver, php, os, mode, truncated, startedAt, finishedAt, fingerprint: Fingerprint::compute(root, driver)}`.
 - `ReplayState` (static) holds `mode`, `root`, `stateDir`, `runId`, the `Recorder`, `ResultCollector`, `RunWriter`; `ReplayState::reset()` for tests.
+
+## Phase 2 contracts
+
+### Shared services extracted from `RunPipeline` (used by wrapper AND in-process extension)
+
+```php
+final readonly class Cache\RunContext
+{
+    public function __construct(public string $root, public string $stateDir, public string $branch, public ?string $head,
+        public string $defaultBranch, public bool $persist /* false on detached HEAD */, public bool $ciMode, public bool $allowCiBaseline);
+}
+final class Cache\BaselineWriter          // was RunPipeline::persistAfterRun
+{
+    public function __construct(GraphStore $store, Git $git, ChangedFiles $changedFiles);
+    /** complete → finalizeBaseline(branch, head, branchNames) + LastRunTree snapshot (unless CI without allowCiBaseline → warning); always store->save(). */
+    public function commit(Graph $graph, GraphUpdater $updater, RunContext $ctx, bool $complete): bool;
+}
+final class Select\RunList
+{
+    public Selection $selection; /** @var list<string> */ public array $unknown; /** @var list<string> */ public array $rerun; /** @var list<string> */ public array $quarantined;
+    /** @return list<string> sorted union */ public function files(): array;
+    public function has(string $testFileRel): bool;
+    public function reasonsFor(string $testFileRel): array;     // Reason objects incl. synthetic ones: Uncached ("new test file"), Rerun (status name), Quarantine (reason)
+}
+final class Select\RunListBuilder          // was RunPipeline::computeRunList/unknownTestFiles/rerunFiles
+{
+    public function __construct(Graph $graph, TestPaths $testPaths, WatchPatterns $watch, ConfigurationReader $reader, Hermeticity\Policy $policy, string $projectRoot);
+    /** @param list<string> $changed relative */
+    public function build(array $changed, string $branch): RunList;
+}
+```
+
+### In-process replay (SPEC §3.2, §6; DECISIONS D-004; docs/spikes/in-process-replay.md)
+
+```php
+namespace Manuglopez\Replay\PHPUnit\Decision;
+abstract readonly class Decision { public function isReplay(): bool; }
+final readonly class Run extends Decision            { public function __construct(public string $reason /* affected|uncached|rerun|quarantined|not-cacheable|depends-provider|no-baseline */) {} }
+final readonly class ReplayPass extends Decision     { public function __construct(public int $assertions, public bool $wasRisky, public array $cached /* TestResultArray */) {} }
+final readonly class ReplaySkipped extends Decision  { public function __construct(public string $message, public array $cached) {} }
+final readonly class ReplayIncomplete extends Decision { public function __construct(public string $message, public array $cached) {} }
+```
+
+`ReplayState` (phase 2 additions):
+
+```php
+public static function bootInProcess(Config $config, \PHPUnit\TextUI\Configuration\Configuration $configuration): Mode;  // resolves root/stateDir/git/graph/fingerprint/RunList; returns the mode it settled on (Record | Replay | ResultsOnly | Off) — SPEC §6.1 decision list
+public static function decide(string $testFileAbsolute, string $testId): Decision;   // cached per testId; SPEC §6.2 algorithm + "depends provider → Run" + Policy
+public static function markReplayed(string $testId, Decision $decision): void;       // remembers cached result to restore on persist
+public static function counters(): array{affected:int, uncached:int, replayed:int, quarantined:int, executed:int}
+public static function isDependsProvider(string $className, string $methodName): bool;   // MetadataRegistry::parser()->forClass($className): any DependsOnMethod metadata targeting $methodName (cache per class)
+public static function persistInProcess(): void;   // at TestRunner\ExecutionFinished: build RunPartial in memory (replayed ids → cached result restored: status/time/assertions/message), GraphUpdater::apply(recordsEdges = driver && !resultsOnly, complete = !truncated), BaselineWriter::commit, Quarantine save
+public static function summaryLine(): ?string;     // printed by PrintSummaryOnTestRunnerFinished (TestRunner\Finished, AFTER PHPUnit's own result output — verify in vendor/phpunit/phpunit/src/TextUI/Application.php)
+```
+
+Trait `PHPUnit\Replayable` (public API: `isReplaying(): bool`; everything else prefixed `__replay`):
+- PHPUnit ≥ 12 hook: `protected function invokeTestMethod(string $methodName, array $testArguments): mixed` — if decision is a replay → apply it and return null, else `parent::invokeTestMethod(...)`.
+- PHPUnit 11.5 fallback (also forced by env `PHPUNIT_REPLAY_LEGACY_HOOK=1`, used by tests on 12): `#[Before] public function __replayBefore(): void` — only when `!method_exists(\PHPUnit\Framework\TestCase::class, 'invokeTestMethod')` or the env is set; swaps private `TestCase::$methodName` via `ReflectionProperty` to `__replayStub`; `public function __replayStub(mixed ...$args): mixed` restores the name, applies the decision, returns null.
+- Applying: `ReplayPass` → `if ($assertions === 0 && !$wasRisky) expectNotToPerformAssertions(); addToAssertionCount($assertions); ReplayState::markReplayed(id, d)`; `ReplaySkipped` → `markTestSkipped(msg)`; `ReplayIncomplete` → `markTestIncomplete(msg)`.
+- `decide()` is called with `(new ReflectionClass(static::class))->getFileName()` and `$this->valueObjectForEvents()->id()`.
+- Recorder must not record replayed tests: `StartRecordingOnPreparationStarted` consults `ReplayState::decide()` when `ReplayState::isInProcess()`; replayed → skip `beginTest`.
+
+Mode decision without wrapper env (`ReplayExtension::bootstrap` when `PHPUNIT_REPLAY_MODE` is absent): `Config::load(root)` merged with `Config::fromExtensionParameters` then env; `config.mode === 'off'` → Off; git unavailable → Off + warning; `hasPartialSelection()` → ResultsOnly (persist results of known files only); `mode === 'record'` or no valid graph (missing, structural drift, `--fresh` n/a) → Record when a driver is available else Off + warning `no coverage driver`; else Replay (edges recorded for executed tests when a driver exists). Replayed tests are excluded from `ChangedFiles`/graph mutations; the final `Summary` line uses `counters()`.
+
+### Hermeticity (SPEC §8)
+
+```php
+#[\Attribute(\Attribute::TARGET_CLASS | \Attribute::TARGET_METHOD)]
+final readonly class Attributes\NotCacheable { public function __construct(public string $reason = '') {} }
+
+final class Hermeticity\Quarantine          // <stateDir>/flaky.json  {"<testId>": {"firstSeen": unix, "flips": n, "stable": n, "lastKey": "k", "reason": "flip|divergence"}}
+{
+    public static function load(string $stateDir): self;   public function save(string $stateDir): bool;
+    public function isQuarantined(string $testId): bool;   /** @return list<string> */ public function testIds(): array;
+    public function recordFlip(string $testId, string $key, string $reason = 'flip'): void;      // flips++, stable = 0
+    public function recordStable(string $testId): void;     // stable++; released when stable >= releaseAfter
+    public function release(string $testId): void;  public function clear(): void;
+    public function setReleaseAfter(int $n): void;
+    /** @return array<string, array{firstSeen:int, flips:int, stable:int, lastKey:string, reason:string}> */ public function all(): array;
+}
+final class Hermeticity\Policy
+{
+    public function __construct(Graph $graph, Config $config, Quarantine $quarantine, string $projectRoot);
+    public function cacheable(string $testFileRel, string $testId): bool;   // !graph->isNotCacheable(file) && !graph->isNotCacheable(testId) && !neverCacheGlob(file) && !quarantine->isQuarantined(testId)
+    public function reason(string $testFileRel, string $testId): ?string;   // 'attribute' | 'never_cache' | 'quarantine' | null
+    /** @return list<string> test files that contain at least one non-cacheable test (for RunList) */ public function nonCacheableFiles(array $allTestFiles, array $resultsByFile): array;
+}
+```
+- Recording the attribute: subscriber `RecordNotCacheableOnPreparationStarted` (TestMethod → `ReflectionClass::getAttributes(NotCacheable::class)` → file rel; `ReflectionMethod` → `Class::method`) collects into `ResultCollector`-adjacent `NotCacheableCollector`; `RunWriter::flush` writes `not_cacheable.json` (list); `RunPartial::$notCacheable`; `GraphUpdater::apply` replaces entries for executed files/classes (`Graph::setNotCacheable(array_values(array_unique([...kept for non-executed files, ...partial])))`). `Graph::isNotCacheable(string $fileOrTestId): bool`.
+- Flip detection in `GraphUpdater::apply` (constructor gains `?Quarantine $quarantine = null`): for every incoming result with a previous cached result for the same id where `old.key === new.key` and `class(old.status) !== class(new.status)` with `class = success-like {0,3,4,5,6} | failure-like {7,8} | skipped {1} | incomplete {2}` → `recordFlip`; same class → `recordStable`.
+- `RunListBuilder` adds files of quarantined test ids and non-cacheable files to `RunList::$quarantined` (Reason `Quarantine <testId>` / `NotCacheable <reason>`).
+
+### Commands (SPEC §11)
+
+- `explain <path>` — `ExplainCommand`: load graph (fail: "no baseline yet" exit 1); `rel = Paths::relative`; `Selector::default(...)->affected([rel])`; print one line per affected test file `%-40s ← %-8s %s` (same formatter as `--explain`, extracted to `Console\ExplainFormatter`); then `direct dependents: N` and, when the file is unknown to the graph, either the watch patterns matched or `no recorded test executes this file`. Exit 0.
+- `prune [--flaky] [--branches] [--all]` — `PruneCommand`: `--flaky` → `Quarantine::clear()` + save; `--branches` → `pruneMissingBranches(git branchNames ∪ default)`; `--all` → delete `graph.json`, `flaky.json`, `last-run.json`, `divergence.json`, `runs/`; no flag → `pruneMissingTestFiles()` + `pruneResultsForMissingFiles(each branch)` + `--branches`. Prints what was removed. Exit 0.
+- `verify [-- <phpunit args>]` — `VerifyCommand` → `RunPipeline::runVerify`: record-mode full run (graph kept); before `apply`, snapshot `old = graph->results(branch)`; after `apply`, for each new result: `old[id]` exists and `old.key === new.key` → `wouldReplay++` unless `reader->shouldRerun(old.status)` or `!policy->cacheable()`; if additionally `class(old.status) !== class(new.status)` → divergence `{testId, k, cached: old.status, actual: new.status, sha: head, at: unix}` + `quarantine->recordFlip(id, k, 'divergence')`. Persist `divergence.json` `{"runs": n, "entries": [...]}` (append, keep last 500 entries). Print `Verify  ✓ 1240 tests · 1198 would replay · 0 divergences (lifetime: 2 in 143 runs)` (`✗` when divergences > 0 or PHPUnit failed). Exit code = PHPUnit's. `status` prints `divergences: <lifetime> in <runs> verify runs` and the quarantined ids with flips.
+- `Graph::encode()` adds `"generator": "manuglopez/phpunit-replay " . Version::ID`.
+
+### Laravel (SPEC §7.2 rules 1/4/5, §10) — package must NOT depend on illuminate/*
+
+```php
+final class Laravel\LaravelDetector { public static function enabled(string $projectRoot, Config $config): bool; }  // config.laravel: 'on' | 'off' | 'auto' → class_exists(\Illuminate\Container\Container::class) && is_file(root/artisan)
+final class Laravel\TableExtractor  // port of Pest TableExtractor: fromSql(string $sql): list<string>, fromMigrationSource(string $php): list<string>
+final class Laravel\TableTracker    // arm(object $app, Recorder $recorder): void — $app['db']->listen(fn (QueryExecuted $q) => foreach TableExtractor::fromSql($q->sql) as $t → $recorder->linkTable($t))
+final class Laravel\BladeTracker    // arm(object $app, Recorder $recorder): void — $app['view']->composer('*', fn ($view) => $recorder->linkSource($view->getPath()))
+final class Laravel\MigrationTables // tablesOf(string $projectRoot): list<string> (all tables of database/migrations/**/*.php via TableExtractor::fromMigrationSource); usesDatabase(string $className): bool (RefreshDatabase|DatabaseMigrations|DatabaseTransactions traits, recursively)
+final class Laravel\BladeReferences // ancestorsOf(string $bladeRel, string $projectRoot): list<string> — static @include/@extends/@component/view('x')/<x-name> walk (port of Pest Graph::bladeAncestorsFor and helpers)
+final readonly class PHPUnit\Subscribers\ArmLaravelTrackersOnPrepared implements PreparedSubscriber  // once per Container instance: binding marker 'phpunit-replay.armed'
+final class Select\Rules\MigrationRule  // database/migrations/**/*.php changed → TableExtractor::fromMigrationSource → tests whose graph->testTables() intersect (Reason 'Migration', detail table names); unparseable → left for WatchRule
+final class Select\Rules\SiblingRule    // new/unknown .php under app/Providers|Listeners|Events|Observers|Policies|Console/Commands, database/factories|seeders → tests with edges to files in the same directory (Reason 'Sibling')
+final class Select\Rules\BladeRule      // unknown .blade.php → BladeReferences::ancestorsOf → tests with edges to an ancestor (Reason 'Blade')
+final class Laravel\LaravelIntegration  // rules(...): list<Rule> in SPEC order (Migration first, Sibling/Blade after TestFile, before Watch); subscribers(Recorder): list<Subscriber>; augment(RunPartial, root): RunPartial (MigrationTables for database-using test files → tables ∪ all migration tables)
+```
+`Selector::default()` gains an optional `array $extraRules` inserted per the SPEC order. Recorder tables flow: `Recorder::perTestTables()` → `RunWriter` `tables.json` → `GraphUpdater::replaceTestTables`.
+
+Fixture `tests/Fixtures/Projects/laravel-lite`: created from `composer create-project laravel/laravel`, reduced (sqlite `:memory:`, 3 migrations `users`/`posts`/`comments`, models `User`/`Post`, 4 Feature tests, 2 Blade views), with `manuglopez/phpunit-replay` as a path repository (`../../../..`, `@dev`) so the fixture's own `vendor/` contains PHPUnit (^11.5 from laravel/laravel) and a symlinked copy of this package. `vendor/` is gitignored; integration tests `markTestSkipped` when `vendor/autoload.php` is missing. `FixtureProject::laravelLite()` copies the fixture WITHOUT `vendor/` and symlinks `vendor` to the fixture's installed one.
+
+### Paratest (SPEC §13)
+
+Wrapper: `--parallel|-p[=N]` → launches `vendor/bin/paratest -c <xml> --processes N --passthru-php="-d pcov.enabled=1 -d pcov.directory=<root>"` with the same env; `RunWriter` uses `runs/<id>/worker-<TEST_TOKEN>-{edges,results,tables,not_cacheable}.json` when env `TEST_TOKEN` is set; `RunPartial::load()` merges worker files (edges by union, results last-write-wins, meta from any worker, truncated = any). `brianium/paratest` becomes a dev dependency (DECISIONS).
