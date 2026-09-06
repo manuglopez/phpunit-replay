@@ -51,7 +51,37 @@ final class ParatestProcess
             return (new PhpunitProcess())->run($phpunitBin, $configFile, $iniFlags, $phpunitArgs, $appendNoCoverage, $env, $cwd);
         }
 
-        $command = [PHP_BINARY, $paratestBin];
+        $command = $this->buildCommand($configFile, $iniFlags, $phpunitArgs, $appendNoCoverage, $paratestBin, $parallel);
+
+        $process = new Process($command, $cwd, $env);
+        $process->setTimeout(null);
+
+        if (stream_isatty(STDOUT) && Process::isTtySupported()) {
+            $process->setTty(true);
+            $process->run();
+        } else {
+            $process->run(static function (string $type, string $data): void {
+                fwrite($type === Process::ERR ? STDERR : STDOUT, $data);
+            });
+        }
+
+        return $process->getExitCode() ?? 1;
+    }
+
+    /**
+     * @param list<string> $iniFlags
+     * @param list<string> $phpunitArgs
+     * @return list<string>
+     */
+    public function buildCommand(
+        ?string $configFile,
+        array $iniFlags,
+        array $phpunitArgs,
+        bool $appendNoCoverage,
+        string $paratestBin,
+        int $parallel,
+    ): array {
+        $command = [PHP_BINARY, ...$iniFlags, $paratestBin];
 
         if ($configFile !== null) {
             $command[] = '-c';
@@ -76,19 +106,7 @@ final class ParatestProcess
 
         array_push($command, ...$phpunitArgs);
 
-        $process = new Process($command, $cwd, $env);
-        $process->setTimeout(null);
-
-        if (stream_isatty(STDOUT) && Process::isTtySupported()) {
-            $process->setTty(true);
-            $process->run();
-        } else {
-            $process->run(static function (string $type, string $data): void {
-                fwrite($type === Process::ERR ? STDERR : STDOUT, $data);
-            });
-        }
-
-        return $process->getExitCode() ?? 1;
+        return $command;
     }
 
     /**

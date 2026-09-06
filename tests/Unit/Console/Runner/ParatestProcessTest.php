@@ -37,12 +37,14 @@ final class ParatestProcessTest extends TestCase
     public function builds_the_command_line_with_processes_passthru_php_and_no_coverage(): void
     {
         $capture = $this->dir . '/captured.json';
+        $iniFlags = ['-d', 'pcov.enabled=1', '-d', 'pcov.directory=/project'];
+        $paratestBin = $this->fakeBin('paratest.php');
 
         $exitCode = (new ParatestProcess())->run(
-            $this->fakeBin('paratest.php'),
+            $paratestBin,
             $this->fakeBin('never-called.php'),
             '/project/.phpunit-replay.xml',
-            ['-d', 'pcov.enabled=1', '-d', 'pcov.directory=/project'],
+            $iniFlags,
             ['--filter', 'FooTest'],
             true,
             ['CAPTURE_FILE' => $capture],
@@ -51,6 +53,36 @@ final class ParatestProcessTest extends TestCase
         );
 
         self::assertSame(0, $exitCode);
+
+        // The script's $argv does not include PHP CLI flags (they're consumed by PHP before
+        // the script runs), so we verify them separately through the command-building logic.
+        // We use reflection to test that the main command contains the ini flags before
+        // the paratest binary, while --passthru-php still carries them for the workers.
+        $process = new ParatestProcess();
+        $command = $process->buildCommand(
+            '/project/.phpunit-replay.xml',
+            $iniFlags,
+            ['--filter', 'FooTest'],
+            true,
+            $paratestBin,
+            3,
+        );
+
+        // Verify ini flags are in the main command before the paratest binary
+        self::assertSame(PHP_BINARY, $command[0]);
+        self::assertSame('-d', $command[1]);
+        self::assertSame('pcov.enabled=1', $command[2]);
+        self::assertSame('-d', $command[3]);
+        self::assertSame('pcov.directory=/project', $command[4]);
+        self::assertSame($paratestBin, $command[5]);
+
+        // Verify --passthru-php still carries the ini flags
+        self::assertContains('--passthru-php', $command);
+        $passthruIndex = array_search('--passthru-php', $command);
+        self::assertNotFalse($passthruIndex);
+        self::assertSame("'-d' 'pcov.enabled=1' '-d' 'pcov.directory=/project'", $command[$passthruIndex + 1]);
+
+        // Verify the script's $argv is as expected (no PHP CLI flags, they're consumed by PHP)
         self::assertSame([
             '-c', '/project/.phpunit-replay.xml',
             '--processes', '3',
