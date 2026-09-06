@@ -23,10 +23,11 @@ use Symfony\Component\Process\Process;
  */
 final readonly class Fingerprint
 {
-    public const int SCHEMA_VERSION = 1;
+    /** @var int */
+    public const SCHEMA_VERSION = 1;
 
     /** @var array<string, string> structural key => project-relative file */
-    private const array STRUCTURAL_FILES = [
+    private const STRUCTURAL_FILES = [
         'composer_lock' => 'composer.lock',
         'phpunit_xml' => 'phpunit.xml',
         'phpunit_xml_dist' => 'phpunit.xml.dist',

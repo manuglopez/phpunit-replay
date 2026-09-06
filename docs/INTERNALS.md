@@ -6,7 +6,7 @@ When SPEC.md and this file disagree on a signature, this file wins (it reflects 
 API); when they disagree on behaviour, SPEC.md wins and the deviation goes to DECISIONS.md.
 
 Conventions: `declare(strict_types=1)` everywhere, `final` by default, `readonly` where the
-object is immutable, PSR-12 via `vendor/bin/pint`, PHPStan level max. All paths handed between
+object is immutable, PSR-12 via `vendor/bin/pint`, PHPStan level max. Target PHP 8.2: no typed class constants, no `#[\Override]`, readonly classes are fine. All paths handed between
 components are **project-relative with forward slashes** unless a parameter is named `$absolute`.
 Never throw out of a public method for an environmental problem (missing git, unreadable file,
 malformed JSON): return `null`/`[]`/`false` and let the caller warn.
@@ -63,7 +63,7 @@ final class Cache\ContentHash               // port of Pest ContentHash
 
 final readonly class Cache\Fingerprint       // port, structural list per SPEC §4.5
 {
-    public const int SCHEMA_VERSION = 1;
+    public const SCHEMA_VERSION = 1;
     /** @return array{structural: array<string, int|string|null>, environmental: array<string, string|null>} */
     public static function compute(string $projectRoot, string $driver): array;
     //   structural: schema, composer_lock, phpunit_xml, phpunit_xml_dist, replay_config (phpunit-replay.php); only git-tracked files hash, else null
@@ -92,7 +92,7 @@ final class Cache\StateDirectory
 /** In-memory graph + JSON codec. SPEC §4.2. Results stored per branch with SHORT keys on disk (s,a,t,m,f,k) and LONG keys in memory. */
 final class Cache\Graph
 {
-    public const int SCHEMA = 1;
+    public const SCHEMA = 1;
     public function __construct(string $projectRoot);
     public function projectRoot(): string;
     public function relative(string $path): ?string;                   // delegates to Support\Paths::relative

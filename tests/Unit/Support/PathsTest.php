@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Manuglopez\Replay\Tests\Unit\Support;
 
 use Manuglopez\Replay\Support\Paths;
+use Manuglopez\Replay\Tests\Support\TempDir;
 use PHPUnit\Framework\TestCase;
 
 final class PathsTest extends TestCase
@@ -83,5 +84,45 @@ final class PathsTest extends TestCase
     public function testJoinWithEmptyRelativeReturnsRoot(): void
     {
         self::assertSame('/project', Paths::join('/project/', ''));
+    }
+
+    public function testRelativeFollowsSymlinksToRealFile(): void
+    {
+        $root = TempDir::make('paths-test');
+        try {
+            $file = $root . '/src/File.php';
+            mkdir($root . '/src', recursive: true);
+            file_put_contents($file, '<?php');
+
+            $linkDir = TempDir::make('paths-test-link');
+            $linkPath = $linkDir . '/link-to-file.php';
+
+            if (@symlink($file, $linkPath) === false) {
+                self::markTestSkipped('symlink() not supported on this system');
+            }
+
+            $result = Paths::relative($root, $linkPath);
+            self::assertSame('src/File.php', $result);
+        } finally {
+            TempDir::remove($root);
+            TempDir::remove($linkDir ?? null);
+        }
+    }
+
+    public function testRelativeResolvesRootWithParentSegments(): void
+    {
+        $root = TempDir::make('paths-test-parent');
+        try {
+            $file = $root . '/app/Test.php';
+            mkdir($root . '/app', recursive: true);
+            file_put_contents($file, '<?php');
+
+            $rootWithParent = $root . '/sub/..';
+
+            $result = Paths::relative($rootWithParent, $file);
+            self::assertSame('app/Test.php', $result);
+        } finally {
+            TempDir::remove($root);
+        }
     }
 }

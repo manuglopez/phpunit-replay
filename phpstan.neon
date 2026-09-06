@@ -1,8 +1,9 @@
 parameters:
     level: max
+    phpVersion: 80200
     paths:
         - src
         - bin
     excludePaths:
-        - tests/Fixtures
+        - tests/Fixtures (?)
     treatPhpDocTypesAsCertain: false

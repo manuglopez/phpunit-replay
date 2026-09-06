@@ -30,13 +30,47 @@ final class Paths
         }
 
         $root = rtrim(self::normalizeSeparators($projectRoot), '/');
+        $realRoot = @realpath($projectRoot);
+        if ($realRoot !== false) {
+            $realRoot = rtrim(self::normalizeSeparators($realRoot), '/');
+        } else {
+            // If realpath fails, try to normalize the root by resolving . and .. segments
+            $realRoot = self::normalizeDotSegments($root);
+            if ($realRoot === $root) {
+                // No normalization happened, so realRoot stays null
+                $realRoot = null;
+            }
+        }
 
         if (self::isAbsolute($normalizedPath)) {
-            if ($normalizedPath === $root || ! str_starts_with($normalizedPath, $root . '/')) {
-                return null;
+            $isUnderRoot = $normalizedPath !== $root && str_starts_with($normalizedPath, $root . '/');
+            $isUnderRealRoot = $realRoot !== null && $normalizedPath !== $realRoot && str_starts_with($normalizedPath, $realRoot . '/');
+            $activeRoot = $root;
+
+            if (! $isUnderRoot && ! $isUnderRealRoot) {
+                // Try realpath if the normalized path is not under either root
+                $real = @realpath($path);
+                if ($real !== false) {
+                    $normalizedReal = rtrim(self::normalizeSeparators($real), '/');
+                    $isUnderRoot = $normalizedReal !== $root && str_starts_with($normalizedReal, $root . '/');
+                    $isUnderRealRoot = $realRoot !== null && $normalizedReal !== $realRoot && str_starts_with($normalizedReal, $realRoot . '/');
+
+                    if (! $isUnderRoot && ! $isUnderRealRoot) {
+                        return null;
+                    }
+
+                    $normalizedPath = $normalizedReal;
+                } else {
+                    return null;
+                }
             }
 
-            $relative = substr($normalizedPath, strlen($root) + 1);
+            // Use realRoot if path is under it but not under root
+            if ($isUnderRealRoot && ! $isUnderRoot && $realRoot !== null) {
+                $activeRoot = $realRoot;
+            }
+
+            $relative = substr($normalizedPath, strlen($activeRoot) + 1);
         } else {
             $relative = $normalizedPath;
 
@@ -78,5 +112,39 @@ final class Paths
         $relative = ltrim(self::normalizeSeparators($relative), '/');
 
         return $relative === '' ? $root : $root . '/' . $relative;
+    }
+
+    private static function normalizeDotSegments(string $path): string
+    {
+        if (! str_contains($path, '.' . '/') && ! str_contains($path, '/' . '.')) {
+            return $path;
+        }
+
+        $parts = explode('/', $path);
+        $result = [];
+
+        foreach ($parts as $part) {
+            if ($part === '.' || $part === '') {
+                // Skip '.' and empty segments (except for leading empty on absolute paths)
+                if ($part === '' && count($result) === 0) {
+                    $result[] = '';
+                }
+                continue;
+            }
+
+            if ($part === '..') {
+                // Go up one level
+                if (count($result) > 0 && $result[count($result) - 1] !== '') {
+                    array_pop($result);
+                }
+                continue;
+            }
+
+            $result[] = $part;
+        }
+
+        $normalized = implode('/', $result);
+
+        return $normalized === '' ? '/' : $normalized;
     }
 }
