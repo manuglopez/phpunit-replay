@@ -632,3 +632,63 @@ Fixture `tests/Fixtures/Projects/laravel-lite`: created from `composer create-pr
 ### Paratest (SPEC §13)
 
 Wrapper: `--parallel|-p[=N]` → launches `vendor/bin/paratest -c <xml> --processes N --passthru-php="-d pcov.enabled=1 -d pcov.directory=<root>"` with the same env; `RunWriter` uses `runs/<id>/worker-<TEST_TOKEN>-{edges,results,tables,not_cacheable}.json` when env `TEST_TOKEN` is set; `RunPartial::load()` merges worker files (edges by union, results last-write-wins, meta from any worker, truncated = any). `brianium/paratest` becomes a dev dependency (DECISIONS).
+
+## Phase 3 contracts — distribution
+
+### Remote cache (SPEC §9) — keys and backends
+
+Keys: `graph/<project-key>/<branch>.json` (full graph of a branch baseline) and `objects/<yyyy-mm>/<k>.json`
+(results of one test file by content key; the month shard is the write month; lookups try every shard, newest first).
+`objects/*` are append-only and content-addressed: writing the same key twice is a no-op.
+
+```php
+interface Cache\Remote\RemoteCache
+{
+    public function get(string $key): ?string;
+    public function put(string $key, string $body): void;      // never throws: failures → warning via a callback / returned false in a `lastError()`
+    public function has(string $key): bool;
+    /** @return list<string> keys under a prefix (used by prune --remote) */ public function keys(string $prefix): array;
+    public function delete(string $key): void;
+    public function name(): string;                            // 'null' | 'file' | 'http' | 'git'
+    /** Called once per run before the first read; may fetch. */ public function begin(): void;
+    /** Called once per run after the last write; may push/flush. */ public function end(): void;
+}
+final class Cache\Remote\NullRemoteCache
+final class Cache\Remote\FilesystemRemoteCache     // remote = file:///path ; AtomicFile writes; keys map to paths
+final class Cache\Remote\HttpRemoteCache           // remote = http(s)://host/prefix/ ; GET/PUT/HEAD/DELETE (+ Bearer token); S3/MinIO presigned or nginx dav_methods; 5 s timeouts; curl ext or stream wrapper
+final class Cache\Remote\GitRemoteCache            // remote = git+ssh://…, git+https://…, or any URL ending in .git
+final class Cache\Remote\RemoteCacheFactory        // from Config: scheme → backend; unknown → Null + warning
+final class Cache\Remote\ObjectStore               // put/get of objects/<shard>/<k>.json + graph/<key>/<branch>.json on top of RemoteCache; local read-through cache in <stateDir>/remote/
+```
+
+### GitRemoteCache — automatic maintenance
+
+- Mirror: `<stateDir>/remote/git/` = shallow clone (`--depth 1`, single branch, default `main`, configurable `remote_branch`).
+- `begin()`: create the mirror if missing; otherwise `git fetch --depth 1 origin <branch>` + `git reset --hard FETCH_HEAD` when the mirror is older than `remote_refresh_seconds` (default 300). If fetch reports unrelated/rewritten history → wipe and re-clone. Any failure → warning, continue with what the mirror has (offline mode).
+- `put()`: writes into the mirror working tree (AtomicFile) and remembers the path; `end()`: `git add` + one commit `replay: <project-key> <branch> <sha7> +N objects` + `git push origin HEAD:<branch>`; on rejection: `fetch` + `rebase` (objects never conflict; for `graph/**` keep ours) → retry up to 3 times; still failing → warning, objects stay committed locally and go with the next push. Push is skipped when nothing was written. Total time budget: `remote_timeout` (default 60 s) — beyond it the push is abandoned with a warning.
+- Locking: `flock` on `<stateDir>/remote/git.lock` around begin/end (Paratest workers do not touch the remote; only the wrapper does).
+- Policy `remote_push`: `objects` (default for developers: only `objects/**`), `all` (CI baseline job: objects + `graph/**`), `off` (pull only).
+- Auth: whatever git already has (SSH agent, credential helper, deploy key in CI). No token handling in the package.
+- Garbage collection: `phpunit-replay prune --remote [--keep-months=3]` deletes shards older than N months except objects referenced by any `graph/**` file, then (with `--squash`) re-creates the branch as an orphan commit and force-pushes; clients detect the rewritten history on the next `begin()` and re-clone. Intended to run from a monthly CI job (`.github/workflows/tia-gc.yml`).
+
+### Pipeline changes
+
+- Startup without local graph: `ObjectStore::graph(key, branch) ?? graph(key, defaultBranch)` → fingerprint reconcile (structural must match; environmental drift clears results) → sha must be an ancestor of HEAD, else use it only as a source of `objects` by key (edges still useful) — record fresh but replay-remote by `k` still applies.
+- Replay: for every test file in the run list that is `affected` (not unknown/rerun/quarantined/not-cacheable): compute `k_now`; `ObjectStore::object(k_now)` hit → mark file **replayed-remote**, drop from the run list, merge its results with `key = k_now` (Summary: `M replayed (R from remote)`).
+- After the run: `put objects/<shard>/<k>.json` for each executed test file (results of that file, with `k`); `put graph/<key>/<branch>.json` when `remote_push === 'all'` and the pass was complete. `CI=true`: objects only unless `--allow-ci-baseline`.
+- Commands: `push [--graph]` (force a push of the current graph and all objects derivable from it), `pull` (fetch graph for the current branch/default and store locally as baseline), `prune --remote`.
+- `--no-remote` disables all of the above for one run; `remote => null` disables permanently.
+
+### CoverageMerger (SPEC §3.2, port of Pest CoverageMerger)
+
+`Report\CoverageMerger::merge(string $coveragePhpFromRun, string $stateDir, list<string> $replayedTestFiles): string` — the wrapper accepts `--coverage-php=FILE` and, when replayed files have a stored per-file coverage snapshot (`<stateDir>/coverage/<k>.cov`, written at record time when `--coverage-php` was requested), merges them with the run's `CodeCoverage` object and writes the final file. Only `.php` coverage (serialized `SebastianBergmann\CodeCoverage\CodeCoverage`); HTML/Clover are produced by the user from it. Documented limitation: coverage snapshots are only available for test files recorded with `--coverage-php`.
+
+### GitHub Actions (examples in `.github/workflows/`)
+
+- `tia-baseline.yml` (push to main): checkout `fetch-depth: 0`, PHP + pcov, `composer install`, `phpunit-replay record --fresh -p`, `phpunit-replay push --graph` (remote configured via `PHPUNIT_REPLAY_REMOTE` secret/var; git backend uses a deploy key).
+- `ci.yml` (pull_request): job `fast` → `phpunit-replay run` (pulls main baseline + objects, pushes objects); job `full` → `phpunit-replay verify` (gate). Both `fetch-depth: 0`.
+- `tia-gc.yml` (monthly cron): `phpunit-replay prune --remote --keep-months=3 --squash`.
+
+### README additions (phase 3)
+
+Section "Sharing the cache with your team" with a comparison table and setup steps for: local only (default), shared folder (`file://`), HTTP (S3/MinIO presigned, nginx WebDAV), **dedicated git repository** (recommended when no object storage exists: create empty repo, give CI a deploy key, `remote => 'git@github.com:org/project-replay-cache.git'`, `remote_push`, GC job), and CI artifacts (`baseline-path` + actions/cache). Each with prerequisites, what gets shared, failure behaviour (never breaks the run), and size expectations.

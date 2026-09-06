@@ -179,3 +179,13 @@ It does not hand a `Quarantine` to its `GraphUpdater`, so one event is booked on
 ## D-037 — Merge of the hermeticity branch over Paratest/Laravel
 
 `RunPartial` carries both `usesDatabase` and `notCacheable`; every partial file (including `not_cacheable.json`) goes through `RunWriter::pathFor()` so Paratest workers never collide. `ReplayState::persistInProcess()` builds `RunPartial` with named arguments after a positional-argument slip was caught. Known gap: `LaravelIntegration::augment()` rebuilt `RunPartial` positionally and dropped `notCacheable`.
+
+## D-038 — Phase 3 gains a git-backed remote cache
+
+Owner request (2026-09-07): teams without S3/MinIO should be able to share the cache through a
+dedicated git repository (not the code repo — its graph churns on every pass and would conflict).
+`GitRemoteCache` keeps a shallow mirror under the state dir, treats `objects/<month>/<k>.json` as
+append-only content-addressed files (no conflicts by construction), publishes `graph/**` only
+from CI (`remote_push=all`), and is garbage-collected by `prune --remote` (monthly shards +
+orphan squash). Setup, usage and alternatives (shared folder, HTTP, CI artifacts) are documented
+in the README. Contracts in docs/INTERNALS.md "Phase 3 contracts".
