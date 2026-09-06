@@ -159,6 +159,11 @@ final class ReplayExtension implements Extension
             new FlushOnExecutionFinished(ReplayState::runWriter(), $recorderForFlush, $collector, $meta),
             new MarkTruncatedOnExecutionAborted(ReplayState::runWriter()),
         );
+
+        // Optional Laravel integration (SPEC.md §10): entry points live in Laravel\LaravelIntegration.
+        if (class_exists(\Manuglopez\Replay\Laravel\LaravelIntegration::class) && \Manuglopez\Replay\Laravel\LaravelIntegration::shouldArm($root)) {
+            $facade->registerSubscribers(...\Manuglopez\Replay\Laravel\LaravelIntegration::subscribers($recorderForFlush));
+        }
     }
 
     private static function resolveRoot(Configuration $configuration): string

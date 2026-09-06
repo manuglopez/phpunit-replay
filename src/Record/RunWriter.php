@@ -60,6 +60,38 @@ final class RunWriter
     }
 
     /**
+     * Writes `uses_database.json` (Laravel integration, SPEC.md §10): the project-relative
+     * test files whose class uses a database-refreshing testing trait. Deliberately separate
+     * from {@see self::flush()} — the Laravel integration is optional and must not change the
+     * core recording path's signature.
+     *
+     * @param  list<string>  $testFilesAbsolute
+     */
+    public function writeUsesDatabase(array $testFilesAbsolute): bool
+    {
+        $relative = [];
+
+        foreach ($testFilesAbsolute as $testFileAbsolute) {
+            $rel = Paths::relative($this->projectRoot, $testFileAbsolute);
+
+            if ($rel !== null) {
+                $relative[$rel] = true;
+            }
+        }
+
+        $names = array_keys($relative);
+        sort($names);
+
+        $json = Json::encode($names);
+
+        if ($json === null) {
+            return false;
+        }
+
+        return AtomicFile::write($this->runDir . '/uses_database.json', $json);
+    }
+
+    /**
      * @param array<string, list<string>> $perTestFiles absolute test file => absolute source files
      * @return array<string, list<string>> relative test file => relative source files
      */

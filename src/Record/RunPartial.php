@@ -19,12 +19,14 @@ final readonly class RunPartial
      * @param array<string, array{status: int, message: string, time: float, assertions: int, file?: string}> $results file rel
      * @param array<string, list<string>> $tables
      * @param array<string, mixed> $meta
+     * @param list<string> $usesDatabase project-relative test files using a database-refreshing trait (Laravel, SPEC.md §10)
      */
     public function __construct(
         public array $edges,
         public array $results,
         public array $tables,
         public array $meta,
+        public array $usesDatabase = [],
     ) {
     }
 
@@ -50,11 +52,15 @@ final readonly class RunPartial
         $tablesJson = AtomicFile::read($runDir . '/tables.json');
         $rawTables = $tablesJson !== null ? Json::decodeArray($tablesJson) : null;
 
+        $usesDatabaseJson = AtomicFile::read($runDir . '/uses_database.json');
+        $rawUsesDatabase = $usesDatabaseJson !== null ? Json::decodeArray($usesDatabaseJson) : null;
+
         return new self(
             self::normalizeStringListMap($rawEdges ?? []),
             self::normalizeResults($rawResults),
             self::normalizeStringListMap($rawTables ?? []),
             self::normalizeMeta($rawMeta),
+            self::normalizeStringList($rawUsesDatabase ?? []),
         );
     }
 
@@ -122,6 +128,23 @@ final readonly class RunPartial
             }
 
             $out[$testId] = $entry;
+        }
+
+        return $out;
+    }
+
+    /**
+     * @param array<mixed> $raw
+     * @return list<string>
+     */
+    private static function normalizeStringList(array $raw): array
+    {
+        $out = [];
+
+        foreach ($raw as $item) {
+            if (is_string($item)) {
+                $out[] = $item;
+            }
         }
 
         return $out;

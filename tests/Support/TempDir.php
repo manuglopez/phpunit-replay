@@ -69,33 +69,83 @@ final class TempDir
         }
     }
 
-    public static function copyTree(string $from, string $to): void
+    /**
+     * Copies a directory tree. Never follows a symlinked entry into its target (which would
+     * either recurse forever on a self-referential path — e.g. a composer path-repo symlink
+     * whose target contains the very fixture being copied — or, for a *relative* symlink,
+     * resolve to the wrong place once recreated at a different depth): a symlink is instead
+     * recreated as a symlink pointing at the same *absolute*, fully-resolved target.
+     *
+     * @param  list<string>  $exclude  top-level relative paths (e.g. "vendor") to skip entirely
+     */
+    public static function copyTree(string $from, string $to, array $exclude = []): void
     {
-        $iterator = new RecursiveIteratorIterator(
-            new RecursiveDirectoryIterator($from, FilesystemIterator::SKIP_DOTS),
-            RecursiveIteratorIterator::SELF_FIRST,
-        );
-
         if (! is_dir($to) && ! @mkdir($to, 0o775, true) && ! is_dir($to)) {
             throw new RuntimeException('Cannot create ' . $to);
         }
 
-        /** @var SplFileInfo $entry */
-        foreach ($iterator as $entry) {
-            $relative = substr($entry->getPathname(), strlen($from) + 1);
-            $target = $to . DIRECTORY_SEPARATOR . $relative;
+        self::copyTreeRecursive($from, $to, $exclude, '');
+    }
 
-            if ($entry->isDir()) {
-                if (! is_dir($target) && ! @mkdir($target, 0o775, true) && ! is_dir($target)) {
-                    throw new RuntimeException('Cannot create ' . $target);
+    /** @param list<string> $exclude */
+    private static function copyTreeRecursive(string $from, string $to, array $exclude, string $prefix): void
+    {
+        $entries = scandir($from);
+
+        if ($entries === false) {
+            throw new RuntimeException('Cannot read ' . $from);
+        }
+
+        foreach ($entries as $entry) {
+            if ($entry === '.' || $entry === '..') {
+                continue;
+            }
+
+            $relative = $prefix === '' ? $entry : $prefix . '/' . $entry;
+
+            if (self::isExcluded($relative, $exclude)) {
+                continue;
+            }
+
+            $source = $from . DIRECTORY_SEPARATOR . $entry;
+            $target = $to . DIRECTORY_SEPARATOR . $entry;
+
+            if (is_link($source)) {
+                $resolved = realpath($source);
+                $linkTarget = $resolved === false ? readlink($source) : $resolved;
+
+                if ($linkTarget === false || ! @symlink($linkTarget, $target)) {
+                    throw new RuntimeException('Cannot symlink ' . $target . ' to ' . $source);
                 }
 
                 continue;
             }
 
-            if (! @copy($entry->getPathname(), $target)) {
-                throw new RuntimeException('Cannot copy ' . $entry->getPathname());
+            if (is_dir($source)) {
+                if (! is_dir($target) && ! @mkdir($target, 0o775, true) && ! is_dir($target)) {
+                    throw new RuntimeException('Cannot create ' . $target);
+                }
+
+                self::copyTreeRecursive($source, $target, $exclude, $relative);
+
+                continue;
+            }
+
+            if (! @copy($source, $target)) {
+                throw new RuntimeException('Cannot copy ' . $source);
             }
         }
+    }
+
+    /** @param list<string> $exclude */
+    private static function isExcluded(string $relative, array $exclude): bool
+    {
+        foreach ($exclude as $excluded) {
+            if ($relative === $excluded || str_starts_with($relative, $excluded . DIRECTORY_SEPARATOR)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

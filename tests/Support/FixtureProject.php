@@ -35,6 +35,48 @@ final class FixtureProject
         return new self($repo);
     }
 
+    /**
+     * Copies tests/Fixtures/Projects/laravel-lite — including its installed vendor/ — into a
+     * fresh GitRepo::init() root; composer install is never re-run per test.
+     *
+     * Deviation from a plain "symlink `<root>/vendor` to the fixture's installed vendor/":
+     * PHP resolves `__DIR__`/`__FILE__` for an included file to its *fully resolved* path,
+     * symlinks and all (verified empirically) — so with `vendor` itself symlinked, every
+     * composer-autoloaded class (the whole `App\` namespace included) would load from the
+     * *original* fixture path rather than this copy, and pcov (scoped to this copy's root)
+     * would never see it. `vendor/` is instead copied for real, except its one internal
+     * symlink (the `manuglopez/phpunit-replay` composer path-repo entry, `symlink: true` in
+     * the fixture's composer.json) — copied AS a symlink, pointing at the same fully-resolved
+     * absolute target, by {@see TempDir::copyTree()}: copying it byte-for-byte would recurse
+     * forever, since that target is the package root, which contains this very fixture.
+     * Use {@see self::laravelLiteAvailable()} to skip when that vendor/ was never installed.
+     */
+    public static function laravelLite(): self
+    {
+        $fixtureDir = self::projectsDir() . '/laravel-lite';
+
+        if (! is_file($fixtureDir . '/vendor/autoload.php')) {
+            throw new RuntimeException(
+                'tests/Fixtures/Projects/laravel-lite/vendor is missing — run composer install there first '
+                . '(see tests/Fixtures/Projects/laravel-lite/README.md).',
+            );
+        }
+
+        $repo = GitRepo::init();
+
+        TempDir::copyTree($fixtureDir, $repo->root);
+
+        $repo->commitAll('initial');
+
+        return new self($repo);
+    }
+
+    /** True when tests/Fixtures/Projects/laravel-lite/vendor/autoload.php exists (composer install was run there). */
+    public static function laravelLiteAvailable(): bool
+    {
+        return is_file(self::projectsDir() . '/laravel-lite/vendor/autoload.php');
+    }
+
     public function root(): string
     {
         return $this->repo->root;
