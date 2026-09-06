@@ -1,0 +1,25 @@
+<?php
+
+/**
+ * Signatures for the subset of the Xdebug API used as a coverage driver, for static
+ * analysis only.
+ *
+ * @see https://xdebug.org/docs/code_coverage
+ */
+function xdebug_start_code_coverage(int $options = 0): void
+{
+}
+
+/** @return array<string, array<int, int>> */
+function xdebug_get_code_coverage(): array
+{
+}
+
+function xdebug_stop_code_coverage(bool $append = true): void
+{
+}
+
+/** @return list<string>|string|false */
+function xdebug_info(string $option = ''): array|string|false
+{
+}
