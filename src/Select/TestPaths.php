@@ -115,4 +115,10 @@ final readonly class TestPaths
     {
         return $this->directories;
     }
+
+    /** @return list<string> explicit `<file>` entries from `<testsuites>`, project-relative. */
+    public function files(): array
+    {
+        return $this->files;
+    }
 }

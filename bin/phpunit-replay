@@ -3,6 +3,39 @@
 
 declare(strict_types=1);
 
-// Placeholder; replaced by the Symfony Console application in Phase 1.
-fwrite(STDERR, "phpunit-replay: not implemented yet\n");
-exit(1);
+$candidates = [];
+
+if (isset($GLOBALS['_composer_autoload_path']) && is_string($GLOBALS['_composer_autoload_path'])) {
+    // Set by Composer's own generated vendor/bin/phpunit-replay shim when this package
+    // is installed as a dependency: authoritative when present.
+    $candidates[] = $GLOBALS['_composer_autoload_path'];
+}
+
+// Developing this package: vendor/ is a sibling of bin/.
+$candidates[] = __DIR__ . '/../vendor/autoload.php';
+
+// Installed under <project>/vendor/manuglopez/phpunit-replay/bin/, run directly
+// (no Composer-generated shim in front of it): the project's own vendor/autoload.php
+// is two levels up from vendor/manuglopez/phpunit-replay.
+$candidates[] = __DIR__ . '/../../autoload.php';
+
+$autoloaded = false;
+
+foreach ($candidates as $candidate) {
+    if (is_file($candidate)) {
+        require $candidate;
+        $autoloaded = true;
+
+        break;
+    }
+}
+
+if (! $autoloaded) {
+    fwrite(STDERR, 'phpunit-replay: cannot locate the Composer autoloader' . PHP_EOL);
+
+    exit(1);
+}
+
+$application = new Manuglopez\Replay\Console\Application();
+
+exit($application->run());
