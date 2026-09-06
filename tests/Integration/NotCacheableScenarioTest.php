@@ -44,11 +44,13 @@ final class NotCacheableScenarioTest extends TestCase
         // Nothing changed: NotCacheableTest.php (class-level, 2 tests) and
         // PartiallyCacheableTest.php (method-level on one of its 2 tests — the whole
         // file belongs in the run list) still execute for real; everything else replays.
+        // quarantined counts tests, not files (docs/INTERNALS.md "Summary counters"): all
+        // 4 executed tests belong to the two non-cacheable files.
         $result = $this->fixture->replay([]);
         self::assertSame(0, $result['exitCode'], $result['stdout'] . $result['stderr']);
         self::assertSame(0, ReplayAssert::affectedCount($result['stdout']));
         self::assertSame(0, ReplayAssert::uncachedCount($result['stdout']));
-        self::assertSame(2, ReplayAssert::quarantinedCount($result['stdout']));
+        self::assertSame(4, ReplayAssert::quarantinedCount($result['stdout']));
         self::assertSame(4, ReplayAssert::executedCount($result['stdout']));
 
         $status = $this->fixture->replay(['status']);

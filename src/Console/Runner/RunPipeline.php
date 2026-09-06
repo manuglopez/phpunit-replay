@@ -27,6 +27,7 @@ use Manuglopez\Replay\PHPUnit\ConfigurationReader;
 use Manuglopez\Replay\PHPUnit\ConfigurationWriter;
 use Manuglopez\Replay\Record\DriverDetector;
 use Manuglopez\Replay\Record\RunPartial;
+use Manuglopez\Replay\Report\DryRunSummary;
 use Manuglopez\Replay\Report\JUnitMerger;
 use Manuglopez\Replay\Report\Summary;
 use Manuglopez\Replay\Report\VerifySummary;
@@ -555,7 +556,15 @@ final class RunPipeline
         }
 
         if ($request->dryRun) {
-            $this->printSummary(0, $data['affected'], $data['uncached'], $data['replayed'], $data['quarantined'], $data['saved'], true);
+            $summary = new DryRunSummary(
+                count($runList),
+                $data['affected'],
+                $data['uncached'],
+                $data['quarantined'],
+                $data['replayed'],
+            );
+
+            fwrite(STDOUT, $summary->format() . PHP_EOL);
 
             return 0;
         }
@@ -571,7 +580,9 @@ final class RunPipeline
                 $this->quarantine->save($this->stateDir);
             }
 
-            $this->printSummary(0, 0, 0, $data['replayed'], $data['quarantined'], $data['saved'], true);
+            // Nothing executed: affected/uncached/quarantined (test counts, see
+            // executeReplay()) are necessarily all zero too.
+            $this->printSummary(0, 0, 0, $data['replayed'], 0, $data['saved'], true);
 
             if ($request->logJunit !== null) {
                 $merged = (new JUnitMerger())->merge(null, $graph->results($this->branch), $root);
@@ -672,12 +683,14 @@ final class RunPipeline
             $savedSeconds += $result['time'];
         }
 
+        $executed = self::classifyExecuted($data['list'], $partial->results);
+
         $this->printSummary(
             count($partial->results),
-            $data['affected'],
-            $data['uncached'],
+            $executed['affected'],
+            $executed['uncached'],
             count($replayed),
-            $data['quarantined'],
+            $executed['quarantined'],
             $savedSeconds,
             $exitCode === 0,
         );
@@ -686,6 +699,11 @@ final class RunPipeline
     }
 
     /**
+     * `affected`/`uncached`/`quarantined` here count test FILES, computed before anything
+     * has run — the only thing `--dry-run` (Report\DryRunSummary) can report. The real
+     * run's own Summary counters (docs/INTERNALS.md "Summary counters") are test counts,
+     * classified per executed result afterwards by {@see self::classifyExecuted()}.
+     *
      * @param list<string> $changed
      * @return array{list: RunList, runList: list<string>, affected: int, uncached: int, quarantined: int, replayed: int, saved: float}
      */
@@ -746,6 +764,38 @@ final class RunPipeline
         }
 
         return [$count, $saved];
+    }
+
+    /**
+     * Report\Summary's own affected/uncached/quarantined counters (docs/INTERNALS.md
+     * "Summary counters", SPEC.md §11): classifies each executed test result by its
+     * file's {@see RunList::primaryReasonFor()}, so `executed === affected + uncached +
+     * quarantined` always holds for a real (non-dry-run) pass.
+     *
+     * @param array<string, array{status:int, message:string, time:float, assertions:int, file?:string}> $results
+     * @return array{affected: int, uncached: int, quarantined: int}
+     */
+    private static function classifyExecuted(RunList $list, array $results): array
+    {
+        $affected = 0;
+        $uncached = 0;
+        $quarantined = 0;
+
+        foreach ($results as $result) {
+            $file = $result['file'] ?? null;
+
+            if (! is_string($file) || $file === '') {
+                continue;
+            }
+
+            match ($list->primaryReasonFor($file)) {
+                'affected' => $affected++,
+                'uncached' => $uncached++,
+                default => $quarantined++,
+            };
+        }
+
+        return ['affected' => $affected, 'uncached' => $uncached, 'quarantined' => $quarantined];
     }
 
     private function printSummary(int $executed, int $affected, int $uncached, int $replayed, int $quarantined, float $saved, bool $success): void

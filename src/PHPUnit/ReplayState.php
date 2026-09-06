@@ -365,6 +365,14 @@ final class ReplayState
      * minus the ones the trait satisfied from cache — so tests that do not use the trait
      * (and therefore always run for real) are counted correctly.
      *
+     * Every field here counts individual tests, not test files: `decide()` increments
+     * `affected`/`uncached`/`quarantined` once per `Run` decision (one per test id) and
+     * `markReplayed()` increments `replayed` once per replayed test id, so
+     * `executed === affected + uncached + quarantined` holds the same way it does for
+     * the wrapper's own Summary (docs/INTERNALS.md "Summary counters",
+     * Console\Runner\RunPipeline::classifyExecuted()) — this is the one path that
+     * already got it right, the wrapper had to be brought in line with it.
+     *
      * @return array{affected: int, uncached: int, replayed: int, quarantined: int, executed: int}
      */
     public static function counters(): array

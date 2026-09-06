@@ -92,10 +92,12 @@ final class AcceptanceCriteriaTest extends TestCase
         self::assertSame(7, $failedResult['status']);
 
         // Nothing on disk changed; a cached pass would replay 35/35. Instead the failing
-        // test's file is scheduled to run again (uncached=1), proving it was not replayed.
+        // test's file (GreeterTest.php, 4 tests) is scheduled to run again — uncached
+        // counts tests, not files (docs/INTERNALS.md "Summary counters") — proving it was
+        // not replayed.
         $result = $fixture->replay([]);
         self::assertSame(0, $result['exitCode'], $result['stdout'] . $result['stderr']);
-        self::assertSame(1, ReplayAssert::uncachedCount($result['stdout']));
+        self::assertSame(4, ReplayAssert::uncachedCount($result['stdout']));
         self::assertSame(4, ReplayAssert::executedCount($result['stdout']));
     }
 

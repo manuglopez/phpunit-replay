@@ -8,6 +8,16 @@ namespace Manuglopez\Replay\Report;
  * The wrapper's own summary line, printed below PHPUnit's own output (SPEC §11):
  *
  *   Replay  ✓ 38 executed (31 affected, 7 uncached) · 1202 replayed (14 from remote) · 2 quarantined · baseline main@a1b2c3d · saved 4m12s
+ *
+ * Every counter here counts individual TESTS, never test files: `executed` is the number
+ * of tests PHPUnit actually ran this pass, `affected`/`uncached`/`quarantined` classify
+ * each of those by its file's primary reason in the run list (so `executed === affected +
+ * uncached + quarantined` always holds — docs/INTERNALS.md "Summary counters"), and
+ * `replayed` is the number of cached test results served without running them. This
+ * matches `PHPUnit\ReplayState::counters()` (in-process mode, SPEC.md §6), which already
+ * counted tests this way; `Console\Runner\RunPipeline::classifyExecuted()` is what makes
+ * the wrapper agree with it. `--dry-run`, which has nothing executed yet to classify,
+ * prints {@see DryRunSummary} instead — a deliberately different shape, over test files.
  */
 final readonly class Summary
 {
