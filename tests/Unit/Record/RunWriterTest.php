@@ -178,4 +178,40 @@ final class RunWriterTest extends TestCase
         self::assertSame([], $partial->edges);
         self::assertSame([], $partial->tables);
     }
+
+    #[Test]
+    public function load_defaults_uses_database_to_empty_when_its_file_is_missing(): void
+    {
+        $recorder = new Recorder(new FakeCoverageDriver([]));
+        $collector = new ResultCollector();
+        (new RunWriter($this->runDir, $this->projectRoot))->flush($recorder, $collector, ['driver' => 'fake']);
+
+        $partial = RunPartial::load($this->runDir);
+
+        self::assertNotNull($partial);
+        self::assertSame([], $partial->usesDatabase);
+    }
+
+    #[Test]
+    public function write_uses_database_relativises_sorts_and_dedupes_and_round_trips_via_run_partial(): void
+    {
+        $recorder = new Recorder(new FakeCoverageDriver([]));
+        $collector = new ResultCollector();
+        $writer = new RunWriter($this->runDir, $this->projectRoot);
+        $writer->flush($recorder, $collector, ['driver' => 'fake']);
+
+        $ok = $writer->writeUsesDatabase([
+            $this->projectRoot . '/tests/UsersTest.php',
+            $this->projectRoot . '/tests/PostsTest.php',
+            $this->projectRoot . '/tests/PostsTest.php',
+            '/outside/root/tests/OutsideTest.php',
+        ]);
+
+        self::assertTrue($ok);
+        self::assertFileExists($this->runDir . '/uses_database.json');
+
+        $partial = RunPartial::load($this->runDir);
+        self::assertNotNull($partial);
+        self::assertSame(['tests/PostsTest.php', 'tests/UsersTest.php'], $partial->usesDatabase);
+    }
 }
