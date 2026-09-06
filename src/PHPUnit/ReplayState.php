@@ -20,6 +20,8 @@ use Manuglopez\Replay\Config;
 use Manuglopez\Replay\Console\Runner\Warnings;
 use Manuglopez\Replay\Hermeticity\Policy;
 use Manuglopez\Replay\Hermeticity\Quarantine;
+use Manuglopez\Replay\Laravel\LaravelDetector;
+use Manuglopez\Replay\Laravel\LaravelIntegration;
 use Manuglopez\Replay\PHPUnit\Decision\Decision;
 use Manuglopez\Replay\PHPUnit\Decision\ReplayIncomplete;
 use Manuglopez\Replay\PHPUnit\Decision\ReplayPass;
@@ -102,6 +104,8 @@ final class ReplayState
     private static string $defaultBranch = 'main';
 
     private static bool $persist = false;
+
+    private static ?Config $config = null;
 
     /** @var array<string, Decision> */
     private static array $decisions = [];
@@ -191,6 +195,7 @@ final class ReplayState
         self::$head = $git->currentSha();
         self::$defaultBranch = $defaultBranch;
         self::$persist = $persist;
+        self::$config = $config;
         self::$quarantine = Quarantine::load($stateDir);
         self::$quarantine->setReleaseAfter($config->quarantineReleaseAfter);
 
@@ -360,6 +365,14 @@ final class ReplayState
      * minus the ones the trait satisfied from cache — so tests that do not use the trait
      * (and therefore always run for real) are counted correctly.
      *
+     * Every field here counts individual tests, not test files: `decide()` increments
+     * `affected`/`uncached`/`quarantined` once per `Run` decision (one per test id) and
+     * `markReplayed()` increments `replayed` once per replayed test id, so
+     * `executed === affected + uncached + quarantined` holds the same way it does for
+     * the wrapper's own Summary (docs/INTERNALS.md "Summary counters",
+     * Console\Runner\RunPipeline::classifyExecuted()) — this is the one path that
+     * already got it right, the wrapper had to be brought in line with it.
+     *
      * @return array{affected: int, uncached: int, replayed: int, quarantined: int, executed: int}
      */
     public static function counters(): array
@@ -412,6 +425,12 @@ final class ReplayState
             ['truncated' => $truncated],
             notCacheable: self::$notCacheable?->all() ?? [],
         );
+
+        // Laravel integration (SPEC.md §10): widens database test tables the same way the
+        // wrapper does (Console\Runner\RunPipeline) before folding the partial into the graph.
+        if (LaravelDetector::enabled($root, self::$config ?? Config::defaults())) {
+            $partial = LaravelIntegration::augment($partial, $root);
+        }
 
         $updater = new GraphUpdater($graph, $root, new ContentKey($root), self::$quarantine);
         $updater->apply($partial, self::$branch, recordsEdges: $recordsEdges, complete: $complete);
@@ -502,6 +521,7 @@ final class ReplayState
         self::$head = null;
         self::$defaultBranch = 'main';
         self::$persist = false;
+        self::$config = null;
         self::$decisions = [];
         self::$replayed = [];
         self::$counters = ['affected' => 0, 'uncached' => 0, 'replayed' => 0, 'quarantined' => 0];
@@ -625,8 +645,15 @@ final class ReplayState
         $reader = self::$reader ?? new ConfigurationReader($configuration);
 
         self::$policy = $policy;
-        self::$runList = (new RunListBuilder($graph, $testPaths, $watch, $reader, $policy, $root))
-            ->build($changed, $branch);
+        self::$runList = (new RunListBuilder(
+            $graph,
+            $testPaths,
+            $watch,
+            $reader,
+            $policy,
+            $root,
+            LaravelIntegration::rulesFor($graph, $root, $config),
+        ))->build($changed, $branch);
 
         Warnings::debug('changed: ' . ($changed === [] ? '(none)' : implode(', ', $changed)));
     }

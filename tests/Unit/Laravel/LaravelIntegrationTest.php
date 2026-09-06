@@ -18,6 +18,7 @@ use Manuglopez\Replay\Select\Rules\SiblingRule;
 use Manuglopez\Replay\Tests\Support\TempDir;
 use Manuglopez\Replay\Tests\Unit\Record\FakeCoverageDriver;
 use PHPUnit\Framework\Attributes\After;
+use PHPUnit\Framework\Attributes\RunInSeparateProcess;
 use PHPUnit\Framework\TestCase;
 
 final class LaravelIntegrationTest extends TestCase
@@ -46,6 +47,23 @@ final class LaravelIntegrationTest extends TestCase
         self::assertInstanceOf(MigrationRule::class, $rules['migration']);
         self::assertInstanceOf(SiblingRule::class, $rules['sibling']);
         self::assertInstanceOf(BladeRule::class, $rules['blade']);
+    }
+
+    /**
+     * `shouldArm()` is the one entry point still allowed a `class_exists()` check
+     * (docs/INTERNALS.md "Laravel", `LaravelDetector`'s docblock): it gates the runtime
+     * trackers, which only ever run inside the already-booted PHPUnit process.
+     */
+    #[RunInSeparateProcess]
+    public function test_should_arm_requires_both_illuminate_and_an_artisan_file(): void
+    {
+        require_once __DIR__ . '/Fixtures/IlluminateContainerStub.php';
+
+        self::assertFalse(LaravelIntegration::shouldArm($this->root));
+
+        TempDir::write($this->root . '/artisan', '#!/usr/bin/env php');
+
+        self::assertTrue(LaravelIntegration::shouldArm($this->root));
     }
 
     public function test_subscribers_returns_the_arming_and_flushing_subscribers(): void
@@ -116,5 +134,32 @@ final class LaravelIntegrationTest extends TestCase
         self::assertSame($partial->results, $augmented->results);
         self::assertSame($partial->meta, $augmented->meta);
         self::assertSame($partial->usesDatabase, $augmented->usesDatabase);
+    }
+
+    /**
+     * Regression test: an earlier version of `augment()` rebuilt the `RunPartial` with
+     * positional arguments and silently dropped `notCacheable` (it defaults to `[]`),
+     * which would un-quarantine every `#[NotCacheable]`/`never_cache` test file on a
+     * Laravel project the moment it also had a database test to widen.
+     */
+    public function test_augment_preserves_not_cacheable_entries(): void
+    {
+        TempDir::write(
+            $this->root . '/database/migrations/2024_01_01_000000_create_posts_table.php',
+            "<?php\nSchema::create('posts', function (\$table) {});\n",
+        );
+
+        $partial = new RunPartial(
+            edges: [],
+            results: [],
+            tables: ['tests/PostsTest.php' => ['posts']],
+            meta: [],
+            usesDatabase: ['tests/PostsTest.php'],
+            notCacheable: ['tests/ExternalTest.php', 'App\Tests\FlakyTest::testX'],
+        );
+
+        $augmented = LaravelIntegration::augment($partial, $this->root);
+
+        self::assertSame($partial->notCacheable, $augmented->notCacheable);
     }
 }

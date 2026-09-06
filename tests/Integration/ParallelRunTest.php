@@ -102,8 +102,10 @@ final class ParallelRunTest extends TestCase
 
         $result = $fixture->replay(['-p', '2']);
         self::assertSame(0, $result['exitCode'], $result['stdout'] . $result['stderr']);
+        // affected counts tests, not files: all 31 executed tests are in the 6 files
+        // Money.php's PhpEdge selected (docs/INTERNALS.md "Summary counters").
         self::assertStringContainsString(
-            '31 executed (6 affected, 0 uncached) · 4 replayed',
+            '31 executed (31 affected, 0 uncached) · 4 replayed',
             ReplayAssert::lastLine($result['stdout']),
         );
 

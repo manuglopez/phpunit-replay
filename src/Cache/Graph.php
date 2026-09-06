@@ -527,7 +527,7 @@ final class Graph
         }
     }
 
-    /** @return array{files:int, test_files:int, edges:int, branches:int, results:int} */
+    /** @return array{files:int, test_files:int, edges:int, branches:int, results:int, tables:int} */
     public function stats(): array
     {
         $edgeCount = 0;
@@ -542,12 +542,23 @@ final class Graph
             $resultCount += count($baseline['results']);
         }
 
+        $tables = [];
+
+        foreach ($this->testTables as $names) {
+            foreach ($names as $name) {
+                $tables[$name] = true;
+            }
+        }
+
         return [
             'files' => count($this->files),
             'test_files' => count($this->edges),
             'edges' => $edgeCount,
             'branches' => count($this->baselines),
             'results' => $resultCount,
+            // Distinct table names across every test file (Laravel, SPEC.md §10) — 0 on a
+            // non-Laravel project.
+            'tables' => count($tables),
         ];
     }
 

@@ -31,6 +31,9 @@ final class RunList
     /** @var array<string, true>|null */
     private ?array $index = null;
 
+    /** @var array<string, true>|null */
+    private ?array $uncachedIndex = null;
+
     /**
      * @param list<string> $unknown test files on disk the graph does not know
      * @param list<string> $rerun test files with at least one result that must be re-run
@@ -103,5 +106,28 @@ final class RunList
     public static function statusName(int $status): string
     {
         return self::STATUS_NAMES[$status] ?? 'unknown';
+    }
+
+    /**
+     * The single bucket an executed test file's tests are counted under for
+     * Report\Summary (docs/INTERNALS.md "Summary counters", SPEC.md §11): the rule-chain
+     * selection first (`'affected'`), then the synthetic unknown/rerun buckets
+     * (`'uncached'`), then quarantine (`'quarantined'`) — the same precedence
+     * {@see self::reasonsFor()} lists reasons in. Every file actually in {@see self::files()}
+     * matches at least one of the three, so this always returns one of them.
+     */
+    public function primaryReasonFor(string $testFileRel): string
+    {
+        if ($this->selection->has($testFileRel)) {
+            return 'affected';
+        }
+
+        $this->uncachedIndex ??= array_fill_keys([...$this->unknown, ...$this->rerun], true);
+
+        if (isset($this->uncachedIndex[$testFileRel])) {
+            return 'uncached';
+        }
+
+        return 'quarantined';
     }
 }

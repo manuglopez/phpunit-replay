@@ -55,7 +55,9 @@ final class Scenario05FailingTestIsRerunTest extends TestCase
         self::assertSame(0, $rerun['exitCode'], $rerun['stdout'] . $rerun['stderr']);
         self::assertSame(4, ReplayAssert::executedCount($rerun['stdout']));
         self::assertSame(0, ReplayAssert::affectedCount($rerun['stdout']));
-        self::assertSame(1, ReplayAssert::uncachedCount($rerun['stdout']));
+        // Summary counters count tests, not files: all 4 executed tests belong to
+        // GreeterTest.php, the one rerun file (docs/INTERNALS.md "Summary counters").
+        self::assertSame(4, ReplayAssert::uncachedCount($rerun['stdout']));
         self::assertSame(31, ReplayAssert::replayedCount($rerun['stdout']));
 
         $graphAfterRerun = ReplayAssert::loadGraph($this->fixture);

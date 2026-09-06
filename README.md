@@ -91,6 +91,18 @@ vendor/bin/phpunit-replay
 Replay  ✓ 0 executed (0 affected, 0 uncached) · 35 replayed · 0 quarantined · baseline main@abc1234
 ```
 
+Now change a class several test files exercise and run again: only the tests that actually cover
+it execute, everything else is still replayed from the baseline.
+
+```
+Replay  ✓ 31 executed (31 affected, 0 uncached) · 4 replayed · 0 quarantined · baseline main@abc1234
+```
+
+Every number in that line counts individual tests, not test files: `executed` is however many
+tests PHPUnit actually ran this pass, split into `affected` (selected by a rule — PhpEdge, Sibling,
+Blade, Migration, ...), `uncached` (new to the graph, or forced to rerun), and `quarantined`
+(flaky or `#[NotCacheable]`) — the three always add up to `executed`.
+
 `run` is the default subcommand, so `vendor/bin/phpunit-replay` and `vendor/bin/phpunit-replay run`
 are the same thing. Anything after a literal `--` is passed straight through to PHPUnit:
 
