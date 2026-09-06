@@ -18,7 +18,7 @@ use Manuglopez\Replay\Support\Paths;
  */
 final class Graph
 {
-    public const int SCHEMA = 1;
+    public const SCHEMA = 1;
 
     /** @var array<int, string> */
     private array $files = [];
