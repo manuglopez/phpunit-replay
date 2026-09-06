@@ -244,6 +244,22 @@ final class Graph
         return $this->notCacheable;
     }
 
+    /**
+     * Whether `not_cacheable` holds this entry, given either as a test file (absolute or
+     * project-relative) or as a test id (`Class::method`). Test ids are compared verbatim
+     * first, since {@see self::relative()} would rewrite their namespace separators.
+     */
+    public function isNotCacheable(string $fileOrTestId): bool
+    {
+        if (in_array($fileOrTestId, $this->notCacheable, true)) {
+            return true;
+        }
+
+        $rel = $this->relative($fileOrTestId);
+
+        return $rel !== null && in_array($rel, $this->notCacheable, true);
+    }
+
     /** @param array<string, mixed> $fingerprint */
     public function setFingerprint(array $fingerprint): void
     {

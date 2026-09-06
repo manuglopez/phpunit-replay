@@ -26,9 +26,24 @@ final class FixtureProject
      */
     public static function plain(): self
     {
+        return self::fromProject('plain');
+    }
+
+    /**
+     * Same, for tests/Fixtures/Projects/inprocess: the plain fixture whose test classes
+     * extend a base `App\Tests\TestCase` carrying the `Replayable` trait, with the
+     * extension registered in its own phpunit.xml (SPEC.md §3.2).
+     */
+    public static function inprocess(): self
+    {
+        return self::fromProject('inprocess');
+    }
+
+    private static function fromProject(string $name): self
+    {
         $repo = GitRepo::init();
 
-        TempDir::copyTree(self::projectsDir() . '/plain', $repo->root);
+        TempDir::copyTree(self::projectsDir() . '/' . $name, $repo->root);
         self::installVendorShim($repo->root);
         $repo->commitAll('initial');
 
@@ -91,6 +106,21 @@ final class FixtureProject
             'stdout' => $process->getOutput(),
             'stderr' => $process->getErrorOutput(),
         ];
+    }
+
+    /**
+     * Runs PHPUnit inside the fixture copy the way a developer would (no wrapper), with
+     * `HOME` pointed at this instance's temp home so the extension's state directory is
+     * isolated, and `CI` cleared so a CI run of the package's own suite does not stop the
+     * fixture from publishing its baseline.
+     *
+     * @param list<string> $args
+     * @param array<string, string> $env
+     * @return array{exitCode: int, stdout: string, stderr: string}
+     */
+    public function phpunitInProcess(array $args = [], array $env = []): array
+    {
+        return $this->phpunit($args, ['HOME' => $this->homeDir(), 'CI' => '', ...$env]);
     }
 
     /**

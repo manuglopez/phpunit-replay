@@ -1,0 +1,158 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Manuglopez\Replay\Select;
+
+use FilesystemIterator;
+use Manuglopez\Replay\Cache\Graph;
+use Manuglopez\Replay\Hermeticity\Policy;
+use Manuglopez\Replay\PHPUnit\ConfigurationReader;
+use Manuglopez\Replay\Support\Paths;
+use RecursiveDirectoryIterator;
+use RecursiveIteratorIterator;
+use SplFileInfo;
+
+/**
+ * Turns a set of changed files into the list of test files a pass must execute
+ * (docs/INTERNALS.md step 9): the rule chain's selection, plus test files the graph
+ * has never seen, plus files whose cached result must be re-run, plus files holding a
+ * test the hermeticity policy refuses to replay. Extracted from
+ * `Console\Runner\RunPipeline` so the wrapper and the in-process extension agree.
+ */
+final class RunListBuilder
+{
+    /** @var list<string>|null memoised directory walk (project-relative candidates) */
+    private ?array $candidates = null;
+
+    public function __construct(
+        private readonly Graph $graph,
+        private readonly TestPaths $testPaths,
+        private readonly WatchPatterns $watch,
+        private readonly ConfigurationReader $reader,
+        private readonly Policy $policy,
+        private readonly string $projectRoot,
+    ) {
+    }
+
+    /** @param list<string> $changed project-relative changed files */
+    public function build(array $changed, string $branch): RunList
+    {
+        $selection = Selector::default($this->graph, $this->testPaths, $this->watch, $this->projectRoot)
+            ->affected($changed);
+
+        $results = $this->graph->results($branch);
+
+        $unknown = [];
+        $allTestFiles = [];
+
+        foreach ($this->candidateTestFiles() as $rel) {
+            if (! $this->testPaths->isTestFile($rel)) {
+                continue;
+            }
+
+            $allTestFiles[] = $rel;
+
+            if (! $this->graph->knowsTest($rel)) {
+                $unknown[] = $rel;
+            }
+        }
+
+        sort($unknown);
+        sort($allTestFiles);
+
+        $rerun = [];
+        $idsByFile = [];
+
+        foreach ($results as $testId => $result) {
+            $file = $result['file'] ?? null;
+
+            if (! is_string($file) || $file === '' || ! is_file(Paths::join($this->projectRoot, $file))) {
+                continue;
+            }
+
+            $idsByFile[$file][] = $testId;
+
+            if (! isset($rerun[$file]) && $this->reader->shouldRerun($result['status'])) {
+                $rerun[$file] = $result['status'];
+            }
+        }
+
+        $quarantined = $this->policy->nonCacheableFiles($allTestFiles, $idsByFile);
+        $quarantineReasons = [];
+
+        foreach ($quarantined as $file) {
+            $quarantineReasons[$file] = $this->policy->reason($file, $file) ?? 'not cacheable';
+        }
+
+        return new RunList(
+            $selection,
+            $unknown,
+            array_keys($rerun),
+            $quarantined,
+            $rerun,
+            $quarantineReasons,
+        );
+    }
+
+    /**
+     * Every test file currently on disk — the fallback run list for a source change the
+     * pass cannot map to edges (no coverage driver, docs/INTERNALS.md step 9).
+     *
+     * @return list<string> project-relative, sorted
+     */
+    public function allTestFilesOnDisk(): array
+    {
+        $all = [];
+
+        foreach ($this->candidateTestFiles() as $rel) {
+            if ($this->testPaths->isTestFile($rel)) {
+                $all[] = $rel;
+            }
+        }
+
+        sort($all);
+
+        return $all;
+    }
+
+    /** @return list<string> everything under the configured test directories, plus explicit files */
+    private function candidateTestFiles(): array
+    {
+        if ($this->candidates !== null) {
+            return $this->candidates;
+        }
+
+        $candidates = [];
+
+        foreach ($this->testPaths->directories() as $dir) {
+            $absoluteDir = Paths::join($this->projectRoot, $dir);
+
+            if (! is_dir($absoluteDir)) {
+                continue;
+            }
+
+            $iterator = new RecursiveIteratorIterator(
+                new RecursiveDirectoryIterator($absoluteDir, FilesystemIterator::SKIP_DOTS),
+            );
+
+            foreach ($iterator as $fileInfo) {
+                if (! $fileInfo instanceof SplFileInfo || ! $fileInfo->isFile()) {
+                    continue;
+                }
+
+                $rel = Paths::relative($this->projectRoot, $fileInfo->getPathname());
+
+                if ($rel !== null) {
+                    $candidates[$rel] = true;
+                }
+            }
+        }
+
+        foreach ($this->testPaths->files() as $rel) {
+            $candidates[$rel] = true;
+        }
+
+        return $this->candidates = array_keys($candidates);
+    }
+}

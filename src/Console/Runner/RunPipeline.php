@@ -5,28 +5,31 @@ declare(strict_types=1);
 namespace Manuglopez\Replay\Console\Runner;
 
 use FilesystemIterator;
+use Manuglopez\Replay\Cache\BaselineWriter;
 use Manuglopez\Replay\Cache\ContentKey;
 use Manuglopez\Replay\Cache\Fingerprint;
 use Manuglopez\Replay\Cache\Graph;
 use Manuglopez\Replay\Cache\GraphStore;
 use Manuglopez\Replay\Cache\GraphUpdater;
+use Manuglopez\Replay\Cache\RunContext;
 use Manuglopez\Replay\Cache\StateDirectory;
 use Manuglopez\Replay\Change\ChangedFiles;
 use Manuglopez\Replay\Change\Git;
 use Manuglopez\Replay\Change\LastRunTree;
 use Manuglopez\Replay\Config;
+use Manuglopez\Replay\Console\ExplainFormatter;
+use Manuglopez\Replay\Hermeticity\Policy;
+use Manuglopez\Replay\Hermeticity\Quarantine;
 use Manuglopez\Replay\PHPUnit\ConfigurationReader;
 use Manuglopez\Replay\PHPUnit\ConfigurationWriter;
 use Manuglopez\Replay\Record\DriverDetector;
 use Manuglopez\Replay\Record\RunPartial;
 use Manuglopez\Replay\Report\JUnitMerger;
 use Manuglopez\Replay\Report\Summary;
-use Manuglopez\Replay\Select\Reason;
-use Manuglopez\Replay\Select\Selection;
-use Manuglopez\Replay\Select\Selector;
+use Manuglopez\Replay\Select\RunList;
+use Manuglopez\Replay\Select\RunListBuilder;
 use Manuglopez\Replay\Select\TestPaths;
 use Manuglopez\Replay\Select\WatchPatterns;
-use Manuglopez\Replay\Support\Paths;
 use RecursiveDirectoryIterator;
 use RecursiveIteratorIterator;
 use SplFileInfo;
@@ -40,19 +43,6 @@ use Throwable;
  */
 final class RunPipeline
 {
-    /** @var array<int, string> PHPUnit\Framework\TestStatus\TestStatus::asInt() names, SPEC §4.2 */
-    private const STATUS_NAMES = [
-        0 => 'success',
-        1 => 'skipped',
-        2 => 'incomplete',
-        3 => 'notice',
-        4 => 'deprecation',
-        5 => 'risky',
-        6 => 'warning',
-        7 => 'failure',
-        8 => 'error',
-    ];
-
     private RunRequest $request;
 
     private float $startedAt = 0.0;
@@ -83,6 +73,8 @@ final class RunPipeline
     private array $iniFlags = [];
 
     private ConfigurationReader $reader;
+
+    private Config $config;
 
     private TestPaths $testPaths;
 
@@ -168,6 +160,7 @@ final class RunPipeline
         $this->configFile = $configFile;
 
         $config = Config::load($root);
+        $this->config = $config;
         $this->stateDir = StateDirectory::resolve($config->stateDir, $root);
 
         $branch = $this->git->currentBranch();
@@ -175,7 +168,7 @@ final class RunPipeline
         $this->branch = $branch ?? 'HEAD';
         $this->defaultBranch = $config->defaultBranch ?? $this->git->defaultBranch() ?? 'main';
         $this->head = $this->git->currentSha();
-        $this->ciMode = self::isCi();
+        $this->ciMode = RunContext::ciDetected();
 
         $this->driverName = DriverDetector::loadedExtension() ?? 'none';
         $this->iniFlags = match ($this->driverName) {
@@ -374,7 +367,9 @@ final class RunPipeline
         $runList = $data['runList'];
 
         if ($request->explain || $request->dryRun) {
-            $this->printExplain($data['selection'], $data['unknown'], $data['rerun'], $runList, $graph, $this->branch);
+            foreach ((new ExplainFormatter())->lines($data['list'], $runList) as $line) {
+                fwrite(STDOUT, $line . PHP_EOL);
+            }
         }
 
         if ($request->dryRun) {
@@ -413,7 +408,7 @@ final class RunPipeline
 
     /**
      * @param list<string> $runList
-     * @param array{selection: Selection, unknown: list<string>, rerun: list<string>, runList: list<string>, affected: int, uncached: int, replayed: int, saved: float} $data
+     * @param array{list: RunList, runList: list<string>, affected: int, uncached: int, quarantined: int, replayed: int, saved: float} $data
      */
     private function executeReplay(
         RunRequest $request,
@@ -504,133 +499,42 @@ final class RunPipeline
 
     /**
      * @param list<string> $changed
-     * @return array{selection: Selection, unknown: list<string>, rerun: list<string>, runList: list<string>, affected: int, uncached: int, replayed: int, saved: float}
+     * @return array{list: RunList, runList: list<string>, affected: int, uncached: int, quarantined: int, replayed: int, saved: float}
      */
     private function computeRunList(Graph $graph, array $changed, string $branch, string $root): array
     {
-        $selector = Selector::default($graph, $this->testPaths, $this->watch, $root);
-        $selection = $selector->affected($changed);
+        $builder = new RunListBuilder(
+            $graph,
+            $this->testPaths,
+            $this->watch,
+            $this->reader,
+            new Policy($graph, $this->config, Quarantine::load($this->stateDir), $root),
+            $root,
+        );
 
-        $unknown = $this->unknownTestFiles($root, $graph);
-        $rerun = $this->rerunFiles($graph, $branch, $root);
+        $list = $builder->build($changed, $branch);
 
-        $affectedFiles = $selection->testFiles();
-        $uncachedSet = array_diff(array_unique(array_merge($unknown, $rerun)), $affectedFiles);
+        $affectedFiles = $list->selection->testFiles();
+        $uncachedSet = array_diff(array_unique(array_merge($list->unknown, $list->rerun)), $affectedFiles);
 
-        $runList = array_values(array_unique(array_merge($affectedFiles, $unknown, $rerun)));
-        sort($runList);
+        $runList = $list->files();
 
-        if ($selection->sourcePhpChanged && $this->driverName === 'none') {
+        if ($list->selection->sourcePhpChanged && $this->driverName === 'none') {
             Warnings::warn('no coverage driver: re-running the whole suite in results-only mode (cannot refresh dependency edges)');
-            $runList = $this->allTestFilesOnDisk($root);
+            $runList = $builder->allTestFilesOnDisk();
         }
 
         [$replayed, $saved] = $this->replayedAgainst($graph, $branch, $runList);
 
         return [
-            'selection' => $selection,
-            'unknown' => $unknown,
-            'rerun' => $rerun,
+            'list' => $list,
             'runList' => $runList,
             'affected' => count($affectedFiles),
             'uncached' => count($uncachedSet),
+            'quarantined' => count($list->quarantined),
             'replayed' => $replayed,
             'saved' => $saved,
         ];
-    }
-
-    /** @return list<string> */
-    private function unknownTestFiles(string $root, Graph $graph): array
-    {
-        $unknown = [];
-
-        foreach ($this->candidateTestFiles($root) as $rel) {
-            if ($this->testPaths->isTestFile($rel) && ! $graph->knowsTest($rel)) {
-                $unknown[] = $rel;
-            }
-        }
-
-        sort($unknown);
-
-        return $unknown;
-    }
-
-    /** @return list<string> */
-    private function allTestFilesOnDisk(string $root): array
-    {
-        $all = [];
-
-        foreach ($this->candidateTestFiles($root) as $rel) {
-            if ($this->testPaths->isTestFile($rel)) {
-                $all[] = $rel;
-            }
-        }
-
-        sort($all);
-
-        return $all;
-    }
-
-    /** @return list<string> project-relative candidates: everything under the known test directories, plus explicit files. */
-    private function candidateTestFiles(string $root): array
-    {
-        $candidates = [];
-
-        foreach ($this->testPaths->directories() as $dir) {
-            $absoluteDir = Paths::join($root, $dir);
-
-            if (! is_dir($absoluteDir)) {
-                continue;
-            }
-
-            $iterator = new RecursiveIteratorIterator(
-                new RecursiveDirectoryIterator($absoluteDir, FilesystemIterator::SKIP_DOTS),
-            );
-
-            foreach ($iterator as $fileInfo) {
-                if (! $fileInfo instanceof SplFileInfo || ! $fileInfo->isFile()) {
-                    continue;
-                }
-
-                $rel = Paths::relative($root, $fileInfo->getPathname());
-
-                if ($rel !== null) {
-                    $candidates[$rel] = true;
-                }
-            }
-        }
-
-        foreach ($this->testPaths->files() as $rel) {
-            $candidates[$rel] = true;
-        }
-
-        return array_keys($candidates);
-    }
-
-    /** @return list<string> */
-    private function rerunFiles(Graph $graph, string $branch, string $root): array
-    {
-        $files = [];
-
-        foreach ($graph->results($branch) as $result) {
-            $file = $result['file'] ?? null;
-
-            if (! is_string($file) || $file === '') {
-                continue;
-            }
-
-            if (! $this->reader->shouldRerun($result['status'])) {
-                continue;
-            }
-
-            if (! is_file(Paths::join($root, $file))) {
-                continue;
-            }
-
-            $files[$file] = true;
-        }
-
-        return array_keys($files);
     }
 
     /**
@@ -653,70 +557,6 @@ final class RunPipeline
         }
 
         return [$count, $saved];
-    }
-
-    /**
-     * @param list<string> $unknown
-     * @param list<string> $rerun
-     * @param list<string> $runList
-     */
-    private function printExplain(Selection $selection, array $unknown, array $rerun, array $runList, Graph $graph, string $branch): void
-    {
-        $unknownSet = array_fill_keys($unknown, true);
-        $rerunSet = array_fill_keys($rerun, true);
-        $reasons = $selection->reasons();
-
-        $lines = [];
-
-        foreach ($runList as $file) {
-            $lines[$file] = $this->explainLine($file, $reasons[$file] ?? [], $unknownSet, $rerunSet, $graph, $branch);
-        }
-
-        ksort($lines);
-
-        foreach ($lines as $line) {
-            fwrite(STDOUT, $line . PHP_EOL);
-        }
-    }
-
-    /**
-     * @param list<Reason> $reasons
-     * @param array<string, true> $unknownSet
-     * @param array<string, true> $rerunSet
-     */
-    private function explainLine(string $file, array $reasons, array $unknownSet, array $rerunSet, Graph $graph, string $branch): string
-    {
-        if ($reasons !== []) {
-            $reason = $reasons[0];
-
-            return sprintf('%-40s ← %-8s %s', $file, $reason->rule, self::triggerText($reason->trigger, $reason->detail));
-        }
-
-        if (isset($unknownSet[$file])) {
-            return sprintf('%-40s ← %-8s %s', $file, 'Uncached', 'new test file');
-        }
-
-        if (isset($rerunSet[$file])) {
-            return sprintf('%-40s ← %-8s %s', $file, 'Rerun', $this->rerunStatusName($file, $graph, $branch));
-        }
-
-        return sprintf('%-40s ← %-8s %s', $file, '', '');
-    }
-
-    private static function triggerText(string $trigger, string $detail): string
-    {
-        return $detail === '' ? $trigger : sprintf('%s (%s)', $trigger, $detail);
-    }
-
-    private function rerunStatusName(string $file, Graph $graph, string $branch): string
-    {
-        foreach ($graph->results($branch) as $result) {
-            if (($result['file'] ?? null) === $file && $this->reader->shouldRerun($result['status'])) {
-                return self::STATUS_NAMES[$result['status']] ?? 'unknown';
-            }
-        }
-
-        return 'unknown';
     }
 
     private function printSummary(int $executed, int $affected, int $uncached, int $replayed, float $saved, bool $success): void
@@ -789,18 +629,22 @@ final class RunPipeline
             return;
         }
 
-        if ($complete) {
-            if ($this->persist && (! $this->ciMode || $this->request->allowCiBaseline)) {
-                $updater->finalizeBaseline($this->branch, $this->head, $this->git->branchNames());
+        (new BaselineWriter($this->store, $this->git, $changedFiles))
+            ->commit($this->graph, $updater, $this->runContext(), $complete);
+    }
 
-                $dirty = $changedFiles->since($this->head) ?? [];
-                (new LastRunTree($this->branch, $this->head, $changedFiles->snapshotTree($dirty), time()))->save($this->stateDir);
-            } elseif ($this->persist && $this->ciMode && ! $this->request->allowCiBaseline) {
-                Warnings::warn('CI detected: results saved locally but the baseline was not published (pass --allow-ci-baseline to override)');
-            }
-        }
-
-        $this->store->save($this->graph);
+    private function runContext(): RunContext
+    {
+        return new RunContext(
+            $this->root ?? $this->request->cwd,
+            $this->stateDir,
+            $this->branch,
+            $this->head,
+            $this->defaultBranch,
+            $this->persist,
+            $this->ciMode,
+            $this->request->allowCiBaseline,
+        );
     }
 
     private function degrade(RunRequest $request, string $reason): int
@@ -834,17 +678,6 @@ final class RunPipeline
     private static function newRunId(): string
     {
         return date('Ymd-His') . '-' . bin2hex(random_bytes(3));
-    }
-
-    private static function isCi(): bool
-    {
-        $value = getenv('CI');
-
-        if (! is_string($value) || $value === '') {
-            return false;
-        }
-
-        return ! in_array(strtolower($value), ['0', 'false'], true);
     }
 
     /** @return array<string, mixed> */

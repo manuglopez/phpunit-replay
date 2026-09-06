@@ -1,0 +1,19 @@
+{
+    "name": "fixture/plain",
+    "description": "Minimal PHPUnit project used as an integration-test fixture for phpunit-replay.",
+    "type": "project",
+    "require": {
+        "php": "^8.2"
+    },
+    "autoload": {
+        "psr-4": {
+            "App\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "App\\Tests\\": "tests/"
+        }
+    },
+    "minimum-stability": "stable"
+}
