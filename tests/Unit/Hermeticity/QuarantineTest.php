@@ -52,13 +52,12 @@ final class QuarantineTest extends TestCase
 
         $quarantine = Quarantine::load($this->stateDir);
 
+        // testBar has flips=2: quarantined. testBaz's 'flips' is malformed and defaults
+        // to 0: known (present in all()) but not currently quarantined.
         self::assertTrue($quarantine->isQuarantined('App\Tests\FooTest::testBar'));
-        self::assertTrue($quarantine->isQuarantined('App\Tests\FooTest::testBaz'));
+        self::assertFalse($quarantine->isQuarantined('App\Tests\FooTest::testBaz'));
         self::assertFalse($quarantine->isQuarantined('not an entry'));
-        self::assertEqualsCanonicalizing(
-            ['App\Tests\FooTest::testBar', 'App\Tests\FooTest::testBaz'],
-            $quarantine->testIds(),
-        );
+        self::assertSame(['App\Tests\FooTest::testBar'], $quarantine->testIds());
 
         $all = $quarantine->all();
         self::assertSame(
@@ -88,5 +87,74 @@ final class QuarantineTest extends TestCase
         self::assertSame([], Quarantine::load($this->stateDir . '-copy')->all());
 
         TempDir::remove($this->stateDir . '-copy');
+    }
+
+    public function test_record_flip_creates_an_entry_and_resets_the_stability_streak(): void
+    {
+        $quarantine = new Quarantine();
+
+        $quarantine->recordFlip('App\Tests\FooTest::testBar', 'key-1');
+
+        self::assertTrue($quarantine->isQuarantined('App\Tests\FooTest::testBar'));
+
+        $entry = $quarantine->all()['App\Tests\FooTest::testBar'];
+        self::assertSame(1, $entry['flips']);
+        self::assertSame(0, $entry['stable']);
+        self::assertSame('key-1', $entry['lastKey']);
+        self::assertSame('flip', $entry['reason']);
+
+        $quarantine->recordStable('App\Tests\FooTest::testBar');
+        $quarantine->recordFlip('App\Tests\FooTest::testBar', 'key-2', 'divergence');
+
+        $entry = $quarantine->all()['App\Tests\FooTest::testBar'];
+        self::assertSame(2, $entry['flips']);
+        self::assertSame(0, $entry['stable']);
+        self::assertSame('key-2', $entry['lastKey']);
+        self::assertSame('divergence', $entry['reason']);
+    }
+
+    public function test_record_stable_on_an_unknown_id_is_a_no_op(): void
+    {
+        $quarantine = new Quarantine();
+
+        $quarantine->recordStable('App\Tests\FooTest::testBar');
+
+        self::assertSame([], $quarantine->all());
+    }
+
+    public function test_release_after_enough_consecutive_stable_passes(): void
+    {
+        $quarantine = new Quarantine();
+        $quarantine->setReleaseAfter(2);
+        $quarantine->recordFlip('App\Tests\FooTest::testBar', 'key-1');
+
+        self::assertTrue($quarantine->isQuarantined('App\Tests\FooTest::testBar'));
+
+        $quarantine->recordStable('App\Tests\FooTest::testBar');
+        self::assertTrue($quarantine->isQuarantined('App\Tests\FooTest::testBar'));
+
+        $quarantine->recordStable('App\Tests\FooTest::testBar');
+        self::assertFalse($quarantine->isQuarantined('App\Tests\FooTest::testBar'));
+    }
+
+    public function test_release_clears_flips_but_keeps_the_entrys_history(): void
+    {
+        $quarantine = new Quarantine();
+        $quarantine->recordFlip('App\Tests\FooTest::testBar', 'key-1');
+
+        $quarantine->release('App\Tests\FooTest::testBar');
+
+        self::assertFalse($quarantine->isQuarantined('App\Tests\FooTest::testBar'));
+        self::assertArrayHasKey('App\Tests\FooTest::testBar', $quarantine->all());
+        self::assertSame(0, $quarantine->all()['App\Tests\FooTest::testBar']['flips']);
+    }
+
+    public function test_release_on_an_unknown_id_is_a_no_op(): void
+    {
+        $quarantine = new Quarantine();
+
+        $quarantine->release('App\Tests\FooTest::testBar');
+
+        self::assertSame([], $quarantine->all());
     }
 }

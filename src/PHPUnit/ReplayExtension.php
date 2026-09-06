@@ -19,6 +19,7 @@ use Manuglopez\Replay\PHPUnit\Subscribers\RecordDeprecationTriggered;
 use Manuglopez\Replay\PHPUnit\Subscribers\RecordErrored;
 use Manuglopez\Replay\PHPUnit\Subscribers\RecordFailed;
 use Manuglopez\Replay\PHPUnit\Subscribers\RecordMarkedIncomplete;
+use Manuglopez\Replay\PHPUnit\Subscribers\RecordNotCacheableOnPreparationStarted;
 use Manuglopez\Replay\PHPUnit\Subscribers\RecordNoticeTriggered;
 use Manuglopez\Replay\PHPUnit\Subscribers\RecordPassed;
 use Manuglopez\Replay\PHPUnit\Subscribers\RecordPhpDeprecationTriggered;
@@ -165,6 +166,7 @@ final class ReplayExtension implements Extension
 
         $facade->registerSubscribers(
             new CollectResultOnPreparationStarted($collector),
+            new RecordNotCacheableOnPreparationStarted(ReplayState::notCacheableCollector(), ReplayState::root()),
             new RecordPassed($collector),
             new RecordFailed($collector),
             new RecordErrored($collector),
@@ -212,7 +214,7 @@ final class ReplayExtension implements Extension
         ];
 
         $facade->registerSubscribers(
-            new FlushOnExecutionFinished(ReplayState::runWriter(), $recorderForFlush, $collector, $meta),
+            new FlushOnExecutionFinished(ReplayState::runWriter(), $recorderForFlush, $collector, $meta, ReplayState::notCacheableCollector()),
             new MarkTruncatedOnExecutionAborted(ReplayState::runWriter()),
         );
     }

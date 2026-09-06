@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Manuglopez\Replay\Select;
 
+use Manuglopez\Replay\Support\Glob;
+
 /**
  * Derived from Pest (© Nuno Maduro, MIT). @see https://github.com/pestphp/pest/blob/17d709e/src/Plugins/Tia/WatchPatterns.php
  *
@@ -134,7 +136,7 @@ final class WatchPatterns
     {
         $rule = $this->parse($key);
 
-        if ($rule['include'] === '' || ! $this->globMatches($rule['include'], $file)) {
+        if ($rule['include'] === '' || ! Glob::matches($rule['include'], $file)) {
             return false;
         }
 
@@ -229,44 +231,10 @@ final class WatchPatterns
     {
         $pattern = str_contains($exclude, '/') ? $exclude : '**/' . $exclude;
 
-        if ($this->globMatches($pattern, $file)) {
+        if (Glob::matches($pattern, $file)) {
             return true;
         }
 
-        return $this->globMatches($exclude, basename($file));
-    }
-
-    private function globMatches(string $pattern, string $file): bool
-    {
-        $pattern = str_replace('\\', '/', $pattern);
-        $file = str_replace('\\', '/', $file);
-
-        $regex = '';
-        $len = strlen($pattern);
-        $i = 0;
-
-        while ($i < $len) {
-            $c = $pattern[$i];
-
-            if ($c === '*' && isset($pattern[$i + 1]) && $pattern[$i + 1] === '*') {
-                $regex .= '.*';
-                $i += 2;
-
-                if (isset($pattern[$i]) && $pattern[$i] === '/') {
-                    $i++;
-                }
-            } elseif ($c === '*') {
-                $regex .= '[^/]*';
-                $i++;
-            } elseif ($c === '?') {
-                $regex .= '[^/]';
-                $i++;
-            } else {
-                $regex .= preg_quote($c, '#');
-                $i++;
-            }
-        }
-
-        return (bool) preg_match('#^' . $regex . '$#', $file);
+        return Glob::matches($exclude, basename($file));
     }
 }

@@ -6,6 +6,7 @@ namespace Manuglopez\Replay\Tests\Unit\Cache;
 
 use Manuglopez\Replay\Cache\Graph;
 use Manuglopez\Replay\Tests\Support\TempDir;
+use Manuglopez\Replay\Version;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -516,6 +517,7 @@ final class GraphTest extends TestCase
         self::assertSame('deadbeef', $encodedResult['k']);
         self::assertTrue($raw['baselines']['main']['complete']);
         self::assertSame(['tests/Feature/ExternalTest.php'], $raw['not_cacheable']);
+        self::assertSame('manuglopez/phpunit-replay ' . Version::ID, $raw['generator']);
 
         $decoded = Graph::decode($json, $this->root);
         self::assertNotNull($decoded);

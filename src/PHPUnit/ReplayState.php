@@ -27,6 +27,7 @@ use Manuglopez\Replay\PHPUnit\Decision\ReplaySkipped;
 use Manuglopez\Replay\PHPUnit\Decision\Run;
 use Manuglopez\Replay\Record\CoverageDriver;
 use Manuglopez\Replay\Record\DriverDetector;
+use Manuglopez\Replay\Record\NotCacheableCollector;
 use Manuglopez\Replay\Record\Recorder;
 use Manuglopez\Replay\Record\ResultCollector;
 use Manuglopez\Replay\Record\RunPartial;
@@ -71,6 +72,8 @@ final class ReplayState
     private static ?Recorder $recorder = null;
 
     private static ?ResultCollector $collector = null;
+
+    private static ?NotCacheableCollector $notCacheable = null;
 
     private static ?RunWriter $runWriter = null;
 
@@ -125,6 +128,7 @@ final class ReplayState
         self::$runId = $runId;
         self::$recorder = $driver !== null ? new Recorder($driver) : null;
         self::$collector = new ResultCollector();
+        self::$notCacheable = new NotCacheableCollector();
         self::$runWriter = new RunWriter($stateDir . '/runs/' . $runId, $root);
         self::$startedAt = microtime(true);
     }
@@ -188,6 +192,7 @@ final class ReplayState
         self::$defaultBranch = $defaultBranch;
         self::$persist = $persist;
         self::$quarantine = Quarantine::load($stateDir);
+        self::$quarantine->setReleaseAfter($config->quarantineReleaseAfter);
 
         if ($mode === Mode::Replay && $graph !== null) {
             self::prepareReplay($config, $configuration, $graph, $root, $stateDir, $branch, $git);
@@ -275,6 +280,11 @@ final class ReplayState
     public static function collector(): ResultCollector
     {
         return self::$collector ?? throw self::notBooted();
+    }
+
+    public static function notCacheableCollector(): NotCacheableCollector
+    {
+        return self::$notCacheable ?? throw self::notBooted();
     }
 
     public static function runWriter(): RunWriter
@@ -400,9 +410,10 @@ final class ReplayState
             self::resultsForPersist($root),
             $recordsEdges && $recorder !== null ? self::relativiseMap($recorder->perTestTables(), $root, false) : [],
             ['truncated' => $truncated],
+            self::$notCacheable?->all() ?? [],
         );
 
-        $updater = new GraphUpdater($graph, $root, new ContentKey($root));
+        $updater = new GraphUpdater($graph, $root, new ContentKey($root), self::$quarantine);
         $updater->apply($partial, self::$branch, recordsEdges: $recordsEdges, complete: $complete);
 
         $git = self::$git ?? new Git($root);
@@ -476,6 +487,7 @@ final class ReplayState
         self::$runId = null;
         self::$recorder = null;
         self::$collector = null;
+        self::$notCacheable = null;
         self::$runWriter = null;
         self::$startedAt = null;
 

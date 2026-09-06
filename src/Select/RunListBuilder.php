@@ -82,7 +82,7 @@ final class RunListBuilder
         $quarantineReasons = [];
 
         foreach ($quarantined as $file) {
-            $quarantineReasons[$file] = $this->policy->reason($file, $file) ?? 'not cacheable';
+            $quarantineReasons[$file] = $this->reasonFor($file, $idsByFile[$file] ?? []);
         }
 
         return new RunList(
@@ -93,6 +93,39 @@ final class RunListBuilder
             $rerun,
             $quarantineReasons,
         );
+    }
+
+    /**
+     * The single most relevant {@see Reason} a non-cacheable test file is in the run
+     * list for: a class/method `#[NotCacheable]` attribute or a `never_cache` glob match
+     * (rule reported as `NotCacheable`, detail `attribute`/`never_cache`), else automatic
+     * quarantine (rule `Quarantine`, trigger the flipping test id, detail its flip count).
+     *
+     * @param list<string> $testIds test ids the graph has results for in this file
+     */
+    private function reasonFor(string $testFile, array $testIds): Reason
+    {
+        $fileReason = $this->policy->reason($testFile, $testFile);
+
+        if ($fileReason === 'attribute' || $fileReason === 'never_cache') {
+            return new Reason('NotCacheable', $fileReason);
+        }
+
+        foreach ($testIds as $testId) {
+            $reason = $this->policy->reason($testFile, $testId);
+
+            if ($reason === 'quarantine') {
+                $flips = $this->policy->quarantine()->all()[$testId]['flips'] ?? 0;
+
+                return new Reason('Quarantine', $testId, sprintf('flips: %d', $flips));
+            }
+
+            if ($reason === 'attribute' || $reason === 'never_cache') {
+                return new Reason('NotCacheable', $reason);
+            }
+        }
+
+        return new Reason('NotCacheable', 'not cacheable');
     }
 
     /**

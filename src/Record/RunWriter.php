@@ -36,30 +36,35 @@ final class RunWriter
     }
 
     /**
-     * Writes edges.json, results.json, tables.json and meta.json atomically.
+     * Writes edges.json, results.json, tables.json, not_cacheable.json and meta.json
+     * atomically. `$notCacheable` is optional so every existing caller (positional, 3
+     * arguments) keeps working unchanged; omitting it simply writes an empty list.
      *
      * @param array<string, mixed> $meta
      */
-    public function flush(Recorder $recorder, ResultCollector $collector, array $meta): bool
+    public function flush(Recorder $recorder, ResultCollector $collector, array $meta, ?NotCacheableCollector $notCacheable = null): bool
     {
         $edges = $this->relativiseEdges($recorder->perTestFiles());
         $tables = $this->relativiseTables($recorder->perTestTables());
         $results = $this->relativiseResults($collector->all());
+        $notCacheableList = $notCacheable?->all() ?? [];
 
         $meta['truncated'] = $this->truncated;
 
         $edgesJson = Json::encode($edges);
         $resultsJson = Json::encode($results);
         $tablesJson = Json::encode($tables);
+        $notCacheableJson = Json::encode($notCacheableList);
         $metaJson = Json::encode($meta);
 
-        if ($edgesJson === null || $resultsJson === null || $tablesJson === null || $metaJson === null) {
+        if ($edgesJson === null || $resultsJson === null || $tablesJson === null || $notCacheableJson === null || $metaJson === null) {
             return false;
         }
 
         $ok = AtomicFile::write($this->runDir . '/edges.json', $edgesJson);
         $ok = AtomicFile::write($this->runDir . '/results.json', $resultsJson) && $ok;
         $ok = AtomicFile::write($this->runDir . '/tables.json', $tablesJson) && $ok;
+        $ok = AtomicFile::write($this->runDir . '/not_cacheable.json', $notCacheableJson) && $ok;
         $ok = AtomicFile::write($this->runDir . '/meta.json', $metaJson) && $ok;
 
         return $ok;

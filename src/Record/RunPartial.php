@@ -19,12 +19,14 @@ final readonly class RunPartial
      * @param array<string, array{status: int, message: string, time: float, assertions: int, file?: string}> $results file rel
      * @param array<string, list<string>> $tables
      * @param array<string, mixed> $meta
+     * @param list<string> $notCacheable project-relative test files and `Class::method` ids
      */
     public function __construct(
         public array $edges,
         public array $results,
         public array $tables,
         public array $meta,
+        public array $notCacheable = [],
     ) {
     }
 
@@ -50,11 +52,15 @@ final readonly class RunPartial
         $tablesJson = AtomicFile::read($runDir . '/tables.json');
         $rawTables = $tablesJson !== null ? Json::decodeArray($tablesJson) : null;
 
+        $notCacheableJson = AtomicFile::read($runDir . '/not_cacheable.json');
+        $rawNotCacheable = $notCacheableJson !== null ? Json::decodeArray($notCacheableJson) : null;
+
         return new self(
             self::normalizeStringListMap($rawEdges ?? []),
             self::normalizeResults($rawResults),
             self::normalizeStringListMap($rawTables ?? []),
             self::normalizeMeta($rawMeta),
+            self::normalizeStringList($rawNotCacheable ?? []),
         );
     }
 
@@ -122,6 +128,23 @@ final readonly class RunPartial
             }
 
             $out[$testId] = $entry;
+        }
+
+        return $out;
+    }
+
+    /**
+     * @param array<mixed> $raw
+     * @return list<string>
+     */
+    private static function normalizeStringList(array $raw): array
+    {
+        $out = [];
+
+        foreach ($raw as $value) {
+            if (is_string($value)) {
+                $out[] = $value;
+            }
         }
 
         return $out;
