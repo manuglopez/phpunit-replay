@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Manuglopez\Replay\PHPUnit\Subscribers;
 
+use Manuglopez\Replay\PHPUnit\ReplayState;
 use Manuglopez\Replay\Record\Recorder;
 use PHPUnit\Event\Code\TestMethod;
 use PHPUnit\Event\Test\PreparationStarted;
@@ -23,6 +24,12 @@ final readonly class StartRecordingOnPreparationStarted implements PreparationSt
         $test = $event->test();
 
         if (! $test instanceof TestMethod) {
+            return;
+        }
+
+        // A replayed test never executes its body, so nothing of it may end up in the
+        // edges: its recorded dependencies stay exactly as the baseline has them.
+        if (ReplayState::isInProcess() && ReplayState::decide($test->file(), $test->id())->isReplay()) {
             return;
         }
 

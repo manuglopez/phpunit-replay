@@ -29,6 +29,12 @@ final class RunWriter
         $this->truncated = true;
     }
 
+    /** In-process replay has no run partial to read `meta.truncated` back from. */
+    public function isTruncated(): bool
+    {
+        return $this->truncated;
+    }
+
     /**
      * Writes edges.json, results.json, tables.json and meta.json atomically.
      *
