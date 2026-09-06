@@ -67,7 +67,8 @@ final class FixtureProject
     }
 
     /**
-     * Runs `php -d pcov.enabled=1 vendor/bin/phpunit` inside the fixture copy.
+     * Runs `php -d pcov.enabled=1 -d pcov.directory=<root> vendor/bin/phpunit` inside the
+     * fixture copy (pcov instruments nothing without an explicit `pcov.directory`).
      *
      * @param list<string> $args
      * @param array<string, string> $env
@@ -76,7 +77,7 @@ final class FixtureProject
     public function phpunit(array $args = [], array $env = []): array
     {
         $process = new Process(
-            ['php', '-d', 'pcov.enabled=1', 'vendor/bin/phpunit', ...$args],
+            ['php', '-d', 'pcov.enabled=1', '-d', 'pcov.directory=' . $this->root(), 'vendor/bin/phpunit', ...$args],
             $this->root(),
             $env,
         );
