@@ -14,6 +14,8 @@ use Symfony\Component\Process\Process;
  */
 final class FixtureProject
 {
+    private ?string $homeDir = null;
+
     private function __construct(public readonly GitRepo $repo)
     {
     }
@@ -91,9 +93,66 @@ final class FixtureProject
         ];
     }
 
+    /**
+     * Runs the REAL `bin/phpunit-replay` wrapper as a subprocess, inside the fixture copy,
+     * with `HOME` pointed at a temp directory stable across calls on this instance (so the
+     * state dir it resolves to persists between a `record` call and a later `run` call) but
+     * never the real developer `$HOME` (tests/Integration/*, docs/INTERNALS.md).
+     *
+     * @param list<string> $args
+     * @param array<string, string> $env
+     * @return array{exitCode: int, stdout: string, stderr: string}
+     */
+    public function replay(array $args = [], array $env = []): array
+    {
+        $process = $this->replayProcess($args, $env);
+        $process->run();
+
+        return [
+            'exitCode' => $process->getExitCode() ?? -1,
+            'stdout' => $process->getOutput(),
+            'stderr' => $process->getErrorOutput(),
+        ];
+    }
+
+    /**
+     * The same process `replay()` runs synchronously, returned unstarted so a test can
+     * `start()` it, poll its state, and signal it directly (e.g. to exercise a SIGKILL
+     * mid-run).
+     *
+     * @param list<string> $args
+     * @param array<string, string> $env
+     */
+    public function replayProcess(array $args = [], array $env = []): Process
+    {
+        $process = new Process(
+            ['php', '-d', 'pcov.enabled=1', '-d', 'pcov.directory=' . $this->root(), self::packageBin(), ...$args],
+            $this->root(),
+            ['HOME' => $this->homeDir(), ...$env],
+        );
+        $process->setTimeout(120.0);
+
+        return $process;
+    }
+
+    /** The stable `$HOME` used by {@see self::replay()} for this fixture instance. */
+    public function homeDir(): string
+    {
+        return $this->homeDir ??= TempDir::make('replay-home');
+    }
+
     public function destroy(): void
     {
         $this->repo->destroy();
+
+        if ($this->homeDir !== null) {
+            TempDir::remove($this->homeDir);
+        }
+    }
+
+    private static function packageBin(): string
+    {
+        return dirname(__DIR__, 2) . '/bin/phpunit-replay';
     }
 
     private static function projectsDir(): string
