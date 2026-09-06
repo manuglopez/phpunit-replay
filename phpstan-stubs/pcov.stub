@@ -1,0 +1,38 @@
+<?php
+
+/**
+ * Signatures for the raw pcov API (ext-pcov), for static analysis only.
+ *
+ * @see https://github.com/krakjoe/pcov
+ */
+
+namespace pcov;
+
+const inclusive = 0;
+
+const exclusive = 1;
+
+function clear(): void
+{
+}
+
+function start(): void
+{
+}
+
+function stop(): void
+{
+}
+
+/** @return list<string> */
+function waiting(): array
+{
+}
+
+/**
+ * @param  list<string>  $files
+ * @return array<string, array<int, int>>
+ */
+function collect(int $type = inclusive, array $files = []): array
+{
+}
