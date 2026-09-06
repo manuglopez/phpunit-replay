@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace Orlegitech\Replay\Tests\Support;
+namespace Manuglopez\Replay\Tests\Support;
 
 use RuntimeException;
 use Symfony\Component\Process\Process;
@@ -113,7 +113,7 @@ final class GitRepo
 
         if (! $process->isSuccessful()) {
             throw new RuntimeException(sprintf(
-                "git %s failed (%d): %s",
+                'git %s failed (%d): %s',
                 implode(' ', $arguments),
                 $process->getExitCode() ?? -1,
                 $process->getErrorOutput(),

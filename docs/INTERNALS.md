@@ -23,8 +23,8 @@ Ported-from-Pest files carry:
 
 | Namespace | Directory |
 |---|---|
-| `Orlegitech\Replay` | `src/` |
-| `Orlegitech\Replay\Tests` | `tests/` (`tests/Unit`, `tests/Integration`, `tests/Support`) |
+| `Manuglopez\Replay` | `src/` |
+| `Manuglopez\Replay\Tests` | `tests/` (`tests/Unit`, `tests/Integration`, `tests/Support`) |
 
 ## Support
 

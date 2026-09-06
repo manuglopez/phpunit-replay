@@ -29,12 +29,12 @@ Diferencias con lo que ya existe (`jasonmccreary/phpunit-tia`, `gosuperscript/ph
 ## 1. Nombre, identidad y layout
 
 **Nombre Composer:** `orlegitech/phpunit-replay`
-**Namespace PHP:** `Orlegitech\Replay`
+**Namespace PHP:** `Manuglopez\Replay`
 **Binario:** `vendor/bin/phpunit-replay`
 **Directorio de estado local:** `~/.phpunit-replay/<project-key>/` (configurable; alternativa `.phpunit-replay/` en el repo, gitignored)
-**Extensión PHPUnit:** `Orlegitech\Replay\PHPUnit\ReplayExtension`
-**Trait opcional:** `Orlegitech\Replay\PHPUnit\Replayable`
-**Atributo:** `Orlegitech\Replay\Attributes\NotCacheable`
+**Extensión PHPUnit:** `Manuglopez\Replay\PHPUnit\ReplayExtension`
+**Trait opcional:** `Manuglopez\Replay\PHPUnit\Replayable`
+**Atributo:** `Manuglopez\Replay\Attributes\NotCacheable`
 
 Motivo del nombre: "replay" describe el diferenciador (los resultados se replayan, no se saltan), es buscable ("phpunit replay cache") y no colisiona en Packagist. Nombres alternativos considerados y descartados: `phpunit-tia` (ocupado dos veces), `phpunit-impact` (genérico), `dejavu` (bonito pero no buscable).
 
@@ -161,7 +161,7 @@ vendor/bin/phpunit-replay [opciones de phpunit-replay] [-- opciones de phpunit]
 3. Si hay grafo → calcula `changed` y `affected` (§7).
 4. Construye la lista de ficheros de test a ejecutar: `affected ∪ desconocidos ∪ conFallosCacheados ∪ noCacheables`.
 5. Si la lista está vacía: imprime resumen "0 executed, N replayed", opcionalmente escribe el JUnit fusionado, sale con 0.
-6. Genera `phpunit.replay.xml` temporal: copia del `phpunit.xml` del usuario con los `<testsuite>` sustituidos por un único testsuite que lista `<file>` por cada test a ejecutar (mantiene `<source>`, `<php>`, `<extensions>`, bootstrap, etc.). Inyecta `<extensions><bootstrap class="Orlegitech\Replay\PHPUnit\ReplayExtension"/></extensions>` si no está.
+6. Genera `phpunit.replay.xml` temporal: copia del `phpunit.xml` del usuario con los `<testsuite>` sustituidos por un único testsuite que lista `<file>` por cada test a ejecutar (mantiene `<source>`, `<php>`, `<extensions>`, bootstrap, etc.). Inyecta `<extensions><bootstrap class="Manuglopez\Replay\PHPUnit\ReplayExtension"/></extensions>` si no está.
 7. Ejecuta `php -d pcov.directory=<root> vendor/bin/phpunit -c phpunit.replay.xml --no-coverage [args del usuario]` con el entorno `PHPUNIT_REPLAY_MODE=record-subset`, `PHPUNIT_REPLAY_STATE_DIR=...`, `PHPUNIT_REPLAY_RUN_ID=...`. Stdout/stderr pasan tal cual al usuario.
 8. La extensión graba aristas y resultados de los tests ejecutados en `runs/<run-id>/{edges,results}.json`.
 9. El wrapper fusiona en el grafo, actualiza baseline de rama, hace snapshot del árbol, poda, escribe `graph.json`, sube al remoto si está configurado.
@@ -179,7 +179,7 @@ Para cuando PHPUnit debe recorrer toda la suite (IDE que lanza `phpunit` directa
 ```php
 abstract class TestCase extends \PHPUnit\Framework\TestCase
 {
-    use \Orlegitech\Replay\PHPUnit\Replayable;
+    use \Manuglopez\Replay\PHPUnit\Replayable;
 
     protected function setUp(): void
     {
@@ -192,7 +192,7 @@ abstract class TestCase extends \PHPUnit\Framework\TestCase
 
 ```xml
 <extensions>
-    <bootstrap class="Orlegitech\Replay\PHPUnit\ReplayExtension">
+    <bootstrap class="Manuglopez\Replay\PHPUnit\ReplayExtension">
         <parameter name="mode" value="auto"/>          <!-- auto|record|replay|off -->
         <parameter name="stateDir" value=""/>          <!-- vacío = ~/.phpunit-replay/<key> -->
         <parameter name="remote" value=""/>            <!-- file:///mnt/cache | https://cache.example/replay/ -->
@@ -667,7 +667,7 @@ Copia desde aquí:
 Vas a crear desde cero el paquete Composer `orlegitech/phpunit-replay` siguiendo al pie de la letra la especificación adjunta (phpunit-replay-spec.md). Es una librería de Test Impact Analysis y replay de resultados para PHPUnit 11.5+/12, sin dependencia de Pest.
 
 Reglas de trabajo:
-- Antes de escribir nada, clona `https://github.com/pestphp/pest` (checkout del commit 17d709e32bed028005c8e8a825c7161d73af3468) en un directorio temporal y porta los ficheros según la tabla de la sección 16b de la spec: copia, cambia el namespace a Orlegitech\Replay\..., elimina las dependencias de Pest indicadas y añade el docblock @see de origen. Crea LICENSE-PEST.md con el MIT original. Solo escribe desde cero lo que la tabla marca como "no portar" o lo que no existe en Pest (wrapper CLI, ReplayExtension, trait Replayable, caché remota, cuarentena, JUnitMerger).
+- Antes de escribir nada, clona `https://github.com/pestphp/pest` (checkout del commit 17d709e32bed028005c8e8a825c7161d73af3468) en un directorio temporal y porta los ficheros según la tabla de la sección 16b de la spec: copia, cambia el namespace a Manuglopez\Replay\..., elimina las dependencias de Pest indicadas y añade el docblock @see de origen. Crea LICENSE-PEST.md con el MIT original. Solo escribe desde cero lo que la tabla marca como "no portar" o lo que no existe en Pest (wrapper CLI, ReplayExtension, trait Replayable, caché remota, cuarentena, JUnitMerger).
 - PHP 8.2+, strict_types en todos los ficheros, `final` por defecto, readonly donde aplique, PSR-12, PHPStan nivel max limpio.
 - Implementa la Fase 1 completa antes de tocar nada de las fases 2 y 3. Dentro de la fase 1, este orden: Cache/ContentHash → Cache/Fingerprint → Change/Git + ChangedFiles + LastRunTree → Cache/Graph + GraphStore → Record/SourceScope + drivers + Recorder → Record/ResultCollector + PHPUnit/Subscribers → PHPUnit/ReplayState + ReplayExtension → Select/TestPaths + WatchPatterns + Selector (reglas PhpEdge, TestFile, Watch) → Console (run filtered, record, status, baseline-path) → Report/Summary + JUnitMerger.
 - Cada componente lleva sus tests unitarios antes de pasar al siguiente. Los tests de integración usan un proyecto fixture real en tests/Fixtures/Projects/plain (con phpunit.xml, src/ y tests/), copiado a un tmp con `git init` + commit inicial, y ejecutan PHPUnit real por subproceso.

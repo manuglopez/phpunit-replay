@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace Orlegitech\Replay\Tests\Support;
+namespace Manuglopez\Replay\Tests\Support;
 
 use FilesystemIterator;
 use RecursiveDirectoryIterator;

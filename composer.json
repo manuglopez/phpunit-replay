@@ -24,12 +24,12 @@
     },
     "autoload": {
         "psr-4": {
-            "Orlegitech\\Replay\\": "src/"
+            "Manuglopez\\Replay\\": "src/"
         }
     },
     "autoload-dev": {
         "psr-4": {
-            "Orlegitech\\Replay\\Tests\\": "tests/"
+            "Manuglopez\\Replay\\Tests\\": "tests/"
         }
     },
     "bin": ["bin/phpunit-replay"],
