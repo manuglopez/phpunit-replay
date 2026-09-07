@@ -104,12 +104,22 @@ jobs:
         run: vendor/bin/phpunit
 
   coverage-format:
-    name: "php-code-coverage ${{ matrix.php-code-coverage }} (PHPUnit 13.1.14)"
+    name: "php-code-coverage ${{ matrix.php-code-coverage }} (PHPUnit ${{ matrix.phpunit }})"
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        php-code-coverage: ['14.0.*', '14.1.*', '14.2.*']
+        # Each php-code-coverage line has to be paired with a PHPUnit release that actually
+        # allows it: phpunit/phpunit 13.1.0 and 13.1.1 require php-code-coverage ^14.0, while
+        # 13.1.3 onwards already require ^14.1.x, so pinning one PHPUnit for all three rows
+        # makes the 14.0 row unsatisfiable.
+        include:
+          - php-code-coverage: '14.0.*'
+            phpunit: '13.1.1'
+          - php-code-coverage: '14.1.*'
+            phpunit: '13.1.14'
+          - php-code-coverage: '14.2.*'
+            phpunit: '13.1.14'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -123,8 +133,8 @@ jobs:
           coverage: pcov
           tools: composer:v2
 
-      - name: Require PHPUnit 13.1.14 for this cell
-        run: composer require --dev --no-update phpunit/phpunit:13.1.14
+      - name: Require PHPUnit ${{ matrix.phpunit }} for this cell
+        run: composer require --dev --no-update phpunit/phpunit:${{ matrix.phpunit }}
 
       # `--with` overrides php-code-coverage's own resolved version for this update only;
       # composer.json's `^11.5 || ^12.0 || ^13.0` constraint on phpunit/phpunit is untouched.
