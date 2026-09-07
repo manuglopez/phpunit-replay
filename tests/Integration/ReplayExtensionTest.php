@@ -8,6 +8,7 @@ use Manuglopez\Replay\Cache\ContentKey;
 use Manuglopez\Replay\Cache\Graph;
 use Manuglopez\Replay\Cache\GraphUpdater;
 use Manuglopez\Replay\PHPUnit\ConfigurationWriter;
+use Manuglopez\Replay\Record\DriverDetector;
 use Manuglopez\Replay\Record\RunPartial;
 use Manuglopez\Replay\Tests\Support\FixtureProject;
 use Manuglopez\Replay\Tests\Support\TempDir;
@@ -85,7 +86,10 @@ final class ReplayExtensionTest extends TestCase
         self::assertArrayHasKey($passingId, $partial->results);
         self::assertGreaterThan(0, $partial->results[$passingId]['assertions']);
 
-        self::assertSame('pcov', $partial->meta['driver']);
+        // Driver-agnostic: whatever coverage driver is actually loaded for this process
+        // (pcov preferred, xdebug as fallback — SPEC §5.1) is what the fixture subprocess
+        // records; a CI cell running under xdebug alone must not fail on a hardcoded "pcov".
+        self::assertSame(DriverDetector::loadedExtension(), $partial->meta['driver']);
         self::assertFalse($partial->meta['truncated']);
         self::assertSame(1, $partial->meta['fingerprint']['structural']['schema']);
 

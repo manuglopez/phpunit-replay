@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Manuglopez\Replay\Tests\Integration;
 
+use Manuglopez\Replay\Record\DriverDetector;
 use Manuglopez\Replay\Tests\Support\FixtureProject;
 use PHPUnit\Framework\TestCase;
 
@@ -33,7 +34,10 @@ final class StatusCommandTest extends TestCase
         self::assertStringContainsString($this->fixture->root(), $result['stdout']);
         self::assertStringContainsString('branch:    main', $result['stdout']);
         self::assertStringContainsString('driver:', $result['stdout']);
-        self::assertStringContainsString('pcov', $result['stdout']);
+        // Driver-agnostic: the fixture subprocess picks whatever coverage driver is
+        // actually loaded (pcov preferred, xdebug as fallback — SPEC §5.1); a CI cell
+        // running under xdebug alone must not fail an assertion hardcoded to "pcov".
+        self::assertStringContainsString(DriverDetector::loadedExtension() ?? 'none', $result['stdout']);
         self::assertStringContainsString('framework: plain', $result['stdout']);
         self::assertStringContainsString('no baseline yet', $result['stdout']);
     }

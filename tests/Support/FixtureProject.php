@@ -135,6 +135,10 @@ final class FixtureProject
      * Runs `php -d pcov.enabled=1 -d pcov.directory=<root> vendor/bin/phpunit` inside the
      * fixture copy (pcov instruments nothing without an explicit `pcov.directory`).
      *
+     * `$env` is layered on top of {@see self::sanitizedEnv()}, so a value passed here
+     * always wins over the sanitised default (e.g. a test that wants to exercise CI mode
+     * on purpose can still pass `['CI' => 'true']`).
+     *
      * @param list<string> $args
      * @param array<string, string> $env
      * @return array{exitCode: int, stdout: string, stderr: string}
@@ -144,7 +148,7 @@ final class FixtureProject
         $process = new Process(
             ['php', '-d', 'pcov.enabled=1', '-d', 'pcov.directory=' . $this->root(), 'vendor/bin/phpunit', ...$args],
             $this->root(),
-            $env,
+            self::sanitizedEnv($env),
         );
         $process->setTimeout(120.0);
         $process->run();
@@ -159,7 +163,8 @@ final class FixtureProject
     /**
      * Runs PHPUnit inside the fixture copy the way a developer would (no wrapper), with
      * `HOME` pointed at this instance's temp home so the extension's state directory is
-     * isolated, and `CI` cleared so a CI run of the package's own suite does not stop the
+     * isolated. `CI`/`GITHUB_*`/`PHPUNIT_REPLAY_*` are already stripped by
+     * {@see self::phpunit()} so a CI run of the package's own suite does not stop the
      * fixture from publishing its baseline.
      *
      * @param list<string> $args
@@ -168,7 +173,7 @@ final class FixtureProject
      */
     public function phpunitInProcess(array $args = [], array $env = []): array
     {
-        return $this->phpunit($args, ['HOME' => $this->homeDir(), 'CI' => '', ...$env]);
+        return $this->phpunit($args, ['HOME' => $this->homeDir(), ...$env]);
     }
 
     /**
@@ -206,11 +211,43 @@ final class FixtureProject
         $process = new Process(
             ['php', '-d', 'pcov.enabled=1', '-d', 'pcov.directory=' . $this->root(), self::packageBin(), ...$args],
             $this->root(),
-            ['HOME' => $this->homeDir(), ...$env],
+            self::sanitizedEnv(['HOME' => $this->homeDir(), ...$env]),
         );
         $process->setTimeout(120.0);
 
         return $process;
+    }
+
+    /**
+     * A subprocess spawned via {@see Process} inherits every variable of this test
+     * runner's own environment for any key not explicitly set here (Symfony always falls
+     * back to `getenv()` for missing keys — passing an array with a key simply *absent*
+     * does not hide it from the child). GitHub Actions exports `CI=true`,
+     * `GITHUB_ACTIONS=true` and a raft of `GITHUB_*` variables, and a developer's shell
+     * may carry a stray `PHPUNIT_REPLAY_*` from a previous manual run — any of those
+     * leaking into a fixture subprocess changes its behaviour (SPEC.md §12.1: a CI-mode
+     * wrapper never publishes a baseline), which is exactly the failure this method
+     * exists to prevent.
+     *
+     * Blanks (`''`, not omits) every `CI`, `GITHUB_*` and `PHPUNIT_REPLAY_*` variable
+     * present in the current process's environment, then layers `$env` on top so a test
+     * that wants one of them back (e.g. to exercise CI mode on purpose) can still pass it
+     * explicitly — an explicit value always wins over the blanked default.
+     *
+     * @param array<string, string> $env
+     * @return array<string, string>
+     */
+    private static function sanitizedEnv(array $env): array
+    {
+        $blanked = [];
+
+        foreach (array_keys(getenv()) as $name) {
+            if ($name === 'CI' || str_starts_with($name, 'GITHUB_') || str_starts_with($name, 'PHPUNIT_REPLAY_')) {
+                $blanked[$name] = '';
+            }
+        }
+
+        return [...$blanked, ...$env];
     }
 
     /** The stable `$HOME` used by {@see self::replay()} for this fixture instance. */

@@ -167,6 +167,42 @@ final class AcceptanceCriteriaTest extends TestCase
     }
 
     /**
+     * SPEC.md §12.1: a CI run (`CI` truthy) never publishes a branch baseline unless
+     * `--allow-ci-baseline` is passed — results are still saved locally, but
+     * {@see \Manuglopez\Replay\Cache\BaselineWriter::commit()} warns instead of calling
+     * `finalizeBaseline()`. `FixtureProject` sanitises away the test runner's own
+     * `CI`/`GITHUB_*` environment by default (so GitHub Actions running this package's own
+     * suite does not accidentally trip this rule for every fixture); this test opts back
+     * into CI mode explicitly to exercise it.
+     */
+    public function test_ci_mode_does_not_publish_a_baseline_unless_allowed(): void
+    {
+        $fixture = $this->plainFixture();
+        $ciEnv = ['CI' => 'true', 'GITHUB_ACTIONS' => 'true'];
+
+        $recorded = $fixture->replay([], $ciEnv);
+        self::assertSame(0, $recorded['exitCode'], $recorded['stdout'] . $recorded['stderr']);
+        self::assertStringContainsString(
+            'CI detected: results saved locally but the baseline was not published',
+            $recorded['stderr'],
+        );
+
+        $graph = ReplayAssert::loadGraph($fixture);
+        self::assertNotNull($graph);
+        self::assertFalse($graph->isBaselineComplete('main'));
+        self::assertNull($graph->recordedSha('main'));
+
+        $allowed = $fixture->replay(['--allow-ci-baseline'], $ciEnv);
+        self::assertSame(0, $allowed['exitCode'], $allowed['stdout'] . $allowed['stderr']);
+        self::assertStringNotContainsString('CI detected', $allowed['stderr']);
+
+        $graphAfter = ReplayAssert::loadGraph($fixture);
+        self::assertNotNull($graphAfter);
+        self::assertTrue($graphAfter->isBaselineComplete('main'));
+        self::assertNotNull($graphAfter->recordedSha('main'));
+    }
+
+    /**
      * 8. State files are written atomically: killing the wrapper mid-run never leaves a
      * corrupt graph.json (or a stray *.tmp file) behind.
      */
