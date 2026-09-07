@@ -12,6 +12,7 @@ use Manuglopez\Replay\PHPUnit\Decision\Run;
 use PHPUnit\Framework\Attributes\Before;
 use PHPUnit\Framework\TestCase;
 use ReflectionClass;
+use ReflectionMethod;
 use ReflectionProperty;
 use Throwable;
 
@@ -73,7 +74,39 @@ trait Replayable
             }
         }
 
-        return parent::invokeTestMethod($methodName, $testArguments);
+        return $this->__replayInvokeParentTestMethod($methodName, $testArguments);
+    }
+
+    /**
+     * `invokeTestMethod()` only exists on `TestCase` since PHPUnit >= 12 (`runTest()` calls
+     * it there); PHPUnit 11.5's `TestCase` never declares it, and its `runTest()` never calls
+     * this override in the first place (the 11.5 path replays through the `#[Before]`
+     * method-name swap below instead). Neither a literal `parent::invokeTestMethod(...)` nor
+     * `parent::{$hook}(...)`/`method_exists(TestCase::class, $hook)` with `$hook` held in a
+     * local variable dodges PHPStan here: it infers a constant-string type for such a
+     * variable and resolves the call, or narrows the existence check, exactly as it would
+     * for a literal — "always true" against the PHPUnit 12 vendor, "undefined method" against
+     * 11.5. `ReflectionClass::hasMethod()` is not one of the functions PHPStan's
+     * `function.alreadyNarrowedType` rule special-cases (only the `*_exists()`/`is_callable()`
+     * builtins are), and going through `ReflectionMethod::invoke()` to call it sidesteps
+     * static call resolution entirely (PHPStan cannot know which method a `ReflectionMethod`
+     * instance wraps) — so nothing here is resolved against a specific PHPUnit version. The
+     * fallback below is dead code under normal operation (this method is never entered on
+     * 11.5) but keeps the class internally consistent instead of assuming that caller graph.
+     *
+     * @param  array<mixed>  $testArguments
+     *
+     * @throws Throwable
+     */
+    private function __replayInvokeParentTestMethod(string $methodName, array $testArguments): mixed
+    {
+        $hook = 'invokeTestMethod';
+
+        if ((new ReflectionClass(TestCase::class))->hasMethod($hook)) {
+            return (new ReflectionMethod(TestCase::class, $hook))->invoke($this, $methodName, $testArguments);
+        }
+
+        return $this->{$methodName}(...$testArguments);
     }
 
     /**
