@@ -219,7 +219,7 @@ forwarded to `vendor/bin/phpunit` untouched.
 |---|---|---|
 | `run` (default) | `--fresh` `--no-remote` `--explain` `--dry-run` `--log-junit=FILE` `--allow-ci-baseline` `--parallel`/`-p[=N]` `[-- <phpunit args>]` | Runs only what's affected, replays the rest. See below for each option. |
 | `record` | `--fresh` `--parallel`/`-p[=N]` | Runs the full suite unconditionally and records a fresh baseline. What CI runs on the default branch after a merge. |
-| `verify` | `[-- <phpunit args>]` | Runs the full suite in record mode and compares every result against what a replay pass would have served — the divergence metric (see [Keeping the cache honest](#keeping-the-cache-honest)). |
+| `verify` | `--parallel`/`-p[=N]` `[-- <phpunit args>]` | Runs the full suite in record mode and compares every result against what a replay pass would have served — the divergence metric (see [Keeping the cache honest](#keeping-the-cache-honest)). |
 | `status` | — | Prints the cached graph: root, branch, state dir, coverage driver, framework, file/edge/table counts, `graph.json` size, per-branch results, fingerprint drift, quarantine, not-cacheable count, remote, lifetime divergences. |
 | `explain <path>` | — | Prints which recorded test files a change to `<path>` would affect, and by which rule — without running anything. |
 | `prune` | `--flaky` `--branches` `--all` `--remote --keep-months=N` `--squash` | Drops stale state without touching a live pass. See below. |
@@ -420,13 +420,17 @@ conflicts); only the CI job that owns the branch baseline (`remote_push: 'all'`,
 The recommendation is the same one Pest gives for its own TIA: **PR CI keeps running the full,
 unfiltered suite** as the actual merge gate — `phpunit-replay verify` does this while also
 comparing every result against the cache, which is what keeps the baseline trustworthy and feeds
-the divergence metric. A fast, optional lane runs `phpunit-replay run` for quick feedback in
-minutes. A separate workflow records the baseline after each merge to the default branch
-(`run --allow-ci-baseline` or `record --fresh`, then `push --graph`).
+the divergence metric. Being a full-suite pass, `verify` is the slowest command in the package, so
+it also accepts `--parallel`/`-p[=N]` (same option as `run`/`record`, [see below](#parallel)) to run
+through Paratest instead of a single `phpunit` process — on a real project this took `verify` from
+~40 minutes sequentially to 5m19s with `--parallel=8`, without changing what it checks. A fast,
+optional lane runs `phpunit-replay run` for quick feedback in minutes. A separate workflow records
+the baseline after each merge to the default branch (`run --allow-ci-baseline` or `record --fresh`,
+then `push --graph`).
 
 ```
-fast (every PR):   vendor/bin/phpunit-replay run     — quick feedback, not the gate
-full (every PR):   vendor/bin/phpunit-replay verify  — the actual merge gate
+fast (every PR):   vendor/bin/phpunit-replay run                 — quick feedback, not the gate
+full (every PR):   vendor/bin/phpunit-replay verify --parallel=8 — the actual merge gate
 baseline (on push to main/develop): record/run + push --graph
 ```
 
@@ -465,13 +469,14 @@ demonstrates the effect end to end:
 
 ## Parallel
 
-Add `--parallel`/`-p` to `run` or `record` to run the same filtered configuration through
+Add `--parallel`/`-p` to `run`, `record` or `verify` to run the same configuration through
 [Paratest](https://github.com/paratestphp/paratest) instead of a single `phpunit` process:
 
 ```bash
-phpunit-replay --parallel      # Paratest's own auto-detected process count
-phpunit-replay -p 4            # 4 worker processes
-phpunit-replay record -p 4     # a full parallel recording pass
+phpunit-replay --parallel        # Paratest's own auto-detected process count
+phpunit-replay -p 4              # 4 worker processes
+phpunit-replay record -p 4       # a full parallel recording pass
+phpunit-replay verify -p 8       # the full-suite merge gate, in parallel
 ```
 
 Paratest is an optional `require-dev` dependency (`brianium/paratest`). When `--parallel`/`-p` is

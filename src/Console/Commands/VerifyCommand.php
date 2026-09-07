@@ -9,6 +9,7 @@ use Manuglopez\Replay\Console\Runner\RunRequest;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\InputArgument;
 use Symfony\Component\Console\Input\InputInterface;
+use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Output\OutputInterface;
 
 /**
@@ -22,6 +23,7 @@ final class VerifyCommand extends Command
         $this
             ->setName('verify')
             ->setDescription('Runs the full suite and reports how many results diverge from what the cache would have replayed.')
+            ->addOption('parallel', 'p', InputOption::VALUE_OPTIONAL, 'Run through Paratest. N processes, or Paratest\'s own auto-detected count when omitted (SPEC §13).', false)
             ->addArgument('phpunit-args', InputArgument::IS_ARRAY | InputArgument::OPTIONAL, 'Everything forwarded to vendor/bin/phpunit.')
         ;
 
@@ -43,6 +45,7 @@ final class VerifyCommand extends Command
             logJunit: null,
             allowCiBaseline: false,
             record: false,
+            parallel: RunRequest::parseParallel($input->getOption('parallel')),
         );
 
         return (new RunPipeline())->runVerify($request);

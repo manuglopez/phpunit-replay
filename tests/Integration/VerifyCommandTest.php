@@ -88,6 +88,47 @@ final class VerifyCommandTest extends TestCase
         self::assertStringContainsString('reason=divergence', $status['stdout']);
     }
 
+    /**
+     * Bug fix: `VerifyCommand` used to declare no `--parallel` option at all, and
+     * `RunPipeline::verify()` constructed a `PhpunitProcess` directly instead of going
+     * through `runPhpunit()` (the one branch that picks between `PhpunitProcess` and
+     * `ParatestProcess`, SPEC.md §13) — so the flag had no effect either way. Plain
+     * PHPUnit and Paratest print distinctly different banners (`PHPUnit x.y.z by ...`
+     * vs. `ParaTest x.y.z upon PHPUnit x.y.z by ...` plus a `Processes:` line), which is
+     * what lets this assert *which one actually ran* rather than just comparing results
+     * (identical either way on this fixture).
+     */
+    public function test_verify_with_no_flag_stays_sequential(): void
+    {
+        $recorded = $this->fixture->replay(['record']);
+        self::assertSame(0, $recorded['exitCode'], $recorded['stdout'] . $recorded['stderr']);
+
+        $verify = $this->fixture->replay(['verify']);
+
+        self::assertSame(0, $verify['exitCode'], $verify['stdout'] . $verify['stderr']);
+        self::assertStringContainsString('PHPUnit ', $verify['stdout']);
+        self::assertStringNotContainsString('ParaTest', $verify['stdout']);
+    }
+
+    public function test_verify_parallel_actually_goes_through_paratest(): void
+    {
+        if (! FixtureProject::paratestAvailable()) {
+            self::markTestSkipped('vendor/bin/paratest is not installed in this package (composer install --no-dev?).');
+        }
+
+        $recorded = $this->fixture->replay(['record']);
+        self::assertSame(0, $recorded['exitCode'], $recorded['stdout'] . $recorded['stderr']);
+
+        $verify = $this->fixture->replay(['verify', '--parallel=2']);
+
+        self::assertSame(0, $verify['exitCode'], $verify['stdout'] . $verify['stderr']);
+        self::assertStringContainsString('ParaTest', $verify['stdout']);
+        self::assertStringContainsString('Processes:     2', $verify['stdout']);
+        self::assertStringContainsString(sprintf('%d tests', self::TOTAL_TESTS), $verify['stdout']);
+        self::assertStringContainsString(sprintf('%d would replay', self::TOTAL_TESTS), $verify['stdout']);
+        self::assertStringContainsString('0 divergences', $verify['stdout']);
+    }
+
     /** @return array<string, mixed> */
     private static function readJson(string $path): array
     {

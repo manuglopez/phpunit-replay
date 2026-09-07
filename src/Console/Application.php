@@ -54,7 +54,7 @@ final class Application extends BaseApplication
         'baseline-path' => [],
         'explain' => [],
         'prune' => ['flaky', 'branches', 'all', 'remote', 'squash'],
-        'verify' => [],
+        'verify' => ['parallel'],
         'push' => ['graph'],
         'pull' => [],
     ];
@@ -66,7 +66,7 @@ final class Application extends BaseApplication
     private const GLOBAL_SHORT_OPTIONS = ['h', 'V', 'q', 'n'];
 
     /** @var list<string> commands whose own `-p[N]` shortcut is `--parallel` (SPEC §13) */
-    private const PARALLEL_SHORTCUT_COMMANDS = ['run', 'record'];
+    private const PARALLEL_SHORTCUT_COMMANDS = ['run', 'record', 'verify'];
 
     public function __construct()
     {

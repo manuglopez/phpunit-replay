@@ -546,7 +546,7 @@ None of this requires Pest or touches the user's code.
 ```
 phpunit-replay run [--filtered|--in-process] [--fresh] [--no-remote] [--explain] [--log-junit=FILE] [--dry-run] [-- <phpunit args>]
 phpunit-replay record [--fresh]
-phpunit-replay verify [-- <phpunit args>]   # full suite + comparison against cache (§12.2)
+phpunit-replay verify [--parallel=N|-p] [-- <phpunit args>]   # full suite + comparison against cache (§12.2)
 phpunit-replay status            # graph: files, edges, branches, size, quarantine, fingerprint
 phpunit-replay explain <path>    # which tests changing that file would affect, and by which rule
 phpunit-replay prune [--flaky] [--branches] [--all]
@@ -597,9 +597,11 @@ Verify  ✓ 1240 tests · 1198 would replay · 0 divergences (lifetime: 2 in 143
 
 This is the full-lane command on `main`/nightly. The `lifetime divergences` figure is the objective data point for deciding when the fast lane can become a PR gate. `status` shows the historical series.
 
+`verify` also accepts `--parallel`/`-p[=N]` (§13): being a full-suite pass, it is the slowest command in the package and the one the README recommends as the actual PR merge gate, so running it through Paratest is what keeps that gate fast.
+
 ## 13. Parallel (phase 2)
 
-Paratest support: the wrapper detects `--parallel`/`-p` and launches `vendor/bin/paratest` with the same filtered configuration. Workers inherit `PHPUNIT_REPLAY_*` via the environment; each one writes `runs/<run-id>/worker-<TEST_TOKEN>-{edges,results}.json`; the wrapper merges by union (edges) and last-write-wins (results). `-d pcov.directory` is passed to workers via `--passthru-php`.
+Paratest support: the wrapper detects `--parallel`/`-p` and launches `vendor/bin/paratest` with the same filtered configuration, for `run`, `record` and `verify`. Workers inherit `PHPUNIT_REPLAY_*` via the environment; each one writes `runs/<run-id>/worker-<TEST_TOKEN>-{edges,results}.json`; the wrapper merges by union (edges) and last-write-wins (results). `-d pcov.directory` is passed to workers via `--passthru-php`.
 
 ---
 

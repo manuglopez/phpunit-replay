@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+- Fix `run --dry-run` executing the full suite instead of printing the plan: `RunPipeline::runRecord()` (no cached baseline yet), `degrade()` (the single funnel for every "fall back to a plain PHPUnit run" case — no coverage driver, environment resolution failures, an unexpected exception) and `runResultsOnly()` (a partial CLI selection: `--filter`/`--group`/`--testsuite`/an explicit path) now honour `--dry-run` themselves instead of only the replay branch, printing a plan line to stdout and exiting 0 without ever launching PHPUnit or writing state.
+- Fix `verify` silently ignoring `--parallel`/`-p[=N]`: the option was never declared on the command and the argv splitter forwarded it straight through to PHPUnit as a passthrough argument; `RunPipeline::verify()` also constructed a `PhpunitProcess` directly instead of going through the branch that picks `PhpunitProcess`/`ParatestProcess`. `verify` now supports `--parallel`/`-p[=N]` exactly like `run`/`record` and actually runs through Paratest — the difference that matters most, since `verify` runs the full suite and is the command the README recommends as the PR merge gate.
+
 ## [0.1.0] — 2026-09-07
 
 - Remote cache, content-addressed: filesystem (`file://`), HTTP (S3/MinIO presigned, WebDAV) and a dedicated git repository backend (`GitRemoteCache`: shallow mirror, append-only objects, reset+rewrite reconciliation, `prune --remote [--keep-months] [--squash]`).

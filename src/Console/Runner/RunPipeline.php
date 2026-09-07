@@ -464,6 +464,19 @@ final class RunPipeline
     /** Step 7: partial CLI selection (--filter, --group, --testsuite, an explicit path, ...). */
     private function runResultsOnly(RunRequest $request): int
     {
+        // Bug fix: this branch is reached before the record/replay decision (`run()`
+        // checks `hasPartialSelection()` first), so it never reaches the dry-run block
+        // in `runReplay()` — a `--filter`/`--group`/`--testsuite`/explicit-path run had
+        // no dry-run check of its own at all, and executed for real regardless of the
+        // flag. There is no TIA plan to report here (no RunListBuilder involved: the
+        // user's own phpunit-args already narrowed the selection), so the honest thing
+        // to print is that PHPUnit would run exactly that selection, not a computed one.
+        if ($request->dryRun) {
+            fwrite(STDOUT, self::dryRunLine('would run only your own selection (--filter/--group/--testsuite/an explicit path); no plan to compute for a partial selection') . PHP_EOL);
+
+            return 0;
+        }
+
         $xml = (new ConfigurationWriter())->withExtensionOnly($this->configFile);
         $this->generatedXml = $xml;
 
@@ -504,6 +517,18 @@ final class RunPipeline
     {
         if ($this->driverName === 'none') {
             return $this->degrade($request, 'no coverage driver: install pcov or enable xdebug coverage');
+        }
+
+        // Bug fix: this is the path `run --dry-run` takes on a project with no cached
+        // baseline yet (SPEC.md §3.1 "Record" branch) — the driver check above already
+        // funnels a broken environment through degrade(), so anything reaching here has
+        // a real (if unfiltered) plan: the whole suite. Checked before anything below
+        // touches disk (no Graph, no run id, no PHPUnit process) so a dry run never
+        // writes state and never launches PHPUnit.
+        if ($request->dryRun) {
+            fwrite(STDOUT, self::dryRunLine('would record the full suite (no cached baseline)') . PHP_EOL);
+
+            return 0;
         }
 
         $root = $this->root ?? $request->cwd;
@@ -595,8 +620,13 @@ final class RunPipeline
         $runId = self::newRunId();
         $this->runDir = $this->stateDir . '/runs/' . $runId;
 
-        $exitCode = (new PhpunitProcess())->run(
-            $this->phpunitBin,
+        // Bug fix: this used to construct a PhpunitProcess directly, bypassing
+        // runPhpunit() — the one branch that chooses between PhpunitProcess and
+        // ParatestProcess (SPEC.md §13) — so `verify --parallel=N` silently ran
+        // sequentially regardless of the flag. Routing through runPhpunit(), exactly
+        // like runRecord() does, is what makes `RunRequest::$parallel` actually take
+        // effect here.
+        $exitCode = $this->runPhpunit(
             $xml,
             $this->iniFlags,
             $request->phpunitArgs,
@@ -1209,6 +1239,20 @@ final class RunPipeline
         fwrite(STDOUT, $summary->format() . PHP_EOL);
     }
 
+    /**
+     * Bug fix (--dry-run must never launch PHPUnit): the "no baseline" and "degraded"
+     * cases have no {@see RunList} to classify, so {@see DryRunSummary}'s numeric
+     * affected/uncached/quarantined buckets don't apply — inventing fake counts for them
+     * would misrepresent the plan rather than describe it. {@see ExplainFormatter}
+     * doesn't fit either, for the same reason: it also renders a RunList. A plain
+     * sentence under the same "Replay" label keeps the tool's visual convention without
+     * bending either format to a shape it wasn't built for.
+     */
+    private static function dryRunLine(string $message): string
+    {
+        return Summary::label(false) . '  ' . $message;
+    }
+
     private function printRecordSummary(RunPartial $partial): void
     {
         $graph = $this->graph;
@@ -1409,6 +1453,19 @@ final class RunPipeline
     private function degrade(RunRequest $request, string $reason): int
     {
         Warnings::warn($reason);
+
+        // Bug fix: degrade() is the single funnel every degrade case goes through
+        // (environment resolution failures, an unexpected exception, no coverage driver
+        // for `run`/`verify`) — one check here closes all of them at once instead of
+        // sprinkling a dryRun check at each of the six call sites. A dry run that
+        // degrades still owes the caller a plan, so it names both the reason and what
+        // running for real would have done, then returns without ever constructing a
+        // PhpunitProcess.
+        if ($request->dryRun) {
+            fwrite(STDOUT, self::dryRunLine('would run the full suite via plain phpunit (degraded: ' . $reason . ')') . PHP_EOL);
+
+            return 0;
+        }
 
         $base = $this->root ?? $request->cwd;
         $override = getenv('PHPUNIT_REPLAY_PHPUNIT_BIN');
