@@ -218,7 +218,7 @@ forwarded to `vendor/bin/phpunit` untouched.
 | Command | Options | What it does |
 |---|---|---|
 | `run` (default) | `--fresh` `--no-remote` `--explain` `--dry-run` `--log-junit=FILE` `--allow-ci-baseline` `--parallel`/`-p[=N]` `[-- <phpunit args>]` | Runs only what's affected, replays the rest. See below for each option. |
-| `record` | `--fresh` `--parallel`/`-p[=N]` | Runs the full suite unconditionally and records a fresh baseline. What CI runs on the default branch after a merge. |
+| `record` | `--fresh` `--parallel`/`-p[=N]` | Runs the full suite unconditionally and records a fresh baseline. What CI runs on the default branch after a merge. Exits `2` (PHPUnit's own tests may still all have passed) if it has to degrade to a plain PHPUnit run, since that means no baseline was actually written — unlike `run`, whose exit code always stays PHPUnit's own even when it degrades. |
 | `verify` | `--parallel`/`-p[=N]` `[-- <phpunit args>]` | Runs the full suite in record mode and compares every result against what a replay pass would have served — the divergence metric (see [Keeping the cache honest](#keeping-the-cache-honest)). |
 | `status` | — | Prints the cached graph: root, branch, state dir, coverage driver, framework, file/edge/table counts, `graph.json` size, per-branch results, fingerprint drift, quarantine, not-cacheable count, remote, lifetime divergences. |
 | `explain <path>` | — | Prints which recorded test files a change to `<path>` would affect, and by which rule — without running anything. |
@@ -309,7 +309,11 @@ A **fingerprint** guards against incompatible baselines: its *structural* half (
 `phpunit.xml(.dist)`, `phpunit-replay.php`, the cache schema version) changing discards the whole
 graph and forces a fresh recording; its *environmental* half (PHP `MAJOR.MINOR`, coverage driver,
 OS family) changing keeps the edges but discards cached results, which can't be trusted across a
-PHP version or driver change.
+PHP version or driver change. Each structural file only counts once git tracks it, so `status` can
+correctly print `replay_config=null` for a `phpunit-replay.php` that is very much in effect but
+untracked (locally gitignored, say) — an untracked file cannot invalidate a baseline shared with
+machines or CI runners that don't have it at all, which is the point of hashing it in the first
+place.
 
 Baselines are kept **per branch**. On a branch with no baseline of its own, phpunit-replay walks
 an ordered list of candidates (`baseline_branches`, or the single `default_branch` as shorthand),

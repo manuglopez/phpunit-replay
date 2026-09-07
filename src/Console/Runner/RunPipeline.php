@@ -53,10 +53,28 @@ use Throwable;
  * SPEC.md §3.1 and docs/INTERNALS.md "Wrapper pipeline — detailed algorithm (phase 1,
  * filtered mode)": everything the CLI commands delegate to. Never throws: any failure
  * — anticipated (no git, no phpunit.xml, no coverage driver, ...) or not — degrades to
- * running `vendor/bin/phpunit` exactly as the user would have, returning its exit code.
+ * running `vendor/bin/phpunit` exactly as the user would have, returning its exit code
+ * — except a degraded `record` (SPEC.md §3.3), whose exit code instead reports whether
+ * *it* did its own job (publishing a graph), since nothing gates merges on it the way
+ * `run`'s exit code gates on the tests actually passing (see {@see self::degrade()}).
  */
 final class RunPipeline
 {
+    /**
+     * Bug fix: `record` exists to publish a baseline graph, and a degraded run never
+     * writes one (no `MODE=record` env, no extension bootstrapped, no run partial) — so
+     * forwarding PHPUnit's own exit code straight through, the way {@see self::degrade()}
+     * does for every other caller, would report "0" for a `record` that recorded nothing,
+     * which is indistinguishable from success. `EXCEPTION_EXIT` mirrors PHPUnit's own
+     * `ShellExitCodeCalculator` convention (0 pass, 1 test failures, 2 "something outside
+     * the tests themselves went wrong") — a degraded `record` is squarely the third case.
+     * Used only when `RunRequest::$record` is true (the `record` command itself, not
+     * `run`'s own implicit first-baseline pass) and PHPUnit's own exit code was 0 — a
+     * nonzero PHPUnit exit code already turns the caller's attention to the run, so it is
+     * left untouched.
+     */
+    private const DEGRADED_RECORD_EXIT_CODE = 2;
+
     private RunRequest $request;
 
     private float $startedAt = 0.0;
@@ -647,12 +665,28 @@ final class RunPipeline
             $partial = LaravelIntegration::augment($partial, $root);
         }
 
-        $complete = ! (bool) ($partial->meta['truncated'] ?? false) && in_array($exitCode, [0, 1], true);
+        // Bug fix: this used to pass `recordsEdges: true` (and a `$complete` derived from
+        // the run alone) whatever the user asked PHPUnit to run, so a `verify` carrying a
+        // partial CLI selection — `--filter`, `--group`, `--testsuite`, an explicit path —
+        // rewrote the graph from a run that never covered the suite. SPEC.md §15 scenario 6
+        // forbids exactly that for `run` ({@see self::runResultsOnly()}, results-only mode);
+        // `verify` is the same full-suite recording pass and owes the graph the same
+        // guarantee. Three things went wrong without it: the executed test file's edges were
+        // replaced by whatever coverage the narrower selection attributed to it (a file
+        // autoloaded once per process is credited to whichever test loaded it first, so the
+        // dependency set — and therefore the file's content key — depends on the selection);
+        // `$complete` then pruned the sibling results the filter excluded, silently deleting
+        // cached results; and it published a baseline sha for a partial run.
+        $recordsEdges = ! $this->reader->hasPartialSelection();
+
+        $complete = $recordsEdges
+            && ! (bool) ($partial->meta['truncated'] ?? false)
+            && in_array($exitCode, [0, 1], true);
 
         // No quarantine passed here: divergences are detected explicitly below (reason
         // 'divergence', not the generic 'flip' GraphUpdater's own detection would use).
         $updater = new GraphUpdater($graph, $root, new ContentKey($root));
-        $updater->apply($partial, $this->branch, recordsEdges: true, complete: $complete);
+        $updater->apply($partial, $this->branch, recordsEdges: $recordsEdges, complete: $complete);
 
         if ($this->fingerprintDrifted($partial)) {
             return $exitCode;
@@ -660,13 +694,29 @@ final class RunPipeline
 
         $policy = new Policy($graph, $this->config, $this->quarantine, $root);
 
+        $newResults = $graph->results($this->branch);
+
         $wouldReplay = 0;
         $divergenceEntries = [];
 
-        foreach ($graph->results($this->branch) as $testId => $new) {
+        // Bug fix: this used to iterate `$graph->results($this->branch)` — the whole cached
+        // corpus, every baseline layer merged — instead of the tests this run actually
+        // executed. A test the run never touched has the same entry before and after
+        // `apply()`, so it trivially matched itself and was counted, which made "would
+        // replay" a figure about the cache rather than about the verification: it could
+        // exceed the "N tests" printed beside it (`5 tests · 35 would replay`), and two
+        // identical `verify` runs disagreed whenever the executed file's content key moved,
+        // because the untouched majority — not the verified minority — dominated the count.
+        // Counting over `$partial->results` is what makes it mean "of the N tests I just ran
+        // for real, M would have been served from cache instead", the number the README asks
+        // people to watch before trusting the fast lane as a merge gate. Divergence detection
+        // is unaffected: an untouched entry cannot differ from itself, so it never produced
+        // one — it only fed `recordStable()` a release-streak tick for a test that never ran.
+        foreach (array_keys($partial->results) as $testId) {
+            $new = $newResults[$testId] ?? null;
             $old = $oldResults[$testId] ?? null;
 
-            if ($old === null) {
+            if ($new === null || $old === null) {
                 continue;
             }
 
@@ -1426,8 +1476,19 @@ final class RunPipeline
 
     /**
      * The one branch that decides between {@see PhpunitProcess} and {@see ParatestProcess}
-     * (SPEC.md §13, `--parallel`/`-p`): every other call site in this class hands off here
+     * (SPEC.md §13, `--parallel`/`-p`): every call site that runs an instrumented pass —
+     * `runResultsOnly()`, `runRecord()`, `verify()`, `executeReplay()` — hands off here
      * instead of constructing a process runner directly.
+     *
+     * Doc fix: this used to claim "every other call site in this class", which stopped
+     * being true once {@see self::verify()} started routing through here too (it used to
+     * construct a `PhpunitProcess` directly, silently ignoring `--parallel`) — but it was
+     * already inaccurate before that fix for a different reason: {@see self::degrade()}
+     * constructs a bare `PhpunitProcess` of its own, deliberately. Its fallback run is not
+     * an instrumented pass at all — no coverage extension, no `--parallel`/Paratest, no
+     * generated config — precisely because whatever made the wrapper degrade may be the
+     * reason an instrumented run cannot be trusted; going through this method would wire
+     * that fallback into the same machinery being degraded away from.
      *
      * @param list<string> $iniFlags
      * @param list<string> $phpunitArgs
@@ -1471,7 +1532,28 @@ final class RunPipeline
         $override = getenv('PHPUNIT_REPLAY_PHPUNIT_BIN');
         $bin = (is_string($override) && $override !== '') ? $override : $base . '/vendor/bin/phpunit';
 
-        return (new PhpunitProcess())->run($bin, null, [], $request->phpunitArgs, false, [], $request->cwd);
+        $exitCode = (new PhpunitProcess())->run($bin, null, [], $request->phpunitArgs, false, [], $request->cwd);
+
+        // Bug fix: a real 9056-test suite hit a removed PHPUnit method mid-`record`,
+        // degrade() caught it here, ran the full suite for real via the branch above,
+        // and returned PHPUnit's own exit code (0, every test passed) — a `record` that
+        // wrote no graph and no state directory at all, indistinguishable from a
+        // successful one until someone thought to `ls` the state dir. `record`'s whole
+        // job is the graph, not the tests' pass/fail (nothing gates merges on it the way
+        // `run`'s exit code does — RecordCommand's own docblock: "what CI runs on main to
+        // publish a fresh baseline"), so when it degrades with nothing to show for it,
+        // that is `record` failing at its one job and must not read as green. `run`
+        // degrading the same way is untouched: falling back to a plain suite is its
+        // documented, legitimate behaviour (README "it can never break a test run"), and
+        // its exit code is the actual pass/fail signal CI gates on — changing it would be
+        // exactly the harm that rule exists to prevent. See {@see self::DEGRADED_RECORD_EXIT_CODE}.
+        if ($request->record && $exitCode === 0) {
+            Warnings::warn('record degraded and wrote no graph or state directory — the baseline was NOT refreshed; fix "' . $reason . '" and rerun');
+
+            return self::DEGRADED_RECORD_EXIT_CODE;
+        }
+
+        return $exitCode;
     }
 
     /** @return array<string, string> */
