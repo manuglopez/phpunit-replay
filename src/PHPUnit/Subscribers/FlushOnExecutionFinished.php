@@ -17,6 +17,10 @@ final readonly class FlushOnExecutionFinished implements ExecutionFinishedSubscr
     /**
      * @param Closure(): array<string, mixed> $meta produces the meta.json payload (driver, php, os, mode,
      *                                                startedAt, finishedAt, fingerprint, ...) at flush time
+     * @param (Closure(): array<string, string>)|null $coverageSnapshots produces the
+     *        `coverage.json` payload (project-relative test file => coverage snapshot key,
+     *        Record\CoverageSnapshots, SPEC.md §3.2 last paragraph) at flush time; null when
+     *        coverage snapshot capture is not active this run.
      */
     public function __construct(
         private RunWriter $runWriter,
@@ -24,11 +28,14 @@ final readonly class FlushOnExecutionFinished implements ExecutionFinishedSubscr
         private ResultCollector $collector,
         private Closure $meta,
         private ?NotCacheableCollector $notCacheable = null,
+        private ?Closure $coverageSnapshots = null,
     ) {
     }
 
     public function notify(ExecutionFinished $event): void
     {
-        $this->runWriter->flush($this->recorder, $this->collector, ($this->meta)(), $this->notCacheable);
+        $coverage = $this->coverageSnapshots !== null ? ($this->coverageSnapshots)() : null;
+
+        $this->runWriter->flush($this->recorder, $this->collector, ($this->meta)(), $this->notCacheable, $coverage);
     }
 }

@@ -217,6 +217,51 @@ final class RunWriterTest extends TestCase
     }
 
     #[Test]
+    public function flush_writes_coverage_snapshots_map_and_round_trips_via_run_partial(): void
+    {
+        $recorder = new Recorder(new FakeCoverageDriver([]));
+        $collector = new ResultCollector();
+        $writer = new RunWriter($this->runDir, $this->projectRoot);
+
+        $ok = $writer->flush($recorder, $collector, ['driver' => 'piggyback'], null, [
+            'tests/FooTest.php' => 'abc123',
+        ]);
+
+        self::assertTrue($ok);
+        self::assertFileExists($this->runDir . '/coverage.json');
+
+        $partial = RunPartial::load($this->runDir);
+        self::assertNotNull($partial);
+        self::assertSame(['tests/FooTest.php' => 'abc123'], $partial->coverage);
+    }
+
+    #[Test]
+    public function flush_defaults_coverage_to_an_empty_map_when_not_given(): void
+    {
+        $recorder = new Recorder(new FakeCoverageDriver([]));
+        $collector = new ResultCollector();
+        (new RunWriter($this->runDir, $this->projectRoot))->flush($recorder, $collector, ['driver' => 'fake']);
+
+        $partial = RunPartial::load($this->runDir);
+        self::assertNotNull($partial);
+        self::assertSame([], $partial->coverage);
+    }
+
+    #[Test]
+    public function load_defaults_coverage_to_empty_when_its_file_is_missing(): void
+    {
+        $recorder = new Recorder(new FakeCoverageDriver([]));
+        $collector = new ResultCollector();
+        (new RunWriter($this->runDir, $this->projectRoot))->flush($recorder, $collector, ['driver' => 'fake']);
+
+        unlink($this->runDir . '/coverage.json');
+
+        $partial = RunPartial::load($this->runDir);
+        self::assertNotNull($partial);
+        self::assertSame([], $partial->coverage);
+    }
+
+    #[Test]
     public function flush_prefixes_every_file_with_worker_test_token_when_the_env_var_is_set(): void
     {
         putenv('TEST_TOKEN=3');

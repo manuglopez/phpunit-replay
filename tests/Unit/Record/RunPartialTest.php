@@ -120,6 +120,49 @@ final class RunPartialTest extends TestCase
     }
 
     #[Test]
+    public function load_merges_coverage_snapshot_keys_across_workers(): void
+    {
+        $this->writeWorker(1, [
+            'edges' => [],
+            'results' => ['App\Tests\A::testA' => self::resultFixture(0)],
+            'tables' => [],
+            'meta' => ['driver' => 'piggyback', 'truncated' => false],
+            'coverage' => ['tests/ATest.php' => 'keyA'],
+        ]);
+
+        $this->writeWorker(2, [
+            'edges' => [],
+            'results' => ['App\Tests\B::testB' => self::resultFixture(0)],
+            'tables' => [],
+            'meta' => ['driver' => 'piggyback', 'truncated' => false],
+            'coverage' => ['tests/BTest.php' => 'keyB'],
+        ]);
+
+        $partial = RunPartial::load($this->runDir);
+        self::assertNotNull($partial);
+
+        self::assertSame(
+            ['tests/ATest.php' => 'keyA', 'tests/BTest.php' => 'keyB'],
+            $partial->coverage,
+        );
+    }
+
+    #[Test]
+    public function load_defaults_coverage_to_empty_when_its_file_is_missing(): void
+    {
+        $this->writeWorker(1, [
+            'edges' => [],
+            'results' => ['App\Tests\A::testA' => self::resultFixture(0)],
+            'tables' => [],
+            'meta' => ['driver' => 'piggyback', 'truncated' => false],
+        ]);
+
+        $partial = RunPartial::load($this->runDir);
+        self::assertNotNull($partial);
+        self::assertSame([], $partial->coverage);
+    }
+
+    #[Test]
     public function load_meta_comes_from_the_first_worker_but_truncated_is_true_when_any_worker_set_it(): void
     {
         $this->writeWorker(1, [
@@ -167,6 +210,7 @@ final class RunPartialTest extends TestCase
      *     tables: array<string, list<string>>,
      *     meta: array<string, mixed>,
      *     usesDatabase?: list<string>,
+     *     coverage?: array<string, string>,
      * } $data
      */
     private function writeWorker(int $token, array $data): void
@@ -174,6 +218,10 @@ final class RunPartialTest extends TestCase
         file_put_contents($this->runDir . '/worker-' . $token . '-edges.json', (string) json_encode($data['edges']));
         file_put_contents($this->runDir . '/worker-' . $token . '-results.json', (string) json_encode($data['results']));
         file_put_contents($this->runDir . '/worker-' . $token . '-tables.json', (string) json_encode($data['tables']));
+
+        if (isset($data['coverage'])) {
+            file_put_contents($this->runDir . '/worker-' . $token . '-coverage.json', (string) json_encode($data['coverage']));
+        }
         file_put_contents($this->runDir . '/worker-' . $token . '-meta.json', (string) json_encode($data['meta']));
         file_put_contents($this->runDir . '/worker-' . $token . '-uses_database.json', (string) json_encode($data['usesDatabase'] ?? []));
     }
