@@ -20,6 +20,11 @@ final class GitRepo
     public static function init(?string $root = null, string $branch = 'main'): self
     {
         $root ??= TempDir::make('git');
+
+        if (! is_dir($root) && ! @mkdir($root, 0o775, true) && ! is_dir($root)) {
+            throw new RuntimeException('Cannot create ' . $root);
+        }
+
         $repo = new self($root);
 
         $repo->git('init', '-q', '-b', $branch);
@@ -29,6 +34,12 @@ final class GitRepo
         $repo->git('config', 'core.autocrlf', 'false');
 
         return $repo;
+    }
+
+    /** Wraps a directory that already IS a git repository (e.g. a copy of another one). */
+    public static function at(string $root): self
+    {
+        return new self($root);
     }
 
     /** Copies a directory tree into a fresh repository and commits it. */

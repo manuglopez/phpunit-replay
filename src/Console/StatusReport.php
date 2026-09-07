@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Manuglopez\Replay\Console;
 
+use Manuglopez\Replay\Change\BaselineResolver;
 use Manuglopez\Replay\Report\Format;
 
 /**
@@ -23,6 +24,7 @@ final readonly class StatusReport
      * @param array<string, mixed> $currentFingerprint
      * @param array<string, QuarantineEntry> $quarantineEntries currently-quarantined ids only
      * @param array{runs: int, divergences: int}|null $divergence null when `verify` has never run
+     * @param array{branch: string, sha: string, source: string, distance: int}|null $baseline the resolved nearest baseline (D-039)
      */
     public function __construct(
         public string $root,
@@ -46,6 +48,9 @@ final readonly class StatusReport
         public int $notCacheableFiles = 0,
         public int $notCacheableIds = 0,
         public ?array $divergence = null,
+        public string $remote = 'none',
+        public string $remotePush = 'objects',
+        public ?array $baseline = null,
     ) {
     }
 
@@ -59,8 +64,17 @@ final readonly class StatusReport
             'state dir: ' . $this->stateDir,
             'driver:    ' . $this->driverLine,
             'framework: ' . $this->framework,
-            '',
+            'remote:    ' . $this->remote,
+            'push:      ' . $this->remotePush,
         ];
+
+        $nearest = $this->baseline === null ? null : BaselineResolver::describe($this->baseline, $this->branch ?? '');
+
+        if ($nearest !== null) {
+            $lines[] = $nearest;
+        }
+
+        $lines[] = '';
 
         if (! $this->hasBaseline) {
             $lines[] = 'no baseline yet';

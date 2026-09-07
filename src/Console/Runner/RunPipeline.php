@@ -11,8 +11,14 @@ use Manuglopez\Replay\Cache\Fingerprint;
 use Manuglopez\Replay\Cache\Graph;
 use Manuglopez\Replay\Cache\GraphStore;
 use Manuglopez\Replay\Cache\GraphUpdater;
+use Manuglopez\Replay\Cache\ProjectKey;
+use Manuglopez\Replay\Cache\Remote\NullRemoteCache;
+use Manuglopez\Replay\Cache\Remote\ObjectStore;
+use Manuglopez\Replay\Cache\Remote\RemoteCache;
+use Manuglopez\Replay\Cache\Remote\RemoteCacheFactory;
 use Manuglopez\Replay\Cache\RunContext;
 use Manuglopez\Replay\Cache\StateDirectory;
+use Manuglopez\Replay\Change\BaselineResolver;
 use Manuglopez\Replay\Change\ChangedFiles;
 use Manuglopez\Replay\Change\Git;
 use Manuglopez\Replay\Change\LastRunTree;
@@ -92,6 +98,18 @@ final class RunPipeline
 
     private GraphStore $store;
 
+    private RemoteCache $remote;
+
+    private ?ObjectStore $objects = null;
+
+    private bool $remoteOpen = false;
+
+    /** @var array<string, true> test ids whose cached result came from the remote, not from this machine */
+    private array $remoteTestIds = [];
+
+    /** @var array{branch: string, sha: string, source: string, distance: int}|null */
+    private ?array $baseline = null;
+
     private Quarantine $quarantine;
 
     private ?string $generatedXml = null;
@@ -124,6 +142,7 @@ final class RunPipeline
         } catch (Throwable $e) {
             return $this->degrade($request, 'unexpected error (' . $e->getMessage() . '): degrading to a plain PHPUnit run');
         } finally {
+            $this->closeRemote();
             $this->cleanup();
         }
     }
@@ -152,6 +171,7 @@ final class RunPipeline
         } catch (Throwable $e) {
             return $this->degrade($request, 'unexpected error (' . $e->getMessage() . '): degrading to a plain PHPUnit run');
         } finally {
+            $this->closeRemote();
             $this->cleanup();
         }
     }
@@ -226,6 +246,7 @@ final class RunPipeline
         }
 
         $this->fingerprint = Fingerprint::compute($root, $this->driverName);
+        $this->openRemote($request, $root, $config);
 
         Warnings::debug(sprintf(
             'root=%s branch=%s(default:%s) head=%s driver=%s stateDir=%s',
@@ -246,27 +267,195 @@ final class RunPipeline
         $this->store = new GraphStore($this->stateDir, $this->root ?? '');
         $this->graph = $request->fresh ? null : $this->store->load();
 
+        if ($this->graph !== null && ! $this->reconcile($this->graph, 'the cached baseline')) {
+            $this->graph = null;
+        }
+
+        // Nothing cached locally (first run on this machine, or a structural change just
+        // invalidated what was there): a remote may already hold a baseline for this
+        // branch, or for the nearest one (SPEC.md §9, docs/INTERNALS.md "Pipeline changes").
+        if ($this->graph === null && ! $request->fresh) {
+            $this->graph = $this->pullStartingGraph();
+        }
+
         if ($this->graph === null) {
             return;
         }
 
-        $structuralDrift = Fingerprint::structuralDrift($this->graph->fingerprint(), $this->fingerprint);
+        $this->graph->setDefaultBranch($this->defaultBranch);
+        $this->resolveBaseline($this->graph);
+    }
+
+    /**
+     * Fingerprint reconciliation, shared by the local and the remote baseline: a structural
+     * mismatch makes the graph unusable (false), environmental drift only makes its cached
+     * results unusable.
+     */
+    private function reconcile(Graph $graph, string $what): bool
+    {
+        $structuralDrift = Fingerprint::structuralDrift($graph->fingerprint(), $this->fingerprint);
 
         if ($structuralDrift !== []) {
-            Warnings::warn(sprintf('structural change (%s): recording a fresh baseline', implode(', ', $structuralDrift)));
-            $this->graph = null;
+            Warnings::warn(sprintf(
+                'structural change (%s): %s cannot be used, recording a fresh baseline',
+                implode(', ', $structuralDrift),
+                $what,
+            ));
+
+            return false;
+        }
+
+        $environmentalDrift = Fingerprint::environmentalDrift($graph->fingerprint(), $this->fingerprint);
+
+        if ($environmentalDrift !== []) {
+            Warnings::warn(sprintf('environment change (%s): cached results cleared', implode(', ', $environmentalDrift)));
+            $graph->clearResults();
+        }
+
+        return true;
+    }
+
+    /**
+     * `ObjectStore::graph(<branch>) ?? graph(<nearest candidate>)`, reconciled and saved
+     * locally as this machine's starting graph — the implicit `pull` SPEC.md §12 describes
+     * for a developer (or an ephemeral CI job) starting with nothing. Every result it
+     * carries is remembered as remote-sourced, so the summary can say how much of the pass
+     * came from somebody else's machine.
+     */
+    private function pullStartingGraph(): ?Graph
+    {
+        $objects = $this->objects;
+
+        if ($objects === null) {
+            return null;
+        }
+
+        $root = $this->root ?? '';
+
+        foreach ($this->baselineCandidates() as $branch) {
+            $graph = $objects->graphOf($branch, $root);
+
+            if ($graph === null || ! $this->reconcile($graph, 'the remote baseline for ' . $branch)) {
+                continue;
+            }
+
+            foreach ($graph->branches() as $recorded) {
+                foreach (array_keys($graph->ownResults($recorded)) as $testId) {
+                    $this->remoteTestIds[$testId] = true;
+                }
+            }
+
+            $this->store->save($graph);
+            Warnings::debug('remote: adopted the ' . $branch . ' baseline as the local graph');
+
+            return $graph;
+        }
+
+        return null;
+    }
+
+    /**
+     * DECISIONS.md D-039: tell the graph which baseline to fall back to before the default
+     * branch. Only when it lives on ANOTHER branch — the current branch's own baseline is
+     * already the first thing `Graph::results()` reads.
+     */
+    private function resolveBaseline(Graph $graph): void
+    {
+        $head = $this->head;
+
+        if ($head === null) {
+            return;
+        }
+
+        $resolved = (new BaselineResolver($this->git, $graph, $this->objects, $this->config, $this->defaultBranch))
+            ->resolve($this->branch, $head);
+
+        if ($resolved === null) {
+            return;
+        }
+
+        $this->baseline = $resolved;
+
+        if ($resolved['branch'] !== $this->branch) {
+            $graph->setNearestBranch($resolved['branch']);
+            Warnings::debug(sprintf(
+                'baseline %s@%s (%s, %d files away)',
+                $resolved['branch'],
+                substr($resolved['sha'], 0, 7),
+                $resolved['source'],
+                $resolved['distance'],
+            ));
+        }
+    }
+
+    /** @return list<string> the branch itself, then the configured baseline candidates */
+    private function baselineCandidates(): array
+    {
+        $candidates = [$this->branch, ...$this->config->baselineCandidates($this->defaultBranch)];
+        $seen = [];
+
+        foreach ($candidates as $branch) {
+            if ($branch !== '' && $branch !== 'HEAD') {
+                $seen[$branch] = true;
+            }
+        }
+
+        return array_keys($seen);
+    }
+
+    /**
+     * The remote cache for this pass (SPEC.md §9): built from config, opened once with
+     * `begin()` (which for a git mirror is a fetch) and closed once with `end()` in the
+     * pipeline's `finally`. `--no-remote` and `remote => null` both leave it closed, and a
+     * backend that cannot open only warns: a remote is an accelerator, never a dependency.
+     */
+    private function openRemote(RunRequest $request, string $root, Config $config): void
+    {
+        $this->remote = new NullRemoteCache();
+        $this->objects = null;
+        $this->remoteOpen = false;
+        $this->remoteTestIds = [];
+
+        if ($request->noRemote) {
+            Warnings::debug('remote: disabled for this run (--no-remote)');
 
             return;
         }
 
-        $environmentalDrift = Fingerprint::environmentalDrift($this->graph->fingerprint(), $this->fingerprint);
+        $remote = RemoteCacheFactory::fromConfig($config, $this->stateDir);
 
-        if ($environmentalDrift !== []) {
-            Warnings::warn(sprintf('environment change (%s): cached results cleared', implode(', ', $environmentalDrift)));
-            $this->graph->clearResults();
+        if ($remote->name() === 'null') {
+            return;
         }
 
-        $this->graph->setDefaultBranch($this->defaultBranch);
+        $remote->begin();
+        $this->remote = $remote;
+        $this->remoteOpen = true;
+        $this->warnRemote();
+        $this->objects = new ObjectStore($remote, $this->stateDir, ProjectKey::for($root));
+
+        Warnings::debug('remote: ' . $remote->name() . ' opened (push: ' . $config->remotePush . ')');
+    }
+
+    /** `end()` exactly once, whatever happened during the pass. */
+    private function closeRemote(): void
+    {
+        if (! $this->remoteOpen) {
+            return;
+        }
+
+        $this->remoteOpen = false;
+        $this->remote->end();
+        $this->warnRemote();
+    }
+
+    private function warnRemote(): void
+    {
+        $error = $this->remote->lastError();
+
+        if ($error !== null) {
+            Warnings::warn('remote (' . $this->remote->name() . '): ' . $error);
+        }
     }
 
     /** Step 7: partial CLI selection (--filter, --group, --testsuite, an explicit path, ...). */
@@ -316,9 +505,10 @@ final class RunPipeline
 
         $root = $this->root ?? $request->cwd;
 
-        $this->graph = new Graph($root);
-        $this->graph->setFingerprint($this->fingerprint);
-        $this->graph->setDefaultBranch($this->defaultBranch);
+        $graph = new Graph($root);
+        $graph->setFingerprint($this->fingerprint);
+        $graph->setDefaultBranch($this->defaultBranch);
+        $this->graph = $graph;
 
         $xml = (new ConfigurationWriter())->withExtensionOnly($this->configFile);
         $this->generatedXml = $xml;
@@ -349,8 +539,8 @@ final class RunPipeline
 
         $complete = ! (bool) ($partial->meta['truncated'] ?? false) && in_array($exitCode, [0, 1], true);
 
-        $updater = new GraphUpdater($this->graph, $root, new ContentKey($root), $this->quarantine);
-        $updater->apply($partial, $this->branch, recordsEdges: true, complete: $complete);
+        $updater = new GraphUpdater($graph, $root, new ContentKey($root), $this->quarantine);
+        $applied = $updater->apply($partial, $this->branch, recordsEdges: true, complete: $complete);
         $this->quarantine->save($this->stateDir);
 
         if ($this->fingerprintDrifted($partial)) {
@@ -358,6 +548,7 @@ final class RunPipeline
         }
 
         $this->persistAfterRun($updater, $complete, new ChangedFiles($root, $this->git));
+        $this->pushAfterRun($graph, $applied['touched'], $complete);
         $this->printRecordSummary($partial);
 
         return $exitCode;
@@ -510,7 +701,7 @@ final class RunPipeline
             return $this->runRecord($request);
         }
 
-        $sha = $graph->recordedSha($this->branch);
+        $sha = $this->baseline['sha'] ?? $graph->recordedSha($this->branch);
 
         if ($sha === null) {
             $this->graph = null;
@@ -549,7 +740,19 @@ final class RunPipeline
         /** @var list<string> $runList */
         $runList = $data['runList'];
 
+        // SPEC.md §9: an affected test file whose exact content another machine has
+        // already run is replayed from the remote instead of executed here.
+        $runList = $this->replayFromRemote($graph, $data['list'], $runList);
+        $data['runList'] = $runList;
+        [$data['replayed'], $data['saved'], $data['replayedRemote']] = $this->replayedAgainst($graph, $this->branch, $runList);
+
         if ($request->explain || $request->dryRun) {
+            $baselineLine = $this->baseline === null ? null : BaselineResolver::describe($this->baseline, $this->branch);
+
+            if ($baselineLine !== null) {
+                fwrite(STDOUT, $baselineLine . PHP_EOL);
+            }
+
             foreach ((new ExplainFormatter())->lines($data['list'], $runList) as $line) {
                 fwrite(STDOUT, $line . PHP_EOL);
             }
@@ -582,7 +785,7 @@ final class RunPipeline
 
             // Nothing executed: affected/uncached/quarantined (test counts, see
             // executeReplay()) are necessarily all zero too.
-            $this->printSummary(0, 0, 0, $data['replayed'], 0, $data['saved'], true);
+            $this->printSummary(0, 0, 0, $data['replayed'], $data['replayedRemote'], 0, $data['saved'], true);
 
             if ($request->logJunit !== null) {
                 $merged = (new JUnitMerger())->merge(null, $graph->results($this->branch), $root);
@@ -652,7 +855,7 @@ final class RunPipeline
         $complete = ! (bool) ($partial->meta['truncated'] ?? false) && in_array($exitCode, [0, 1], true);
 
         $updater = new GraphUpdater($graph, $root, new ContentKey($root), $this->quarantine);
-        $updater->apply($partial, $this->branch, recordsEdges: $recordsEdges, complete: $complete);
+        $applied = $updater->apply($partial, $this->branch, recordsEdges: $recordsEdges, complete: $complete);
         $this->quarantine->save($this->stateDir);
 
         if ($this->fingerprintDrifted($partial)) {
@@ -660,14 +863,20 @@ final class RunPipeline
         }
 
         $this->persistAfterRun($updater, $complete, $changedFiles);
+        $this->pushAfterRun($graph, $applied['touched'], $complete);
 
         $replayed = [];
+        $replayedRemote = 0;
 
         foreach ($graph->results($this->branch) as $testId => $result) {
             $file = $result['file'] ?? null;
 
             if (is_string($file) && $file !== '' && ! in_array($file, $runList, true)) {
                 $replayed[$testId] = $result;
+
+                if (isset($this->remoteTestIds[$testId])) {
+                    $replayedRemote++;
+                }
             }
         }
 
@@ -690,6 +899,7 @@ final class RunPipeline
             $executed['affected'],
             $executed['uncached'],
             count($replayed),
+            $replayedRemote,
             $executed['quarantined'],
             $savedSeconds,
             $exitCode === 0,
@@ -705,7 +915,7 @@ final class RunPipeline
      * classified per executed result afterwards by {@see self::classifyExecuted()}.
      *
      * @param list<string> $changed
-     * @return array{list: RunList, runList: list<string>, affected: int, uncached: int, quarantined: int, replayed: int, saved: float}
+     * @return array{list: RunList, runList: list<string>, affected: int, uncached: int, quarantined: int, replayed: int, replayedRemote: int, saved: float}
      */
     private function computeRunList(Graph $graph, array $changed, string $branch, string $root): array
     {
@@ -731,7 +941,7 @@ final class RunPipeline
             $runList = $builder->allTestFilesOnDisk();
         }
 
-        [$replayed, $saved] = $this->replayedAgainst($graph, $branch, $runList);
+        [$replayed, $saved, $replayedRemote] = $this->replayedAgainst($graph, $branch, $runList);
 
         return [
             'list' => $list,
@@ -740,30 +950,188 @@ final class RunPipeline
             'uncached' => count($uncachedSet),
             'quarantined' => count($list->quarantined),
             'replayed' => $replayed,
+            'replayedRemote' => $replayedRemote,
             'saved' => $saved,
         ];
     }
 
     /**
      * @param list<string> $runList
-     * @return array{0: int, 1: float}
+     * @return array{0: int, 1: float, 2: int} replayed tests, seconds saved, of which remote
      */
     private function replayedAgainst(Graph $graph, string $branch, array $runList): array
     {
         $inRunList = array_fill_keys($runList, true);
         $count = 0;
         $saved = 0.0;
+        $remote = 0;
 
-        foreach ($graph->results($branch) as $result) {
+        foreach ($graph->results($branch) as $testId => $result) {
             $file = $result['file'] ?? null;
 
             if (is_string($file) && $file !== '' && ! isset($inRunList[$file])) {
                 $count++;
                 $saved += $result['time'];
+
+                if (isset($this->remoteTestIds[$testId])) {
+                    $remote++;
+                }
             }
         }
 
-        return [$count, $saved];
+        return [$count, $saved, $remote];
+    }
+
+    /**
+     * SPEC.md §9 / docs/INTERNALS.md "Pipeline changes": every test file the run list holds
+     * *only* because it is affected gets its content key recomputed here (from the old
+     * edges, deliberately: same test file plus same dependency contents means the same key,
+     * whoever recorded it) and looked up in the remote. A hit means another machine already
+     * ran exactly this content — the file leaves the run list and its results are merged in
+     * as replayed-remote.
+     *
+     * Files in the run list for any other reason are left alone: an unknown file has no
+     * edges to key on, a `Rerun` file holds a result SPEC §6.2 says must be re-run
+     * regardless of the cache, and a quarantined/non-cacheable file must never be replayed
+     * from anywhere. An object holding a result that would itself force a re-run is skipped
+     * for the same reason.
+     *
+     * @param list<string> $runList
+     * @return list<string> the run list without the files served from the remote
+     */
+    private function replayFromRemote(Graph $graph, RunList $list, array $runList): array
+    {
+        $objects = $this->objects;
+
+        if ($objects === null || $runList === []) {
+            return $runList;
+        }
+
+        $contentKey = new ContentKey($this->root ?? '');
+        $skip = array_fill_keys([...$list->unknown, ...$list->rerun, ...$list->quarantined], true);
+        $kept = [];
+        $files = 0;
+
+        foreach ($runList as $file) {
+            if (isset($skip[$file]) || ! $list->selection->has($file) || $graph->isNotCacheable($file)) {
+                $kept[] = $file;
+
+                continue;
+            }
+
+            $key = $contentKey->forTestFile($graph, $file);
+            $object = $key === null ? null : $objects->object($key);
+
+            if ($key === null || $object === null || $this->holdsARerun($object['results'])) {
+                $kept[] = $file;
+
+                continue;
+            }
+
+            foreach ($object['results'] as $testId => $result) {
+                $result['file'] = $file;
+                $result['key'] = $key;
+                $graph->setResult($this->branch, $testId, $result);
+                $this->remoteTestIds[$testId] = true;
+            }
+
+            $files++;
+            Warnings::debug('remote: replayed ' . $file . ' from objects/*/' . $key . '.json');
+        }
+
+        if ($files > 0) {
+            Warnings::debug('remote: ' . $files . ' test file(s) replayed from the remote');
+        }
+
+        return $kept;
+    }
+
+    /**
+     * A cached failure/error always re-runs (SPEC.md §6.2), so an object carrying one is no
+     * use: replaying it would hide the very result the rule exists to re-check.
+     *
+     * @param array<string, array{status:int, message:string, time:float, assertions:int, file?:string, key?:string}> $results
+     */
+    private function holdsARerun(array $results): bool
+    {
+        foreach ($results as $result) {
+            if ($this->reader->shouldRerun($result['status'])) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * docs/INTERNALS.md "Pipeline changes": publish one `objects/<shard>/<k>.json` per test
+     * file this pass executed, and the whole graph when `remote_push` is `all` and the pass
+     * earned a baseline. `remote_push => 'off'` makes the remote pull-only; `CI=true`
+     * publishes objects but never a graph unless `--allow-ci-baseline` says so (SPEC §12.1).
+     *
+     * @param list<string> $executedTestFiles project-relative, from GraphUpdater::apply()
+     */
+    private function pushAfterRun(Graph $graph, array $executedTestFiles, bool $complete): void
+    {
+        $objects = $this->objects;
+
+        if ($objects === null || $this->config->remotePush === 'off') {
+            return;
+        }
+
+        $contentKey = new ContentKey($this->root ?? '');
+        $own = $graph->ownResults($this->branch);
+        $pushed = 0;
+
+        foreach ($executedTestFiles as $file) {
+            if ($graph->isNotCacheable($file)) {
+                continue;
+            }
+
+            $key = $contentKey->forTestFile($graph, $file);
+
+            if ($key === null) {
+                continue;
+            }
+
+            $results = [];
+
+            foreach ($own as $testId => $result) {
+                if (($result['file'] ?? null) === $file) {
+                    $results[$testId] = $result;
+                }
+            }
+
+            if ($results !== [] && $objects->putObject($key, $file, $results)) {
+                $pushed++;
+            }
+        }
+
+        Warnings::debug('remote: ' . $pushed . ' object(s) published');
+
+        if ($this->config->remotePush !== 'all' || ! $complete || ! $this->persist) {
+            return;
+        }
+
+        if ($this->ciMode && ! $this->request->allowCiBaseline) {
+            Warnings::debug('remote: CI detected, the branch graph was not published (pass --allow-ci-baseline to override)');
+
+            return;
+        }
+
+        $this->pushGraph($graph, $objects);
+    }
+
+    /** The one place a whole branch graph goes to the remote, shared with `push --graph`. */
+    private function pushGraph(Graph $graph, ObjectStore $objects): bool
+    {
+        $body = $graph->encode();
+
+        if ($body === null) {
+            return false;
+        }
+
+        return $objects->putGraph($this->branch, $body);
     }
 
     /**
@@ -798,14 +1166,14 @@ final class RunPipeline
         return ['affected' => $affected, 'uncached' => $uncached, 'quarantined' => $quarantined];
     }
 
-    private function printSummary(int $executed, int $affected, int $uncached, int $replayed, int $quarantined, float $saved, bool $success): void
+    private function printSummary(int $executed, int $affected, int $uncached, int $replayed, int $replayedRemote, int $quarantined, float $saved, bool $success): void
     {
         $summary = new Summary(
             $executed,
             $affected,
             $uncached,
             $replayed,
-            0,
+            $replayedRemote,
             $quarantined,
             $this->persist ? $this->branch : null,
             $this->persist ? $this->head : null,
