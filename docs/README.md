@@ -12,3 +12,4 @@ contracts, deep dives, and development history.
 | [spikes/in-process-replay.md](spikes/in-process-replay.md) | Findings from prototyping in-process replay against real PHPUnit 11.5/12 internals — why the trait hooks `invokeTestMethod()` on 12 and falls back to a reflection swap on 11.5, and what must never be replayed (`expectException()`, `#[Depends]` providers). |
 | [reports/phase-1.md](reports/phase-1.md) | Development report: filtered-mode wrapper, the core dependency graph, and the `run`/`record`/`status`/`baseline-path` commands. |
 | [reports/phase-2.md](reports/phase-2.md) | Development report: in-process replay, `explain`/`prune`/`verify`, hermeticity (`#[NotCacheable]`, quarantine), the Laravel integration, and Paratest support. |
+| [reports/phase-3.md](reports/phase-3.md) | Development report: content-addressed remote cache (filesystem, HTTP, dedicated git repository), replay across machines, nearest-baseline selection, coverage merge, CI matrix. |
