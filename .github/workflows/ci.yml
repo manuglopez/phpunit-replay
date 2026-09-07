@@ -1,0 +1,79 @@
+# CI for this package (manuglopez/phpunit-replay) itself.
+#
+# Matrix: PHP 8.2/8.3/8.4 x PHPUnit ^11.5/^12.0 x coverage driver pcov/xdebug.
+# phpunit/phpunit ^12.0 requires PHP >=8.3 (see vendor/phpunit/phpunit/composer.json
+# `require.php`), so the PHP 8.2 x PHPUnit ^12.0 cell is excluded for both drivers —
+# it can never resolve. That leaves 10 of the 12 possible cells.
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+  pull_request:
+    paths-ignore:
+      - '**.md'
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: "PHP ${{ matrix.php }} / PHPUnit ${{ matrix.phpunit }} / ${{ matrix.coverage }}"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.2', '8.3', '8.4']
+        phpunit: ['^11.5', '^12.0']
+        coverage: [pcov, xdebug]
+        exclude:
+          # phpunit/phpunit ^12.0 requires PHP >=8.3 — cannot resolve on 8.2 with either driver.
+          - php: '8.2'
+            phpunit: '^12.0'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup PHP ${{ matrix.php }} (${{ matrix.coverage }})
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          coverage: ${{ matrix.coverage }}
+          ini-values: ${{ matrix.coverage == 'xdebug' && 'xdebug.mode=coverage' || '' }}
+          tools: composer:v2
+
+      - name: Require PHPUnit ${{ matrix.phpunit }} for this cell
+        run: composer require --dev --no-update phpunit/phpunit:"${{ matrix.phpunit }}"
+
+      - name: Install dependencies
+        run: composer update --prefer-stable --prefer-dist --no-interaction
+
+      - name: Validate composer.json
+        run: composer validate --strict
+
+      - name: Static analysis
+        run: composer stan
+
+      - name: Lint
+        run: composer lint
+
+      # Installed before the suite runs so tests/Integration/LaravelLite*Test.php actually
+      # exercise the fixture instead of skipping themselves for a missing vendor/autoload.php
+      # (the fixture's own composer.json requires php ^8.3, laravel/framework ^13).
+      - name: Install Laravel fixture dependencies
+        if: matrix.php != '8.2'
+        working-directory: tests/Fixtures/Projects/laravel-lite
+        run: composer install --no-interaction --prefer-dist
+
+      - name: Run test suite (pcov)
+        if: matrix.coverage == 'pcov'
+        run: php -d pcov.enabled=1 -d pcov.directory=$PWD vendor/bin/phpunit
+
+      - name: Run test suite (xdebug)
+        if: matrix.coverage == 'xdebug'
+        run: vendor/bin/phpunit

@@ -1,0 +1,50 @@
+# EXAMPLE workflow for a project that USES phpunit-replay — this is not a workflow of the
+# phpunit-replay package itself, and it does not run in this repository: GitHub Actions only
+# auto-discovers workflow files directly under `.github/workflows/*.yml`, not in a nested
+# `examples/` directory, so this file is inert here. Copy it into your own project's
+# `.github/workflows/tia-gc.yml` and adjust the PHP version / package manager to taste.
+#
+# Monthly garbage collection of the remote cache: `prune --remote --keep-months=3 --squash`
+# drops object shards older than the retention window (keeping anything still referenced by a
+# graph/** baseline) and, with --squash, re-creates the remote branch as a single orphan commit
+# and force-pushes it. Clients detect the rewritten history on their next `begin()` (the start
+# of any push/pull) and re-clone their local mirror automatically — no manual step needed on
+# developer machines. Only the git backend keeps history to squash; for HTTP/filesystem
+# backends this command still deletes stale shards, just without the squash step.
+name: TIA cache GC
+
+on:
+  schedule:
+    - cron: '0 3 1 * *' # 03:00 UTC on the 1st of every month
+  workflow_dispatch: {}
+
+jobs:
+  gc:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          coverage: pcov
+
+      # git backend only: force-pushing the squashed history needs write access.
+      - name: Set up deploy key for the cache repository
+        if: ${{ startsWith(vars.PHPUNIT_REPLAY_REMOTE, 'git@') || startsWith(vars.PHPUNIT_REPLAY_REMOTE, 'git+') }}
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.REPLAY_CACHE_DEPLOY_KEY }}
+
+      - name: Install dependencies
+        run: composer install --no-interaction --prefer-dist
+
+      - name: Prune remote cache
+        env:
+          PHPUNIT_REPLAY_REMOTE: ${{ vars.PHPUNIT_REPLAY_REMOTE }}
+          PHPUNIT_REPLAY_REMOTE_TOKEN: ${{ secrets.PHPUNIT_REPLAY_REMOTE_TOKEN }}
+        run: vendor/bin/phpunit-replay prune --remote --keep-months=3 --squash

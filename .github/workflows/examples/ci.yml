@@ -1,0 +1,116 @@
+# EXAMPLE workflow for a project that USES phpunit-replay — this is not a workflow of the
+# phpunit-replay package itself, and it does not run in this repository: GitHub Actions only
+# auto-discovers workflow files directly under `.github/workflows/*.yml`, not in a nested
+# `examples/` directory, so this file is inert here. Copy it into your own project's
+# `.github/workflows/ci.yml` and adjust the PHP version / package manager to taste.
+#
+# Two lanes on every PR, same recommendation phpunit-replay gives for itself and that Pest
+# gives for its own TIA:
+#   - `fast` runs `phpunit-replay run` for quick feedback in minutes.
+#   - `full` runs `phpunit-replay verify` — the FULL, unfiltered suite in record mode, compared
+#     against what a replay pass would have served. This is the actual merge gate; it is also
+#     what keeps the baseline trustworthy and feeds the divergence metric (see
+#     docs/sharing-the-cache.md and `phpunit-replay status`).
+name: CI
+
+on:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fast:
+    name: Fast (phpunit-replay run)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          coverage: pcov
+
+      - name: Install dependencies
+        run: composer install --no-interaction --prefer-dist
+
+      # git backend only (remove for HTTP/shared-folder — see docs/sharing-the-cache.md).
+      - name: Set up deploy key for the cache repository
+        if: ${{ startsWith(vars.PHPUNIT_REPLAY_REMOTE, 'git@') || startsWith(vars.PHPUNIT_REPLAY_REMOTE, 'git+') }}
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.REPLAY_CACHE_DEPLOY_KEY }}
+
+      - name: phpunit-replay run
+        env:
+          PHPUNIT_REPLAY_REMOTE: ${{ vars.PHPUNIT_REPLAY_REMOTE }}
+          # HTTP backend only; unused (and harmless to leave set) for the git backend.
+          PHPUNIT_REPLAY_REMOTE_TOKEN: ${{ secrets.PHPUNIT_REPLAY_REMOTE_TOKEN }}
+        run: vendor/bin/phpunit-replay run -p
+
+  full:
+    name: Full (phpunit-replay verify — merge gate)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          coverage: pcov
+
+      - name: Install dependencies
+        run: composer install --no-interaction --prefer-dist
+
+      - name: Set up deploy key for the cache repository
+        if: ${{ startsWith(vars.PHPUNIT_REPLAY_REMOTE, 'git@') || startsWith(vars.PHPUNIT_REPLAY_REMOTE, 'git+') }}
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.REPLAY_CACHE_DEPLOY_KEY }}
+
+      - name: phpunit-replay verify
+        env:
+          PHPUNIT_REPLAY_REMOTE: ${{ vars.PHPUNIT_REPLAY_REMOTE }}
+          PHPUNIT_REPLAY_REMOTE_TOKEN: ${{ secrets.PHPUNIT_REPLAY_REMOTE_TOKEN }}
+        run: vendor/bin/phpunit-replay verify -p
+
+  # --- CI-artifact alternative to a remote cache -----------------------------------------
+  # No object storage, no dedicated git repo, no infra at all: cache the state directory
+  # itself between runs of the same branch with actions/cache, keyed on
+  # `phpunit-replay baseline-path`. Delete the two jobs above and the deploy-key/remote
+  # secrets if you use this instead; it needs neither.
+  #
+  # full-with-artifact-cache:
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #       with:
+  #         fetch-depth: 0
+  #     - uses: shivammathur/setup-php@v2
+  #       with:
+  #         php-version: '8.3'
+  #         coverage: pcov
+  #     - run: composer install --no-interaction --prefer-dist
+  #     - id: state-dir
+  #       run: echo "path=$(vendor/bin/phpunit-replay baseline-path)" >> "$GITHUB_OUTPUT"
+  #     - uses: actions/cache@v4
+  #       with:
+  #         path: ${{ steps.state-dir.outputs.path }}
+  #         key: phpunit-replay-${{ github.ref_name }}
+  #         restore-keys: |
+  #           phpunit-replay-main
+  #     - run: vendor/bin/phpunit-replay verify -p
+  #     - uses: actions/cache/save@v4
+  #       if: always()
+  #       with:
+  #         path: ${{ steps.state-dir.outputs.path }}
+  #         key: phpunit-replay-${{ github.ref_name }}-${{ github.run_id }}
