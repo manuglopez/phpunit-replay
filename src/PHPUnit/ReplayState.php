@@ -173,6 +173,25 @@ final class ReplayState
 
         $store = new GraphStore($stateDir, $root);
         $graph = self::reconcileGraph($store->load(), $fingerprint, $defaultBranch);
+
+        // TODO(phase 3): the remote cache (SPEC.md §9) is wired into the wrapper pipeline
+        // only. In-process mode still runs local-only, which means a project whose team
+        // shares a cache has to go through `phpunit-replay run` to benefit from it. What is
+        // missing here, in the order it would go in:
+        //   1. `RemoteCacheFactory::fromConfig($config, $stateDir)` + `begin()` here, with
+        //      `end()` from a shutdown/ApplicationFinished subscriber;
+        //   2. `$graph ??= <ObjectStore>::graphOf(<branch or nearest candidate>, $root)`
+        //      reconciled by self::reconcileGraph() and saved through $store, plus
+        //      `Change\BaselineResolver` -> `Graph::setNearestBranch()` (D-039);
+        //   3. inside self::prepareReplay(), after the run list is built: for each
+        //      affected-only test file, `ContentKey::forTestFile()` -> `ObjectStore::object()`
+        //      -> merge the results into the graph and drop the file from the run list, which
+        //      is all self::decide() needs to replay them;
+        //   4. `ObjectStore::putObject()` per executed test file where self::persist()
+        //      commits the graph, under the same `remote_push`/CI rules as
+        //      `Console\Runner\RunPipeline::pushAfterRun()`.
+        // `Report\Summary::$replayedRemote` and `self::counters()` already have room for
+        // the counter.
         $mode = self::decideMode($config, $reader, $graph, $branch, $driver !== null);
 
         if ($mode === Mode::Off) {

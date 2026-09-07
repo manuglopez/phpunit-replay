@@ -26,6 +26,11 @@ final class ConfigTest extends TestCase
         self::assertTrue($config->junitMerge);
         self::assertSame('auto', $config->mode);
         self::assertFalse($config->hermeticityHeuristics);
+        self::assertSame('objects', $config->remotePush);
+        self::assertSame('main', $config->remoteBranch);
+        self::assertSame(300, $config->remoteRefreshSeconds);
+        self::assertSame(60, $config->remoteTimeout);
+        self::assertSame([], $config->baselineBranches);
     }
 
     public function testFromArrayReadsValidValues(): void
@@ -42,6 +47,11 @@ final class ConfigTest extends TestCase
             'junit_merge' => false,
             'mode' => 'record',
             'hermeticity_heuristics' => true,
+            'remote_push' => 'all',
+            'remote_branch' => 'cache',
+            'remote_refresh_seconds' => 30,
+            'remote_timeout' => 120,
+            'baseline_branches' => ['develop', 'main'],
         ]);
 
         self::assertSame('/mnt/cache', $config->stateDir);
@@ -58,6 +68,11 @@ final class ConfigTest extends TestCase
         self::assertFalse($config->junitMerge);
         self::assertSame('record', $config->mode);
         self::assertTrue($config->hermeticityHeuristics);
+        self::assertSame('all', $config->remotePush);
+        self::assertSame('cache', $config->remoteBranch);
+        self::assertSame(30, $config->remoteRefreshSeconds);
+        self::assertSame(120, $config->remoteTimeout);
+        self::assertSame(['develop', 'main'], $config->baselineBranches);
     }
 
     public function testFromArrayIgnoresUnknownKeys(): void
@@ -81,6 +96,11 @@ final class ConfigTest extends TestCase
             'junit_merge' => 'yes',
             'mode' => 'nonsense',
             'hermeticity_heuristics' => 'true',
+            'remote_push' => 'everything',
+            'remote_branch' => '',
+            'remote_refresh_seconds' => '30',
+            'remote_timeout' => 12.5,
+            'baseline_branches' => 'develop',
         ]);
 
         self::assertEquals(Config::defaults(), $config);
@@ -295,5 +315,79 @@ final class ConfigTest extends TestCase
         self::assertSame(3, $config->quarantineReleaseAfter);
         self::assertSame('auto', $config->laravel);
         self::assertTrue($config->junitMerge);
+    }
+
+    public function testWithOverridesTheRemoteKeys(): void
+    {
+        $config = Config::defaults()->with([
+            'remote' => 'file:///mnt/cache',
+            'remoteToken' => 'secret',
+            'remotePush' => 'all',
+            'remoteBranch' => 'cache',
+            'remoteRefreshSeconds' => 10,
+            'remoteTimeout' => 15,
+            'baselineBranches' => ['develop'],
+        ]);
+
+        self::assertSame('file:///mnt/cache', $config->remote);
+        self::assertSame('secret', $config->remoteToken);
+        self::assertSame('all', $config->remotePush);
+        self::assertSame('cache', $config->remoteBranch);
+        self::assertSame(10, $config->remoteRefreshSeconds);
+        self::assertSame(15, $config->remoteTimeout);
+        self::assertSame(['develop'], $config->baselineBranches);
+    }
+
+    public function testMergeEnvReadsTheRemoteAndBaselineOverrides(): void
+    {
+        $config = Config::defaults()->mergeEnv([
+            'PHPUNIT_REPLAY_REMOTE' => 'file:///mnt/replay-cache',
+            'PHPUNIT_REPLAY_REMOTE_TOKEN' => 'from-env',
+            'PHPUNIT_REPLAY_REMOTE_PUSH' => 'all',
+            'PHPUNIT_REPLAY_BASELINE_BRANCHES' => 'develop, main ,',
+        ]);
+
+        self::assertSame('file:///mnt/replay-cache', $config->remote);
+        self::assertSame('from-env', $config->remoteToken);
+        self::assertSame('all', $config->remotePush);
+        self::assertSame(['develop', 'main'], $config->baselineBranches);
+    }
+
+    public function testMergeEnvIgnoresAnInvalidRemotePushAndAnEmptyBranchList(): void
+    {
+        $config = Config::defaults()
+            ->with(['remotePush' => 'off', 'baselineBranches' => ['develop']])
+            ->mergeEnv([
+                'PHPUNIT_REPLAY_REMOTE_PUSH' => 'sometimes',
+                'PHPUNIT_REPLAY_BASELINE_BRANCHES' => ' , ',
+            ]);
+
+        self::assertSame('off', $config->remotePush);
+        self::assertSame(['develop'], $config->baselineBranches);
+    }
+
+    public function testBaselineCandidatesPrefersBaselineBranchesOverDefaultBranch(): void
+    {
+        $config = Config::defaults()->with([
+            'defaultBranch' => 'main',
+            'baselineBranches' => ['develop', 'main'],
+        ]);
+
+        self::assertSame(['develop', 'main'], $config->baselineCandidates('master'));
+    }
+
+    public function testBaselineCandidatesFallsBackToDefaultBranchThenToTheDetectedOne(): void
+    {
+        self::assertSame(['develop'], Config::defaults()->with(['defaultBranch' => 'develop'])->baselineCandidates('main'));
+        self::assertSame(['main'], Config::defaults()->baselineCandidates('main'));
+        self::assertSame([], Config::defaults()->baselineCandidates(''));
+    }
+
+    public function testMaskRemoteHidesEmbeddedCredentials(): void
+    {
+        self::assertSame('none', Config::maskRemote(null));
+        self::assertSame('none', Config::maskRemote(''));
+        self::assertSame('file:///mnt/cache', Config::maskRemote('file:///mnt/cache'));
+        self::assertSame('https://user:***@cache.example/replay/', Config::maskRemote('https://user:hunter2@cache.example/replay/'));
     }
 }

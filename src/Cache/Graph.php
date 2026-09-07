@@ -44,6 +44,8 @@ final class Graph
 
     private string $defaultBranch = 'main';
 
+    private ?string $nearestBranch = null;
+
     private readonly string $projectRoot;
 
     /** @var array<string, list<string>>|null */
@@ -283,6 +285,26 @@ final class Graph
         return $this->defaultBranch;
     }
 
+    /**
+     * DECISIONS.md D-039: the baseline `Change\BaselineResolver` picked as the nearest
+     * ancestor of HEAD, consulted for results BEFORE the default branch and AFTER this
+     * branch's own baseline.
+     *
+     * It sits between the two rather than replacing the default branch because a
+     * long-lived branch's baseline is a delta: a pass on `develop` only ever writes the
+     * results of the tests it executed into `develop`, leaving the rest in `main`. Reading
+     * `develop` alone would silently drop every test `develop` never had to re-run.
+     */
+    public function setNearestBranch(?string $branch): void
+    {
+        $this->nearestBranch = $branch;
+    }
+
+    public function nearestBranch(): ?string
+    {
+        return $this->nearestBranch;
+    }
+
     /** @return list<string> */
     public function branches(): array
     {
@@ -293,7 +315,30 @@ final class Graph
     {
         $own = $this->baselines[$branch]['sha'] ?? null;
 
-        return $own ?? ($this->baselines[$this->defaultBranch]['sha'] ?? null);
+        if ($own !== null) {
+            return $own;
+        }
+
+        foreach ($this->fallbackChain($branch) as $fallback) {
+            $sha = $this->baselines[$fallback]['sha'] ?? null;
+
+            if ($sha !== null) {
+                return $sha;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * The sha this branch's OWN baseline was recorded at, with no fallback to the default
+     * branch — what {@see \Manuglopez\Replay\Change\BaselineResolver} compares candidates
+     * by (a candidate reporting the default branch's sha under its own name would be
+     * counted twice, at the wrong distance).
+     */
+    public function ownRecordedSha(string $branch): ?string
+    {
+        return $this->baselines[$branch]['sha'] ?? null;
     }
 
     public function setRecordedSha(string $branch, ?string $sha): void
@@ -352,25 +397,67 @@ final class Graph
         $this->baselines[$branch]['results'] = [];
     }
 
-    /** @return array<string, TestResultArray> */
+    /**
+     * This branch's own results layered over its fallbacks: the nearest baseline first,
+     * the default branch under it. A *complete* layer is authoritative for the test files
+     * it covers, so results the layer below holds for those same files are dropped rather
+     * than merged (a file whose tests were renamed must not keep reporting the old names).
+     *
+     * @return array<string, TestResultArray>
+     */
     private function mergedResults(string $branch): array
     {
+        $under = [];
+
+        foreach (array_reverse($this->fallbackChain($branch)) as $fallback) {
+            $under = $this->layer($under, $fallback);
+        }
+
         $own = $this->baselines[$branch]['results'] ?? null;
 
-        if ($branch === $this->defaultBranch) {
-            return $own ?? [];
-        }
-
-        $default = $this->baselines[$this->defaultBranch]['results'] ?? [];
-
         if ($own === null) {
-            return $default;
+            return $under;
         }
 
-        $complete = ($this->baselines[$branch]['complete'] ?? false) === true;
-        $under = $complete ? $this->withoutFilesCoveredBy($default, $own) : $default;
+        return $this->layer($under, $branch);
+    }
 
-        return array_replace($under, $own);
+    /**
+     * The fallback branches for `$branch`, nearest first. Empty when `$branch` is itself
+     * the last stop, which is what makes the default branch read only its own results.
+     *
+     * @return list<string>
+     */
+    private function fallbackChain(string $branch): array
+    {
+        $chain = [];
+
+        foreach ([$this->nearestBranch, $this->defaultBranch] as $candidate) {
+            if ($candidate !== null && $candidate !== $branch && ! in_array($candidate, $chain, true)) {
+                $chain[] = $candidate;
+            }
+        }
+
+        return $chain;
+    }
+
+    /**
+     * @param  array<string, TestResultArray>  $under
+     * @return array<string, TestResultArray>
+     */
+    private function layer(array $under, string $branch): array
+    {
+        $results = $this->baselines[$branch]['results'] ?? [];
+
+        if ($results === []) {
+            return $under;
+        }
+
+        if (($this->baselines[$branch]['complete'] ?? false) === true) {
+            $under = $this->withoutFilesCoveredBy($under, $results);
+        }
+
+        return array_replace($under, $results);
     }
 
     /**

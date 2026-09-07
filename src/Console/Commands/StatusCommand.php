@@ -6,7 +6,9 @@ namespace Manuglopez\Replay\Console\Commands;
 
 use Manuglopez\Replay\Cache\Fingerprint;
 use Manuglopez\Replay\Cache\GraphStore;
+use Manuglopez\Replay\Cache\Remote\RemoteCacheFactory;
 use Manuglopez\Replay\Cache\StateDirectory;
+use Manuglopez\Replay\Change\BaselineResolver;
 use Manuglopez\Replay\Change\Git;
 use Manuglopez\Replay\Config;
 use Manuglopez\Replay\Console\StatusReport;
@@ -53,6 +55,7 @@ final class StatusCommand extends Command
 
         $framework = self::detectFramework($root);
         $currentFingerprint = Fingerprint::compute($root, $loaded ?? 'none');
+        $remoteLine = self::remoteLine($config, $stateDir);
 
         $quarantine = Quarantine::load($stateDir);
         $quarantine->setReleaseAfter($config->quarantineReleaseAfter);
@@ -96,10 +99,20 @@ final class StatusCommand extends Command
                 quarantined: count($quarantineEntries),
                 quarantineEntries: $quarantineEntries,
                 divergence: $divergence,
+                remote: $remoteLine,
+                remotePush: $config->remotePush,
             ))->lines());
 
             return Command::SUCCESS;
         }
+
+        $graph->setDefaultBranch($defaultBranch);
+
+        // DECISIONS.md D-039: which baseline this branch would actually diff against.
+        // Resolved locally only — `status` never touches the network.
+        $baseline = ($branch !== null && $head !== null)
+            ? (new BaselineResolver($git, $graph, null, $config, $defaultBranch))->resolve($branch, $head)
+            : null;
 
         $stats = $graph->stats();
         $branches = [];
@@ -147,9 +160,22 @@ final class StatusCommand extends Command
             notCacheableFiles: $notCacheableFiles,
             notCacheableIds: $notCacheableIds,
             divergence: $divergence,
+            remote: $remoteLine,
+            remotePush: $config->remotePush,
+            baseline: $baseline,
         ))->lines());
 
         return Command::SUCCESS;
+    }
+
+    /** `none`, or `<backend name> <url>` with any embedded credentials masked (SPEC.md §9). */
+    private static function remoteLine(Config $config, string $stateDir): string
+    {
+        if ($config->remote === null || trim($config->remote) === '') {
+            return 'none';
+        }
+
+        return RemoteCacheFactory::fromConfig($config, $stateDir)->name() . ' ' . Config::maskRemote($config->remote);
     }
 
     private static function detectFramework(string $root): string

@@ -24,9 +24,29 @@ final class FixtureProject
      * Copies tests/Fixtures/Projects/plain into a fresh GitRepo::init() root,
      * installs the vendor/ shim, and commits everything as "initial".
      */
-    public static function plain(): self
+    public static function plain(?string $root = null): self
     {
-        return self::fromProject('plain');
+        return self::fromProject('plain', $root);
+    }
+
+    /**
+     * A second checkout of THIS project, git history and all, under `$root` — a second
+     * machine for tests that need two of them sharing a remote cache (SPEC.md §9). The
+     * copy keeps the same commits (so a baseline sha recorded on one is an ancestor of the
+     * other's HEAD) and, when `$root`'s basename and the `origin` remote match, resolves
+     * to the same `Cache\ProjectKey`, which is what makes `graph/<key>/<branch>.json`
+     * shared rather than per-checkout. Its `$HOME` — and therefore its state directory —
+     * is its own.
+     */
+    public function copyTo(string $root): self
+    {
+        TempDir::copyTree($this->root(), $root);
+
+        // copy() does not preserve the executable bit; rewriting the shims (byte-identical,
+        // and gitignored anyway) restores it without dirtying the working tree.
+        self::installVendorShim($root);
+
+        return new self(GitRepo::at($root));
     }
 
     /**
@@ -39,9 +59,9 @@ final class FixtureProject
         return self::fromProject('inprocess');
     }
 
-    private static function fromProject(string $name): self
+    private static function fromProject(string $name, ?string $root = null): self
     {
-        $repo = GitRepo::init();
+        $repo = GitRepo::init($root);
 
         TempDir::copyTree(self::projectsDir() . '/' . $name, $repo->root);
         self::installVendorShim($repo->root);

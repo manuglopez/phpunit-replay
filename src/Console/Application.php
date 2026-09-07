@@ -7,6 +7,8 @@ namespace Manuglopez\Replay\Console;
 use Manuglopez\Replay\Console\Commands\BaselinePathCommand;
 use Manuglopez\Replay\Console\Commands\ExplainCommand;
 use Manuglopez\Replay\Console\Commands\PruneCommand;
+use Manuglopez\Replay\Console\Commands\PullCommand;
+use Manuglopez\Replay\Console\Commands\PushCommand;
 use Manuglopez\Replay\Console\Commands\RecordCommand;
 use Manuglopez\Replay\Console\Commands\RunCommand;
 use Manuglopez\Replay\Console\Commands\StatusCommand;
@@ -42,7 +44,7 @@ use Symfony\Component\Console\Output\OutputInterface;
 final class Application extends BaseApplication
 {
     /** @var list<string> */
-    private const COMMAND_NAMES = ['run', 'record', 'status', 'baseline-path', 'explain', 'prune', 'verify'];
+    private const COMMAND_NAMES = ['run', 'record', 'status', 'baseline-path', 'explain', 'prune', 'verify', 'push', 'pull'];
 
     /** @var array<string, list<string>> command => its own recognised long options (without leading --) */
     private const OWN_LONG_OPTIONS = [
@@ -53,6 +55,8 @@ final class Application extends BaseApplication
         'explain' => [],
         'prune' => ['flaky', 'branches', 'all'],
         'verify' => [],
+        'push' => ['graph'],
+        'pull' => [],
     ];
 
     /** @var list<string> long options every command recognises (Symfony's own global definition) */
@@ -75,6 +79,8 @@ final class Application extends BaseApplication
         $this->addCommand(new ExplainCommand());
         $this->addCommand(new PruneCommand());
         $this->addCommand(new VerifyCommand());
+        $this->addCommand(new PushCommand());
+        $this->addCommand(new PullCommand());
 
         $this->setDefaultCommand('run');
     }
