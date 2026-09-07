@@ -28,9 +28,13 @@ final readonly class Config
     /** @var list<string> */
     private const LARAVEL_MODES = ['auto', 'on', 'off'];
 
+    /** @var list<string> what a pass may publish to the remote (SPEC.md §9, DECISIONS.md D-038) */
+    private const REMOTE_PUSH_MODES = ['objects', 'all', 'off'];
+
     /**
      * @param array<string, string|list<string>> $watch
      * @param list<string> $neverCache
+     * @param list<string> $baselineBranches ordered baseline candidates (D-039); `[]` means `[defaultBranch]`
      */
     public function __construct(
         public ?string $stateDir,
@@ -44,6 +48,11 @@ final readonly class Config
         public bool $junitMerge,
         public string $mode,
         public bool $hermeticityHeuristics,
+        public string $remotePush = 'objects',
+        public string $remoteBranch = 'main',
+        public int $remoteRefreshSeconds = 300,
+        public int $remoteTimeout = 60,
+        public array $baselineBranches = [],
     ) {
     }
 
@@ -61,6 +70,11 @@ final readonly class Config
             junitMerge: true,
             mode: 'auto',
             hermeticityHeuristics: false,
+            remotePush: 'objects',
+            remoteBranch: 'main',
+            remoteRefreshSeconds: 300,
+            remoteTimeout: 60,
+            baselineBranches: [],
         );
     }
 
@@ -87,6 +101,11 @@ final readonly class Config
             junitMerge: self::boolOrDefault($values['junit_merge'] ?? null, $defaults->junitMerge),
             mode: self::modeOrDefault($values['mode'] ?? null, $defaults->mode),
             hermeticityHeuristics: self::boolOrDefault($values['hermeticity_heuristics'] ?? null, $defaults->hermeticityHeuristics),
+            remotePush: self::enumOrDefault($values['remote_push'] ?? null, self::REMOTE_PUSH_MODES, $defaults->remotePush),
+            remoteBranch: self::nonEmptyStringOrDefault($values['remote_branch'] ?? null, $defaults->remoteBranch),
+            remoteRefreshSeconds: self::intOrDefault($values['remote_refresh_seconds'] ?? null, $defaults->remoteRefreshSeconds),
+            remoteTimeout: self::intOrDefault($values['remote_timeout'] ?? null, $defaults->remoteTimeout),
+            baselineBranches: self::stringListOrDefault($values['baseline_branches'] ?? null),
         );
     }
 
@@ -126,6 +145,11 @@ final readonly class Config
             junitMerge: $defaults->junitMerge,
             mode: self::parameterModeOrDefault($parameters, $defaults->mode),
             hermeticityHeuristics: $defaults->hermeticityHeuristics,
+            remotePush: $defaults->remotePush,
+            remoteBranch: $defaults->remoteBranch,
+            remoteRefreshSeconds: $defaults->remoteRefreshSeconds,
+            remoteTimeout: $defaults->remoteTimeout,
+            baselineBranches: $defaults->baselineBranches,
         );
     }
 
@@ -148,6 +172,8 @@ final readonly class Config
             'remoteToken' => self::envStringOrDefault($server, 'PHPUNIT_REPLAY_REMOTE_TOKEN', $this->remoteToken),
             'defaultBranch' => self::envStringOrDefault($server, 'PHPUNIT_REPLAY_DEFAULT_BRANCH', $this->defaultBranch),
             'mode' => self::envModeOrDefault($server, $this->mode),
+            'remotePush' => self::envEnumOrDefault($server, 'PHPUNIT_REPLAY_REMOTE_PUSH', self::REMOTE_PUSH_MODES, $this->remotePush),
+            'baselineBranches' => self::envBranchListOrDefault($server, 'PHPUNIT_REPLAY_BASELINE_BRANCHES', $this->baselineBranches),
         ]);
     }
 
@@ -172,6 +198,11 @@ final readonly class Config
      *     junitMerge?: bool,
      *     mode?: string,
      *     hermeticityHeuristics?: bool,
+     *     remotePush?: string,
+     *     remoteBranch?: string,
+     *     remoteRefreshSeconds?: int,
+     *     remoteTimeout?: int,
+     *     baselineBranches?: list<string>,
      * } $overrides
      */
     public function with(array $overrides): self
@@ -188,6 +219,11 @@ final readonly class Config
             junitMerge: array_key_exists('junitMerge', $overrides) ? $overrides['junitMerge'] : $this->junitMerge,
             mode: array_key_exists('mode', $overrides) ? $overrides['mode'] : $this->mode,
             hermeticityHeuristics: array_key_exists('hermeticityHeuristics', $overrides) ? $overrides['hermeticityHeuristics'] : $this->hermeticityHeuristics,
+            remotePush: array_key_exists('remotePush', $overrides) ? $overrides['remotePush'] : $this->remotePush,
+            remoteBranch: array_key_exists('remoteBranch', $overrides) ? $overrides['remoteBranch'] : $this->remoteBranch,
+            remoteRefreshSeconds: array_key_exists('remoteRefreshSeconds', $overrides) ? $overrides['remoteRefreshSeconds'] : $this->remoteRefreshSeconds,
+            remoteTimeout: array_key_exists('remoteTimeout', $overrides) ? $overrides['remoteTimeout'] : $this->remoteTimeout,
+            baselineBranches: array_key_exists('baselineBranches', $overrides) ? $overrides['baselineBranches'] : $this->baselineBranches,
         );
     }
 
@@ -259,9 +295,81 @@ final readonly class Config
         return $value;
     }
 
+    /**
+     * The ordered baseline candidates this config asks for (D-039): `baseline_branches`
+     * when set, otherwise the single `default_branch` shorthand — with `$fallback` (what
+     * the caller auto-detected from git) standing in when neither is configured.
+     *
+     * @return list<string>
+     */
+    public function baselineCandidates(string $fallback): array
+    {
+        if ($this->baselineBranches !== []) {
+            return $this->baselineBranches;
+        }
+
+        $branch = ($this->defaultBranch !== null && $this->defaultBranch !== '') ? $this->defaultBranch : $fallback;
+
+        return $branch === '' ? [] : [$branch];
+    }
+
+    /** The remote URL with any embedded credentials masked — safe to print (`status`). */
+    public static function maskRemote(?string $remote): string
+    {
+        if ($remote === null || $remote === '') {
+            return 'none';
+        }
+
+        $masked = preg_replace('#(://[^/@\s:]+):[^/@\s]*@#', '$1:***@', $remote);
+
+        return is_string($masked) ? $masked : $remote;
+    }
+
+    /**
+     * @param array<array-key, mixed> $server
+     * @param list<string> $allowed
+     */
+    private static function envEnumOrDefault(array $server, string $key, array $allowed, string $default): string
+    {
+        $value = $server[$key] ?? null;
+
+        return (is_string($value) && in_array($value, $allowed, true)) ? $value : $default;
+    }
+
+    /**
+     * @param array<array-key, mixed> $server
+     * @param list<string> $default
+     * @return list<string>
+     */
+    private static function envBranchListOrDefault(array $server, string $key, array $default): array
+    {
+        $value = $server[$key] ?? null;
+
+        if (! is_string($value) || trim($value) === '') {
+            return $default;
+        }
+
+        $branches = [];
+
+        foreach (explode(',', $value) as $branch) {
+            $branch = trim($branch);
+
+            if ($branch !== '') {
+                $branches[] = $branch;
+            }
+        }
+
+        return $branches === [] ? $default : $branches;
+    }
+
     private static function stringOrDefault(mixed $value, ?string $default): ?string
     {
         return is_string($value) ? $value : $default;
+    }
+
+    private static function nonEmptyStringOrDefault(mixed $value, string $default): string
+    {
+        return (is_string($value) && $value !== '') ? $value : $default;
     }
 
     private static function boolOrDefault(mixed $value, bool $default): bool

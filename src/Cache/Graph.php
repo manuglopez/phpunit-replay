@@ -296,6 +296,17 @@ final class Graph
         return $own ?? ($this->baselines[$this->defaultBranch]['sha'] ?? null);
     }
 
+    /**
+     * The sha this branch's OWN baseline was recorded at, with no fallback to the default
+     * branch — what {@see \Manuglopez\Replay\Change\BaselineResolver} compares candidates
+     * by (a candidate reporting the default branch's sha under its own name would be
+     * counted twice, at the wrong distance).
+     */
+    public function ownRecordedSha(string $branch): ?string
+    {
+        return $this->baselines[$branch]['sha'] ?? null;
+    }
+
     public function setRecordedSha(string $branch, ?string $sha): void
     {
         $this->ensureBaseline($branch);
