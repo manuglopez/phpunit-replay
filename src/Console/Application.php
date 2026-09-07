@@ -53,7 +53,7 @@ final class Application extends BaseApplication
         'status' => [],
         'baseline-path' => [],
         'explain' => [],
-        'prune' => ['flaky', 'branches', 'all'],
+        'prune' => ['flaky', 'branches', 'all', 'remote', 'squash'],
         'verify' => [],
         'push' => ['graph'],
         'pull' => [],
@@ -205,6 +205,14 @@ final class Application extends BaseApplication
             $bareName = $equals === false ? $name : substr($name, 0, $equals);
 
             if ($command === 'run' && $bareName === 'log-junit' && $equals !== false) {
+                return true;
+            }
+
+            // `prune --keep-months` (InputOption::VALUE_REQUIRED) is only recognised in its
+            // `=value` form, the same convention as `--log-junit` above: it keeps this splitter
+            // from having to replicate Symfony's "peek the next token as the value" behaviour
+            // for every value-taking option, not just the `-p`/`--parallel` shortcut.
+            if ($command === 'prune' && $bareName === 'keep-months' && $equals !== false) {
                 return true;
             }
 
