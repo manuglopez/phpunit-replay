@@ -76,6 +76,47 @@ final class CoverageMergeTest extends TestCase
         }
     }
 
+    /**
+     * Defect: `--coverage-php` with nothing to execute used to build the empty baseline
+     * `CodeCoverage` via `SebastianBergmann\CodeCoverage\Driver\Selector::forLineCoverage()`,
+     * which requires a coverage extension loaded AND enabled in the WRAPPER's own process —
+     * not just the child PHPUnit process it launches. A real developer running
+     * `vendor/bin/phpunit-replay` with a plain `php` (no `-d pcov.enabled=1` for the wrapper
+     * itself) got `phpunit-replay: could not build an empty coverage baseline for
+     * --coverage-php=…` and no output file at all, even though pcov was perfectly available
+     * to the child process for every other run. `Report\NullCoverageDriver` fixes this by
+     * never depending on a real driver for coverage that is empty by construction.
+     */
+    public function test_coverage_php_merge_with_nothing_to_execute_does_not_need_a_driver_in_the_wrapper_process(): void
+    {
+        $recorded = $this->fixture->replay(['record', '--', '--coverage-php=cov.php']);
+        self::assertSame(0, $recorded['exitCode'], $recorded['stdout'] . $recorded['stderr']);
+
+        $lines1 = self::loadCoverage($this->fixture->root() . '/cov.php')->getData(true)->lineCoverage();
+
+        // The wrapper process itself has no coverage driver available (plain `php`); the
+        // child PhpunitProcess is never even launched, since nothing needs to run.
+        $result = $this->fixture->replay(['--', '--coverage-php=cov2.php'], [], wrapperIniFlags: ['pcov.enabled=0']);
+
+        self::assertSame(0, $result['exitCode'], $result['stdout'] . $result['stderr']);
+        self::assertSame(0, ReplayAssert::executedCount($result['stdout']), $result['stdout']);
+        self::assertStringNotContainsString('could not build an empty coverage baseline', $result['stderr']);
+        self::assertFileExists($this->fixture->root() . '/cov2.php');
+
+        $lines2 = self::loadCoverage($this->fixture->root() . '/cov2.php')->getData(true)->lineCoverage();
+
+        foreach (self::SRC_FILES as $relative) {
+            $absolute = $this->fixture->root() . '/' . $relative;
+            self::assertArrayHasKey($absolute, $lines2, $relative . ' missing from cov2.php');
+
+            self::assertSame(
+                self::executedLineNumbers($lines1[$absolute] ?? []),
+                self::executedLineNumbers($lines2[$absolute] ?? []),
+                $relative . ': executed line numbers differ between the recorded run and the driverless merge',
+            );
+        }
+    }
+
     public function test_a_real_run_still_merges_the_snapshot_of_what_it_did_not_execute(): void
     {
         $recorded = $this->fixture->replay(['record', '--', '--coverage-php=cov.php']);

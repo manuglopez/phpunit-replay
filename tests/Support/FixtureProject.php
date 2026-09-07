@@ -207,11 +207,18 @@ final class FixtureProject
      *
      * @param list<string> $args
      * @param array<string, string> $env
+     * @param list<string>|null $wrapperIniFlags `-d` flags for the WRAPPER process itself
+     *        (as opposed to the flags the wrapper adds to the CHILD PhpunitProcess it
+     *        launches, which are unaffected by this parameter). Defaults to enabling pcov
+     *        for the wrapper too (`['pcov.enabled=1', 'pcov.directory=' . $this->root()]`),
+     *        matching how these tests have always run it; pass `[]` to reproduce a plain
+     *        `php vendor/bin/phpunit-replay` invocation, where the wrapper process has no
+     *        coverage driver available to itself even though the child PHPUnit process does.
      * @return array{exitCode: int, stdout: string, stderr: string}
      */
-    public function replay(array $args = [], array $env = []): array
+    public function replay(array $args = [], array $env = [], ?array $wrapperIniFlags = null): array
     {
-        $process = $this->replayProcess($args, $env);
+        $process = $this->replayProcess($args, $env, $wrapperIniFlags);
         $process->run();
 
         return [
@@ -228,11 +235,21 @@ final class FixtureProject
      *
      * @param list<string> $args
      * @param array<string, string> $env
+     * @param list<string>|null $wrapperIniFlags see {@see self::replay()}
      */
-    public function replayProcess(array $args = [], array $env = []): Process
+    public function replayProcess(array $args = [], array $env = [], ?array $wrapperIniFlags = null): Process
     {
+        $wrapperIniFlags ??= ['pcov.enabled=1', 'pcov.directory=' . $this->root()];
+
+        $iniArgs = [];
+
+        foreach ($wrapperIniFlags as $flag) {
+            $iniArgs[] = '-d';
+            $iniArgs[] = $flag;
+        }
+
         $process = new Process(
-            ['php', '-d', 'pcov.enabled=1', '-d', 'pcov.directory=' . $this->root(), self::packageBin(), ...$args],
+            ['php', ...$iniArgs, self::packageBin(), ...$args],
             $this->root(),
             self::sanitizedEnv(['HOME' => $this->homeDir(), ...$env]),
         );

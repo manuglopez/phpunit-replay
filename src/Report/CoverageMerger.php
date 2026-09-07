@@ -7,7 +7,6 @@ namespace Manuglopez\Replay\Report;
 use Manuglopez\Replay\PHPUnit\ConfigurationReader;
 use Manuglopez\Replay\Support\AtomicFile;
 use SebastianBergmann\CodeCoverage\CodeCoverage;
-use SebastianBergmann\CodeCoverage\Driver\Selector;
 use Throwable;
 
 /**
@@ -61,18 +60,20 @@ final class CoverageMerger
      * (`SebastianBergmann\CodeCoverage\Report\PHP::process()`): used when nothing executed
      * this pass (the run list is empty, no PHPUnit process was even launched) so
      * {@see self::merge()} still has a run coverage to fold the snapshots into.
+     *
+     * Uses {@see NullCoverageDriver} rather than
+     * `SebastianBergmann\CodeCoverage\Driver\Selector::forLineCoverage()`: the coverage built
+     * here is empty by construction (nothing runs, every real line is merged in afterwards
+     * from the per-test-file snapshots), so no real driver is needed — and `Selector`
+     * requires pcov/xdebug to be LOADED AND ENABLED in the WRAPPER's own process, which for
+     * most users runs as plain `php vendor/bin/phpunit-replay` (the `-d pcov.enabled=1` flag
+     * is only ever added to the child PhpunitProcess it launches).
      */
     public static function writeEmptyRun(string $path, ConfigurationReader $reader): bool
     {
         $filter = $reader->emptyCoverageFilter();
 
-        try {
-            $driver = (new Selector())->forLineCoverage($filter);
-        } catch (Throwable) {
-            return false;
-        }
-
-        return self::write(new CodeCoverage($driver, $filter), $path);
+        return self::write(new CodeCoverage(new NullCoverageDriver(), $filter), $path);
     }
 
     /** PHPUnit's own `--coverage-php` output: `<?php return unserialize(<<<'...'\n...\n...);`. */

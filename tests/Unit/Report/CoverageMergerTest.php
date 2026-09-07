@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Manuglopez\Replay\Tests\Unit\Report;
 
+use Manuglopez\Replay\PHPUnit\ConfigurationReader;
 use Manuglopez\Replay\Report\CoverageMerger;
 use Manuglopez\Replay\Tests\Support\TempDir;
 use PHPUnit\Framework\Attributes\Test;
@@ -132,6 +133,52 @@ final class CoverageMergerTest extends TestCase
         $merged = include $outputPath;
         self::assertInstanceOf(CodeCoverage::class, $merged);
         self::assertArrayHasKey('T1', $merged->getTests());
+    }
+
+    #[Test]
+    public function write_empty_run_builds_a_coverage_report_scoped_to_source_without_a_real_driver(): void
+    {
+        mkdir($this->dir . '/src');
+        file_put_contents($this->dir . '/src/A.php', "<?php\n");
+
+        $xmlPath = $this->dir . '/phpunit.xml';
+        file_put_contents($xmlPath, <<<XML
+            <?xml version="1.0" encoding="UTF-8"?>
+            <phpunit>
+                <source>
+                    <include>
+                        <directory>{$this->dir}/src</directory>
+                    </include>
+                </source>
+            </phpunit>
+            XML);
+
+        $reader = ConfigurationReader::fromXmlFile($xmlPath);
+        $outputPath = $this->dir . '/empty.php';
+
+        self::assertTrue(CoverageMerger::writeEmptyRun($outputPath, $reader));
+        self::assertFileExists($outputPath);
+
+        $coverage = include $outputPath;
+        self::assertInstanceOf(CodeCoverage::class, $coverage);
+        self::assertSame([], $coverage->getData(true)->lineCoverage(), 'nothing executed: no line hits of its own');
+
+        // And it is still a valid target for merge(): folding a snapshot in works exactly
+        // as it would against a run coverage a real PHPUnit process produced.
+        $fileA = $this->dir . '/src/A.php';
+        $snapshot = self::buildCoverage(
+            [$fileA => [1 => ['T1']]],
+            ['T1' => ['size' => 'small', 'status' => 'passed', 'time' => 0.0]],
+        );
+        $snapshotPath = $this->dir . '/snapshot.cov';
+        file_put_contents($snapshotPath, serialize($snapshot));
+
+        $mergedPath = $this->dir . '/merged.php';
+        self::assertTrue(CoverageMerger::merge($outputPath, [$snapshotPath], $mergedPath));
+
+        $merged = include $mergedPath;
+        self::assertInstanceOf(CodeCoverage::class, $merged);
+        self::assertSame(['T1'], $merged->getData(true)->lineCoverage()[$fileA][1]);
     }
 
     /**
