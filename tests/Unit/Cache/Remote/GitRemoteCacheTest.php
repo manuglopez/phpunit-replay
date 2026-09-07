@@ -55,28 +55,76 @@ final class GitRemoteCacheTest extends TestCase
         self::assertSame('{"b":2}', $this->showUpstream($bare, 'objects/2026-09/bbb.json'));
     }
 
-    public function test_a_push_rejected_after_another_client_already_pushed_rebases_and_retries(): void
+    /**
+     * The actual race the fix needs to survive (docs/INTERNALS.md "GitRemoteCache —
+     * automatic maintenance"): both clients `begin()` against a genuinely EMPTY bare repo —
+     * no branch upstream for either to see — so BOTH independently bootstrap their own
+     * orphan `replay: init` root (the "branch missing upstream" path). Whichever `end()`s
+     * second gets its push rejected against the other's now-published, unrelated history.
+     *
+     * Deterministic by construction (both `begin()` before either `end()`s, then C ends
+     * first, then D): never rebase, so the reconciliation is immune to git's shallow-fetch
+     * "unrelated histories" flakiness that made this test fail on CI while passing locally.
+     */
+    public function test_a_push_rejected_after_another_client_already_pushed_resets_and_retries(): void
+    {
+        $bare = $this->bareRepo();
+
+        $clientC = $this->cacheFor($bare);
+        $clientC->begin();
+        self::assertNull($clientC->lastError());
+        self::assertTrue($clientC->put('objects/2026-09/c.json', '{"c":1}'));
+
+        $clientD = $this->cacheFor($bare);
+        $clientD->begin();
+        self::assertNull($clientD->lastError());
+        self::assertTrue($clientD->put('objects/2026-09/d.json', '{"d":1}'));
+
+        // C pushes first: its own orphan history becomes the branch.
+        $clientC->end();
+        self::assertNull($clientC->lastError());
+
+        // D's push is rejected (its own, unrelated orphan root vs. C's now-published one).
+        // Never rebase: adopt upstream wholesale and re-write D's own buffered object on top.
+        $clientD->end();
+        self::assertNull($clientD->lastError());
+
+        self::assertSame('{"c":1}', $this->showUpstream($bare, 'objects/2026-09/c.json'));
+        self::assertSame('{"d":1}', $this->showUpstream($bare, 'objects/2026-09/d.json'));
+
+        // One linear history: no merge commit (reconciliation only ever resets + re-commits)
+        // and exactly one root commit (D's own orphan history must never reach upstream).
+        self::assertSame('', trim($this->git($bare, ['log', '--merges', '--format=%H', 'main'])));
+        self::assertCount(1, self::nonEmptyLines($this->git($bare, ['log', '--max-parents=0', '--format=%H', 'main'])));
+    }
+
+    /**
+     * A GC job (`prune --remote --squash`) can rewrite the whole branch as a fresh orphan
+     * commit between one client's `begin()` and `end()` (docs/INTERNALS.md "GitRemoteCache
+     * — automatic maintenance"): the client's own commit, parented on the pre-squash
+     * history, is rejected outright as non-fast-forward against a totally different tree.
+     * Reconciliation must adopt the squashed history wholesale and still not lose the
+     * client's own write.
+     */
+    public function test_upstream_squashed_between_begin_and_end_is_adopted_without_losing_the_local_write(): void
     {
         $bare = $this->bareRepo();
         $this->seedUpstream($bare, 'seed.txt', 'seed');
 
-        $clientC = $this->cacheFor($bare);
-        $clientC->begin();
-        self::assertTrue($clientC->put('objects/2026-09/c.json', '{"c":1}'));
-        // clientC does not end() yet: its local commit will not exist upstream when D pushes.
+        $client = $this->cacheFor($bare);
+        $client->begin();
+        self::assertNull($client->lastError());
+        self::assertTrue($client->put('objects/2026-09/e.json', '{"e":1}'));
 
-        $clientD = $this->cacheFor($bare);
-        $clientD->begin();
-        self::assertTrue($clientD->put('objects/2026-09/d.json', '{"d":1}'));
-        $clientD->end();
-        self::assertNull($clientD->lastError());
+        // Simulates the squash: the branch is rewritten as an unrelated orphan history
+        // while the client sits on its own (now stale) clone of the pre-squash "seed" tip.
+        $this->rewriteUpstream($bare, 'objects/A.json', 'A');
 
-        // clientC's push is now rejected (non-fast-forward): fetch + rebase FETCH_HEAD, retry.
-        $clientC->end();
-        self::assertNull($clientC->lastError());
+        $client->end();
+        self::assertNull($client->lastError());
 
-        self::assertSame('{"c":1}', $this->showUpstream($bare, 'objects/2026-09/c.json'));
-        self::assertSame('{"d":1}', $this->showUpstream($bare, 'objects/2026-09/d.json'));
+        self::assertSame('{"e":1}', $this->showUpstream($bare, 'objects/2026-09/e.json'));
+        self::assertSame('A', $this->showUpstream($bare, 'objects/A.json'));
     }
 
     public function test_begin_with_zero_refresh_seconds_always_refreshes_and_sees_the_other_clients_object(): void
@@ -260,6 +308,14 @@ final class GitRemoteCacheTest extends TestCase
         $process->run();
 
         return $process->isSuccessful() ? $process->getOutput() : null;
+    }
+
+    /** @return list<string> */
+    private static function nonEmptyLines(string $output): array
+    {
+        $lines = preg_split('/\R+/', trim($output), flags: PREG_SPLIT_NO_EMPTY);
+
+        return $lines === false ? [] : $lines;
     }
 
     /** @param list<string> $arguments */

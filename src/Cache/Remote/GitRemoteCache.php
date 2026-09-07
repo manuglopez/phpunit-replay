@@ -18,7 +18,20 @@ use SplFileInfo;
  * "GitRemoteCache — automatic maintenance", DECISIONS.md D-038). Keeps a shallow single-branch
  * mirror on disk under `<stateDir>/remote/git/`; `get`/`has`/`keys`/`delete` read/write that
  * working tree directly, `begin()` refreshes it (clone or fetch+reset) and `end()` commits and
- * pushes whatever was written, retrying through a fetch+rebase cycle on a rejected push.
+ * pushes whatever was written.
+ *
+ * Reconciling a rejected push (or a mirror that was bootstrapped locally, see
+ * {@see self::initMirror()}) NEVER rebases: a shallow (`--depth 1`) fetch severs the parent
+ * link of whatever commit it retrieves, so two mirrors that are in fact both descendants of
+ * the same history can look "unrelated" to `git rebase` purely because of that truncation —
+ * observed in practice as a flaky "unresolved rebase conflict outside graph/**" on CI,
+ * depending on git's version and exactly how each client's history happened to diverge.
+ * Instead, {@see self::adoptFetchedHistory()} adopts whatever is upstream wholesale
+ * (`git reset --hard FETCH_HEAD`) and re-writes every key THIS run's {@see self::put()}
+ * calls buffered on top of it, then commits and retries the push. This never needs to
+ * reconcile anything path-by-path: objects are content-addressed and append-only (writing
+ * one again is a harmless no-op) and `graph/**` is "ours wins" by construction, since our
+ * own buffered write simply overwrites it again after adopting upstream.
  *
  * Accepted URL forms: `git+ssh://…`, `git+https://…` (the `git+` prefix is stripped before
  * being handed to git), plain `ssh://…`, the scp-like `git@host:path.git`, `https://….git`,
@@ -39,6 +52,24 @@ final class GitRemoteCache implements RemoteCache
     private bool $dirty = false;
 
     private ?string $commitLabel = null;
+
+    /**
+     * True once {@see self::initMirror()} has bootstrapped this mirror locally (the branch
+     * did not exist upstream at `begin()` time — an orphan `replay: init` root, or no mirror
+     * at all when the remote was unreachable): `end()` re-checks upstream right before
+     * pushing, since another client may have created the branch in the meantime.
+     */
+    private bool $locallyInitialised = false;
+
+    /**
+     * Everything {@see self::put()} wrote during this run, key => body: replayed onto the
+     * mirror by {@see self::adoptFetchedHistory()} after a `git reset --hard` discards
+     * whatever the local (rejected, or pre-emptively suspect) history had staged or
+     * committed for these same paths.
+     *
+     * @var array<string, string>
+     */
+    private array $buffer = [];
 
     public function __construct(
         string $url,
@@ -109,6 +140,7 @@ final class GitRemoteCache implements RemoteCache
         } finally {
             $this->releaseLock($handle);
             $this->dirty = false;
+            $this->buffer = [];
         }
     }
 
@@ -121,6 +153,7 @@ final class GitRemoteCache implements RemoteCache
     {
         if (AtomicFile::write($this->pathFor($key), $body)) {
             $this->dirty = true;
+            $this->buffer[$key] = $body;
 
             return true;
         }
@@ -288,24 +321,35 @@ final class GitRemoteCache implements RemoteCache
         }
 
         $git = $this->mirrorGit();
-        $git->result(['add', '-A']);
 
-        $diff = $git->result(['diff', '--cached', '--quiet']);
-        $hasStaged = $diff['exitCode'] !== 0;
-
-        if ($hasStaged) {
-            $count = $this->countStagedFiles($git);
-            $message = $this->commitLabel ?? sprintf('replay: +%d objects', $count);
-
-            $git->result([
-                '-c', 'user.name=phpunit-replay',
-                '-c', 'user.email=phpunit-replay@localhost',
-                '-c', 'commit.gpgsign=false',
-                'commit', '-q', '-m', $message,
-            ]);
+        if ($this->locallyInitialised) {
+            // Re-check upstream right before pushing: this mirror was bootstrapped locally
+            // because the branch did not exist at begin() time, but another client may have
+            // created it since — adopt it now rather than let the push get rejected only to
+            // reconcile a moment later anyway.
+            $this->adoptUpstreamIfItNowExists($git);
         }
 
+        $this->commitStagedChanges($git);
         $this->pushWithRetry($git);
+    }
+
+    /**
+     * Silently does nothing when the branch genuinely still does not exist upstream (the
+     * fetch fails with "couldn't find remote ref" or similar) — that failure is expected and
+     * not an error here, unlike the same fetch inside {@see self::pushWithRetry()}, which
+     * only ever runs after a push was actually rejected and therefore already knows the
+     * branch exists.
+     */
+    private function adoptUpstreamIfItNowExists(Git $git): void
+    {
+        $fetch = $git->result(['fetch', '--depth', '1', 'origin', $this->branch]);
+
+        if ($fetch['exitCode'] !== 0) {
+            return;
+        }
+
+        $this->adoptFetchedHistory($git);
     }
 
     private function pushWithRetry(Git $git): void
@@ -330,6 +374,8 @@ final class GitRemoteCache implements RemoteCache
 
             $attempts++;
 
+            // Never rebase (see the class docblock): adopt whatever is upstream now and
+            // re-write this run's own buffered keys on top of it, then commit and retry.
             $fetch = $git->result(['fetch', '--depth', '1', 'origin', $this->branch]);
 
             if ($fetch['exitCode'] !== 0) {
@@ -338,52 +384,50 @@ final class GitRemoteCache implements RemoteCache
                 return;
             }
 
-            $rebase = $git->result(['rebase', 'FETCH_HEAD']);
-
-            if ($rebase['exitCode'] !== 0) {
-                if (! $this->resolveGraphConflictsOurs($git)) {
-                    $git->result(['rebase', '--abort']);
-                    $this->lastError = 'git push rejected: unresolved rebase conflict outside graph/**';
-
-                    return;
-                }
-
-                $continue = $git->result(['rebase', '--continue']);
-
-                if ($continue['exitCode'] !== 0) {
-                    $git->result(['rebase', '--abort']);
-                    $this->lastError = 'git push rejected: rebase --continue failed';
-
-                    return;
-                }
-            }
+            $this->adoptFetchedHistory($git);
+            $this->commitStagedChanges($git);
         }
 
         $this->lastError = 'git push rejected after 3 retries';
     }
 
-    /** Resolves every conflicted path in favour of "ours" when all of them are under `graph/**`. */
-    private function resolveGraphConflictsOurs(Git $git): bool
+    /**
+     * Adopts whatever `FETCH_HEAD` now holds wholesale (`git reset --hard`, discarding
+     * whatever this mirror had committed or staged for the same paths) and re-writes every
+     * key {@see self::put()} buffered during this run on top of it — objects are
+     * content-addressed and append-only (re-writing one is a no-op) and `graph/**` is "ours
+     * wins" by construction, since our own write simply overwrites it again. The caller
+     * commits the result ({@see self::commitStagedChanges()}) and retries the push.
+     */
+    private function adoptFetchedHistory(Git $git): void
     {
-        $output = $git->raw(['diff', '--name-only', '--diff-filter=U']);
-        $paths = $output === null ? [] : self::splitLines($output);
+        $git->result(['reset', '--hard', 'FETCH_HEAD']);
 
-        if ($paths === []) {
-            return false;
+        foreach ($this->buffer as $key => $body) {
+            AtomicFile::write($this->pathFor($key), $body);
+        }
+    }
+
+    private function commitStagedChanges(Git $git): void
+    {
+        $git->result(['add', '-A']);
+
+        $diff = $git->result(['diff', '--cached', '--quiet']);
+        $hasStaged = $diff['exitCode'] !== 0;
+
+        if (! $hasStaged) {
+            return;
         }
 
-        foreach ($paths as $path) {
-            if (! str_starts_with($path, 'graph/')) {
-                return false;
-            }
-        }
+        $count = $this->countStagedFiles($git);
+        $message = $this->commitLabel ?? sprintf('replay: +%d objects', $count);
 
-        foreach ($paths as $path) {
-            $git->result(['checkout', '--ours', $path]);
-            $git->result(['add', $path]);
-        }
-
-        return true;
+        $git->result([
+            '-c', 'user.name=phpunit-replay',
+            '-c', 'user.email=phpunit-replay@localhost',
+            '-c', 'commit.gpgsign=false',
+            'commit', '-q', '-m', $message,
+        ]);
     }
 
     private function countStagedFiles(Git $git): int
@@ -449,6 +493,8 @@ final class GitRemoteCache implements RemoteCache
 
     private function initMirror(bool $withPlaceholderCommit): void
     {
+        $this->locallyInitialised = true;
+
         if (! is_dir($this->mirrorDir)) {
             @mkdir($this->mirrorDir, 0o775, true);
         }
