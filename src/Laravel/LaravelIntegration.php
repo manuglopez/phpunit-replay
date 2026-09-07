@@ -101,8 +101,9 @@ final class LaravelIntegration
         }
 
         // Named arguments: RunPartial has grown fields since this call was first written
-        // (notCacheable, SPEC.md §8) and a positional rebuild silently drops whichever one
-        // is newest — see LaravelIntegrationTest::test_augment_preserves_not_cacheable_entries.
+        // (notCacheable, SPEC.md §8; coverage, SPEC.md §3.2 last paragraph) and a positional
+        // rebuild silently drops whichever one is newest — see
+        // LaravelIntegrationTest::test_augment_preserves_not_cacheable_entries.
         return new RunPartial(
             edges: $partial->edges,
             results: $partial->results,
@@ -110,6 +111,7 @@ final class LaravelIntegration
             meta: $partial->meta,
             usesDatabase: $partial->usesDatabase,
             notCacheable: $partial->notCacheable,
+            coverage: $partial->coverage,
         );
     }
 }

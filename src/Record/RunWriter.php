@@ -57,18 +57,22 @@ final class RunWriter
     }
 
     /**
-     * Writes edges.json, results.json, tables.json, not_cacheable.json and meta.json
-     * atomically. `$notCacheable` is optional so every existing caller (positional, 3
-     * arguments) keeps working unchanged; omitting it simply writes an empty list.
+     * Writes edges.json, results.json, tables.json, not_cacheable.json, coverage.json and
+     * meta.json atomically. `$notCacheable` and `$coverageSnapshots` are optional so every
+     * existing caller keeps working unchanged; omitting either simply writes an empty
+     * list/map.
      *
      * @param array<string, mixed> $meta
+     * @param array<string, string>|null $coverageSnapshots project-relative test file =>
+     *        coverage snapshot key (Record\CoverageSnapshots, SPEC.md §3.2 last paragraph)
      */
-    public function flush(Recorder $recorder, ResultCollector $collector, array $meta, ?NotCacheableCollector $notCacheable = null): bool
+    public function flush(Recorder $recorder, ResultCollector $collector, array $meta, ?NotCacheableCollector $notCacheable = null, ?array $coverageSnapshots = null): bool
     {
         $edges = $this->relativiseEdges($recorder->perTestFiles());
         $tables = $this->relativiseTables($recorder->perTestTables());
         $results = $this->relativiseResults($collector->all());
         $notCacheableList = $notCacheable?->all() ?? [];
+        $coverageMap = $coverageSnapshots ?? [];
 
         $meta['truncated'] = $this->truncated;
 
@@ -76,9 +80,10 @@ final class RunWriter
         $resultsJson = Json::encode($results);
         $tablesJson = Json::encode($tables);
         $notCacheableJson = Json::encode($notCacheableList);
+        $coverageJson = Json::encode($coverageMap);
         $metaJson = Json::encode($meta);
 
-        if ($edgesJson === null || $resultsJson === null || $tablesJson === null || $notCacheableJson === null || $metaJson === null) {
+        if ($edgesJson === null || $resultsJson === null || $tablesJson === null || $notCacheableJson === null || $coverageJson === null || $metaJson === null) {
             return false;
         }
 
@@ -86,6 +91,7 @@ final class RunWriter
         $ok = AtomicFile::write($this->pathFor('results.json'), $resultsJson) && $ok;
         $ok = AtomicFile::write($this->pathFor('tables.json'), $tablesJson) && $ok;
         $ok = AtomicFile::write($this->pathFor('not_cacheable.json'), $notCacheableJson) && $ok;
+        $ok = AtomicFile::write($this->pathFor('coverage.json'), $coverageJson) && $ok;
         $ok = AtomicFile::write($this->pathFor('meta.json'), $metaJson) && $ok;
 
         return $ok;

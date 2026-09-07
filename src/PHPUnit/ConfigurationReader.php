@@ -8,7 +8,9 @@ use Error;
 use PHPUnit\TextUI\CliArguments\Builder as CliArgumentsBuilder;
 use PHPUnit\TextUI\Configuration\Configuration;
 use PHPUnit\TextUI\Configuration\Merger;
+use PHPUnit\TextUI\Configuration\SourceMapper;
 use PHPUnit\TextUI\XmlConfiguration\Loader as XmlConfigurationLoader;
+use SebastianBergmann\CodeCoverage\Filter;
 
 /**
  * Thin, version-tolerant reads of a PHPUnit `Configuration` object: everything that
@@ -114,6 +116,27 @@ final readonly class ConfigurationReader
     public function testSuffixes(): array
     {
         return $this->configuration->testSuffixes();
+    }
+
+    /**
+     * A `Filter` scoped to the same `<source>` include/exclude configuration PHPUnit's own
+     * coverage collection uses (`PHPUnit\TextUI\Configuration\CodeCoverageFilterRegistry::
+     * init()`), rebuilt independently rather than read off that registry (a process-wide
+     * singleton this may run inside a process that never touched, per the same constraint
+     * documented on {@see self::fromXmlFile()}). Used by `Report\CoverageMerger::writeEmptyRun()`
+     * to build an empty `CodeCoverage` for a replay pass where nothing executed (SPEC.md §3.2
+     * last paragraph).
+     */
+    public function emptyCoverageFilter(): Filter
+    {
+        $filter = new Filter();
+        $source = $this->configuration->source();
+
+        if ($source->notEmpty()) {
+            $filter->includeFiles(array_keys((new SourceMapper())->map($source)));
+        }
+
+        return $filter;
     }
 
     public function configurationFile(): ?string

@@ -6,6 +6,7 @@ namespace Manuglopez\Replay\Console\Runner;
 
 use FilesystemIterator;
 use Manuglopez\Replay\Cache\BaselineWriter;
+use Manuglopez\Replay\Cache\ContentHash;
 use Manuglopez\Replay\Cache\ContentKey;
 use Manuglopez\Replay\Cache\Fingerprint;
 use Manuglopez\Replay\Cache\Graph;
@@ -33,6 +34,7 @@ use Manuglopez\Replay\PHPUnit\ConfigurationReader;
 use Manuglopez\Replay\PHPUnit\ConfigurationWriter;
 use Manuglopez\Replay\Record\DriverDetector;
 use Manuglopez\Replay\Record\RunPartial;
+use Manuglopez\Replay\Report\CoverageMerger;
 use Manuglopez\Replay\Report\DryRunSummary;
 use Manuglopez\Replay\Report\JUnitMerger;
 use Manuglopez\Replay\Report\Summary;
@@ -41,6 +43,7 @@ use Manuglopez\Replay\Select\RunList;
 use Manuglopez\Replay\Select\RunListBuilder;
 use Manuglopez\Replay\Select\TestPaths;
 use Manuglopez\Replay\Select\WatchPatterns;
+use Manuglopez\Replay\Support\Paths;
 use RecursiveDirectoryIterator;
 use RecursiveIteratorIterator;
 use SplFileInfo;
@@ -516,10 +519,12 @@ final class RunPipeline
         $runId = self::newRunId();
         $this->runDir = $this->stateDir . '/runs/' . $runId;
 
+        [$phpunitArgsForRun, $coveragePhpTarget] = $this->redirectCoveragePhp($request->phpunitArgs, $root);
+
         $exitCode = $this->runPhpunit(
             $xml,
             $this->iniFlags,
-            $request->phpunitArgs,
+            $phpunitArgsForRun,
             true,
             $this->baseEnv('record', $runId),
             $root,
@@ -550,6 +555,12 @@ final class RunPipeline
         $this->persistAfterRun($updater, $complete, new ChangedFiles($root, $this->git));
         $this->pushAfterRun($graph, $applied['touched'], $complete);
         $this->printRecordSummary($partial);
+
+        // A full record pass replays nothing: whatever coverage PHPUnit collected for this
+        // run is already complete on its own (SPEC.md §3.2 last paragraph).
+        if ($coveragePhpTarget !== null) {
+            $this->finalizeCoveragePhp($this->runDir . '/coverage.php', $coveragePhpTarget, $root, []);
+        }
 
         return $exitCode;
     }
@@ -792,6 +803,8 @@ final class RunPipeline
                 @file_put_contents($request->logJunit, $merged);
             }
 
+            $this->finalizeCoveragePhpWithoutARun($request, $graph, $root);
+
             if ($this->persist) {
                 $dirty = $changedFiles->since($this->head) ?? [];
                 (new LastRunTree($this->branch, $this->head, $changedFiles->snapshotTree($dirty), time()))->save($this->stateDir);
@@ -832,6 +845,8 @@ final class RunPipeline
             $phpunitArgsForRun[] = '--log-junit';
             $phpunitArgsForRun[] = $junitPath;
         }
+
+        [$phpunitArgsForRun, $coveragePhpTarget] = $this->redirectCoveragePhp($phpunitArgsForRun, $root);
 
         $exitCode = $this->runPhpunit(
             $xml,
@@ -887,9 +902,19 @@ final class RunPipeline
         }
 
         $savedSeconds = 0.0;
+        $replayedFiles = [];
 
         foreach ($replayed as $result) {
             $savedSeconds += $result['time'];
+            $file = $result['file'] ?? null;
+
+            if (is_string($file) && $file !== '') {
+                $replayedFiles[$file] = true;
+            }
+        }
+
+        if ($coveragePhpTarget !== null) {
+            $this->finalizeCoveragePhp($this->runDir . '/coverage.php', $coveragePhpTarget, $root, array_keys($replayedFiles));
         }
 
         $executed = self::classifyExecuted($data['list'], $partial->results);
@@ -1227,6 +1252,107 @@ final class RunPipeline
         Warnings::warn(sprintf('project structure changed during the run (%s): discarding the recorded graph', implode(', ', $drift)));
 
         return true;
+    }
+
+    /**
+     * SPEC.md §3.2 last paragraph, docs/INTERNALS.md "CoverageMerger": when `--coverage-php`
+     * is among the user's PHPUnit args, PHPUnit's own output is redirected to a run-scoped
+     * path so {@see self::finalizeCoveragePhp()} can fold in the snapshots of replayed test
+     * files before anything reaches the path the user actually asked for.
+     *
+     * @param list<string> $phpunitArgs
+     * @return array{0: list<string>, 1: ?string} the (possibly rewritten) args, and the
+     *         resolved absolute target path, or null when `--coverage-php` was not requested
+     */
+    private function redirectCoveragePhp(array $phpunitArgs, string $root): array
+    {
+        $requested = CoveragePhpOption::path($phpunitArgs);
+
+        if ($requested === null) {
+            return [$phpunitArgs, null];
+        }
+
+        $target = Paths::isAbsolute($requested) ? $requested : Paths::join($root, $requested);
+        $runCoveragePhp = ($this->runDir ?? $root) . '/coverage.php';
+
+        return [CoveragePhpOption::withPath($phpunitArgs, $runCoveragePhp), $target];
+    }
+
+    /**
+     * Folds the snapshots of every replayed test file (SPEC.md §3.2 last paragraph,
+     * Record\CoverageSnapshots) into `$runCoveragePhp` (this pass's own PHPUnit output, or a
+     * synthetic empty one from {@see self::finalizeCoveragePhpWithoutARun()}) and writes the
+     * result to the path the user actually asked for.
+     *
+     * @param list<string> $replayedFiles project-relative test files served from cache this pass
+     */
+    private function finalizeCoveragePhp(string $runCoveragePhp, string $target, string $root, array $replayedFiles): void
+    {
+        if (! is_file($runCoveragePhp)) {
+            Warnings::warn('--coverage-php requested but PHPUnit produced no coverage; nothing written to ' . $target);
+
+            return;
+        }
+
+        $snapshotPaths = [];
+
+        foreach ($replayedFiles as $relative) {
+            $key = ContentHash::of(Paths::join($root, $relative));
+
+            if ($key === null) {
+                continue;
+            }
+
+            $path = $this->stateDir . '/coverage/' . $key . '.cov';
+
+            if (is_file($path)) {
+                $snapshotPaths[] = $path;
+            }
+        }
+
+        if (! CoverageMerger::merge($runCoveragePhp, $snapshotPaths, $target)) {
+            Warnings::warn('could not write merged coverage to ' . $target);
+        }
+    }
+
+    /**
+     * The `runList === []` branch of {@see self::runReplay()} never launches PHPUnit at all:
+     * when `--coverage-php` was requested anyway, an empty `CodeCoverage` scoped to the
+     * configuration's `<source>` directories stands in for "this pass's own run", so every
+     * test file being served from cache (every one of them, since nothing executed) still
+     * has its snapshot folded in.
+     */
+    private function finalizeCoveragePhpWithoutARun(RunRequest $request, Graph $graph, string $root): void
+    {
+        $requested = CoveragePhpOption::path($request->phpunitArgs);
+
+        if ($requested === null) {
+            return;
+        }
+
+        $target = Paths::isAbsolute($requested) ? $requested : Paths::join($root, $requested);
+
+        $runId = self::newRunId();
+        $this->runDir = $this->stateDir . '/runs/' . $runId;
+        $emptyRunCoveragePhp = $this->runDir . '/coverage.php';
+
+        if (! CoverageMerger::writeEmptyRun($emptyRunCoveragePhp, $this->reader)) {
+            Warnings::warn('could not build an empty coverage baseline for --coverage-php=' . $target);
+
+            return;
+        }
+
+        $replayedFiles = [];
+
+        foreach ($graph->results($this->branch) as $result) {
+            $file = $result['file'] ?? null;
+
+            if (is_string($file) && $file !== '') {
+                $replayedFiles[$file] = true;
+            }
+        }
+
+        $this->finalizeCoveragePhp($emptyRunCoveragePhp, $target, $root, array_keys($replayedFiles));
     }
 
     /** Shared by runRecord() and executeReplay(): finalize the baseline (subject to CI rules) then always save the graph. */

@@ -21,6 +21,8 @@ final readonly class RunPartial
      * @param array<string, mixed> $meta
      * @param list<string> $usesDatabase project-relative test files using a database-refreshing trait (Laravel, SPEC.md §10)
      * @param list<string> $notCacheable project-relative test files and `Class::method` ids
+     * @param array<string, string> $coverage project-relative test file => coverage snapshot
+     *        key (Record\CoverageSnapshots, SPEC.md §3.2 last paragraph)
      */
     public function __construct(
         public array $edges,
@@ -29,6 +31,7 @@ final readonly class RunPartial
         public array $meta,
         public array $usesDatabase = [],
         public array $notCacheable = [],
+        public array $coverage = [],
     ) {
     }
 
@@ -60,6 +63,9 @@ final readonly class RunPartial
         $notCacheableJson = self::readMerged($runDir, 'not_cacheable.json');
         $rawNotCacheable = $notCacheableJson !== null ? Json::decodeArray($notCacheableJson) : null;
 
+        $coverageJson = self::readMerged($runDir, 'coverage.json');
+        $rawCoverage = $coverageJson !== null ? Json::decodeArray($coverageJson) : null;
+
         return new self(
             self::normalizeStringListMap($rawEdges ?? []),
             self::normalizeResults($rawResults),
@@ -67,6 +73,7 @@ final readonly class RunPartial
             self::normalizeMeta($rawMeta),
             self::normalizeStringList($rawUsesDatabase ?? []),
             self::normalizeStringList($rawNotCacheable ?? []),
+            self::normalizeStringMap($rawCoverage ?? []),
         );
     }
 
@@ -334,6 +341,23 @@ final readonly class RunPartial
         foreach ($raw as $item) {
             if (is_string($item)) {
                 $out[] = $item;
+            }
+        }
+
+        return $out;
+    }
+
+    /**
+     * @param array<mixed> $raw
+     * @return array<string, string>
+     */
+    private static function normalizeStringMap(array $raw): array
+    {
+        $out = [];
+
+        foreach ($raw as $key => $value) {
+            if (is_string($key) && is_string($value)) {
+                $out[$key] = $value;
             }
         }
 

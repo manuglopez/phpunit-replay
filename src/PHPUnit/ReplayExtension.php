@@ -30,10 +30,13 @@ use Manuglopez\Replay\PHPUnit\Subscribers\RecordWarningTriggered;
 use Manuglopez\Replay\PHPUnit\Subscribers\StartRecordingOnPreparationStarted;
 use Manuglopez\Replay\PHPUnit\Subscribers\StopRecordingOnFinished;
 use Manuglopez\Replay\Record\CoverageDriver;
+use Manuglopez\Replay\Record\CoverageSnapshots;
 use Manuglopez\Replay\Record\DriverDetector;
 use Manuglopez\Replay\Record\PcovDriver;
+use Manuglopez\Replay\Record\PiggybackCoverageDriver;
 use Manuglopez\Replay\Record\Recorder;
 use Manuglopez\Replay\Record\SourceScope;
+use PHPUnit\Runner\CodeCoverage as PhpUnitCodeCoverage;
 use PHPUnit\Runner\Extension\Extension;
 use PHPUnit\Runner\Extension\Facade;
 use PHPUnit\Runner\Extension\ParameterCollection;
@@ -92,11 +95,21 @@ final class ReplayExtension implements Extension
 
         if ($mode->recordsEdges()) {
             $scope = SourceScope::fromProjectRoot($root, $configuration);
-            $driver = DriverDetector::detect($scope);
 
-            if ($driver === null) {
-                self::warn('no coverage driver available inside PHPUnit (pcov.enabled=1 or xdebug.mode=coverage); recording results only');
-                $mode = Mode::ResultsOnly;
+            if ($configuration->hasCoverageReport()) {
+                // PHPUnit's own coverage collection is about to start: the raw pcov/xdebug
+                // driver would clash with it (SPEC.md §2.4 — both want to drive the same
+                // extension's start/stop cycle, which is exactly why `--no-coverage` exists).
+                // This process instead reads the coverage PHPUnit already collects per test
+                // (Record\PiggybackCoverageDriver).
+                $driver = new PiggybackCoverageDriver($scope);
+            } else {
+                $driver = DriverDetector::detect($scope);
+
+                if ($driver === null) {
+                    self::warn('no coverage driver available inside PHPUnit (pcov.enabled=1 or xdebug.mode=coverage); recording results only');
+                    $mode = Mode::ResultsOnly;
+                }
             }
         }
 
@@ -112,7 +125,7 @@ final class ReplayExtension implements Extension
             ));
         }
 
-        $this->registerSubscribers($facade, $mode, $driver, $root);
+        $this->registerSubscribers($facade, $mode, $driver, $root, $configuration, $stateDir);
     }
 
     /**
@@ -183,7 +196,7 @@ final class ReplayExtension implements Extension
         );
     }
 
-    private function registerSubscribers(Facade $facade, Mode $mode, ?CoverageDriver $driver, string $root): void
+    private function registerSubscribers(Facade $facade, Mode $mode, ?CoverageDriver $driver, string $root, Configuration $configuration, string $stateDir): void
     {
         $this->registerResultSubscribers($facade);
 
@@ -213,8 +226,25 @@ final class ReplayExtension implements Extension
             'fingerprint' => Fingerprint::compute($root, $driverName),
         ];
 
+        // Coverage snapshots (SPEC.md §3.2 last paragraph): only when this run actually
+        // records edges and the user asked PHPUnit for `--coverage-php` specifically (the
+        // only report format Report\CoverageMerger folds snapshots back into).
+        $coverageSnapshots = ($mode->recordsEdges() && $configuration->hasCoveragePhp())
+            ? static function () use ($collector, $stateDir, $root): array {
+                if (! PiggybackCoverageDriver::available()) {
+                    return [];
+                }
+
+                return (new CoverageSnapshots($stateDir))->capture(
+                    $collector->all(),
+                    PhpUnitCodeCoverage::instance()->codeCoverage(),
+                    $root,
+                );
+            }
+        : null;
+
         $facade->registerSubscribers(
-            new FlushOnExecutionFinished(ReplayState::runWriter(), $recorderForFlush, $collector, $meta, ReplayState::notCacheableCollector()),
+            new FlushOnExecutionFinished(ReplayState::runWriter(), $recorderForFlush, $collector, $meta, ReplayState::notCacheableCollector(), $coverageSnapshots),
             new MarkTruncatedOnExecutionAborted(ReplayState::runWriter()),
         );
 
