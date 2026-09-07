@@ -33,26 +33,57 @@ final class CoverageFormatTest extends TestCase
     #[Test]
     public function the_archive_matches_whether_the_installed_php_code_coverage_has_a_serializer(): void
     {
-        $expected = class_exists('SebastianBergmann\CodeCoverage\Serialization\Serializer')
-            ? SerializedArchive::class
-            : LegacyArchive::class;
+        $hasSerializer = class_exists('SebastianBergmann\CodeCoverage\Serialization\Serializer')
+            && class_exists('SebastianBergmann\CodeCoverage\Serialization\Unserializer');
 
-        self::assertInstanceOf($expected, CoverageFormat::archive());
+        self::assertSame($hasSerializer, CoverageFormat::usesSerializer());
+        self::assertInstanceOf(
+            $hasSerializer ? SerializedArchive::class : LegacyArchive::class,
+            CoverageFormat::archive(),
+        );
     }
 
+    /**
+     * The three format identities this package has to tell apart, pinned in one place so that
+     * "no format number" is never again read as "pre-14":
+     *
+     * - php-code-coverage 11-13: no `Serializer`, no number, no first-line marker;
+     * - 14.0/14.1: a `Serializer`, still no number, marker = its own exact version;
+     * - 14.2+: a `Serializer` and a number, marker = that number.
+     *
+     * CI failed on 14.0.0 because this test asserted an `int` for every installation that has
+     * a `Serializer` — a wrong assumption about php-code-coverage, contradicting what the
+     * package's own docs already said about 14.0/14.1.
+     */
     #[Test]
-    public function the_serialization_format_is_the_one_the_installed_php_code_coverage_declares(): void
+    public function the_serialization_format_and_the_marker_agree_on_which_identity_is_installed(): void
     {
         $format = CoverageFormat::serializationFormat();
+        $marker = CoverageFormat::ownMarker();
 
-        if (! class_exists('SebastianBergmann\CodeCoverage\Serialization\Serializer')) {
-            self::assertNull($format, 'php-code-coverage 11-13 has no format marker at all');
+        if (! CoverageFormat::usesSerializer()) {
+            self::assertNull($format, 'php-code-coverage 11-13 declares no serialization format');
+            self::assertNull($marker, 'php-code-coverage 11-13 writes no first-line marker at all');
+
+            return;
+        }
+
+        if ($format === null) {
+            self::assertIsString($marker);
+            self::assertStringStartsWith(
+                'ver',
+                $marker,
+                'php-code-coverage 14.0/14.1 has a Serializer but no SERIALIZATION_FORMAT constant, '
+                . 'and stamps its own exact version instead',
+            );
+            self::assertNotSame('ver', $marker, 'the version has to actually be in there');
 
             return;
         }
 
         self::assertIsInt($format);
         self::assertGreaterThanOrEqual(1, $format);
+        self::assertSame('fmt' . $format, $marker);
     }
 
     #[Test]
@@ -108,7 +139,7 @@ final class CoverageFormatTest extends TestCase
             return;
         }
 
-        if (class_exists('SebastianBergmann\CodeCoverage\Serialization\Serializer')) {
+        if (CoverageFormat::usesSerializer()) {
             self::assertIsString($marker);
             self::assertStringStartsWith('ver', $marker, 'php-code-coverage 14.0/14.1 stamps its own version');
 
@@ -199,7 +230,7 @@ final class CoverageFormatTest extends TestCase
         }
 
         self::assertStringContainsString(
-            class_exists('SebastianBergmann\CodeCoverage\Serialization\Serializer') ? '/ser/' : '/php/',
+            CoverageFormat::usesSerializer() ? '/ser/' : '/php/',
             CoverageFormat::id(),
         );
     }

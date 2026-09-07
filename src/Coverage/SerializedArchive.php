@@ -32,7 +32,11 @@ use Throwable;
  *
  * **The paths are relative.** `Serializer` runs `Util\PathReducer` over a clone of the data
  * before writing: the longest common directory prefix is cut off every covered file and stored
- * once as `basePath` (upstream issue #925). Everything in this package — the graph, the
+ * once as `basePath` (upstream issue #925). That is true of the WHOLE 14 line — 14.0.0 already
+ * reduces — not just of the versions that later grew a format number, so the re-expansion below
+ * is deliberately unconditional: gating it on anything version-shaped would leave 14.0/14.1
+ * merging absolute-path snapshots into relative-path run data, i.e. two parallel entries for
+ * one file. Everything in this package — the graph, the
  * snapshots, `Filter`, every assertion in the test suite — speaks absolute paths, and
  * `CodeCoverage::merge()` matches coverage data by file key, so merging an absolute-path
  * snapshot into relative-path run data would silently produce two entries for one file instead

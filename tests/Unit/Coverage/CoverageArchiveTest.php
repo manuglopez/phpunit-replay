@@ -79,6 +79,12 @@ final class CoverageArchiveTest extends TestCase
      * This test asserts both halves of the answer at once: the bytes on disk really are
      * relative (skipped where the installed major writes absolute paths, so the test can never
      * pass vacuously), and what the archive hands back is absolute regardless.
+     *
+     * The branch is on {@see CoverageFormat::usesSerializer()}, NOT on whether a serialization
+     * format number is declared. php-code-coverage 14.0 reduces paths exactly like 14.3 but
+     * declares no number, so the older `serializationFormat() === null` branch sent it down the
+     * "php-code-coverage 11-13 stores absolute paths" path and failed — a wrong assumption in
+     * this test, not a defect in the archive, which re-expands unconditionally.
      */
     #[Test]
     public function a_relative_path_written_by_php_code_coverage_14_comes_back_absolute(): void
@@ -98,11 +104,11 @@ final class CoverageArchiveTest extends TestCase
 
         $raw = (string) file_get_contents($path);
 
-        if (CoverageFormat::serializationFormat() === null) {
-            self::assertStringContainsString($fileA, $raw, 'php-code-coverage 11-13 stores absolute paths');
-        } else {
+        if (CoverageFormat::usesSerializer()) {
             self::assertStringNotContainsString($fileA, $raw, 'php-code-coverage 14 stores paths relative to basePath');
             self::assertStringContainsString('basePath', $raw);
+        } else {
+            self::assertStringContainsString($fileA, $raw, 'php-code-coverage 11-13 stores absolute paths');
         }
 
         $read = CoverageFormat::archive()->read($path);

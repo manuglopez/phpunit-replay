@@ -81,9 +81,24 @@ final class CoverageFormat
     /** Which reader/writer pair matches the installed php-code-coverage. */
     public static function archive(): CoverageArchive
     {
-        return self::hasClass(self::SERIALIZER) && self::hasClass(self::UNSERIALIZER)
-            ? new SerializedArchive()
-            : new LegacyArchive();
+        return self::usesSerializer() ? new SerializedArchive() : new LegacyArchive();
+    }
+
+    /**
+     * Whether the installed php-code-coverage writes `--coverage-php` through
+     * `Serialization\Serializer` rather than the removed `Report\PHP` — true for the WHOLE 14
+     * line, 14.0 included.
+     *
+     * This is the capability every "is this the 14 shape?" question actually means, and asking
+     * it by name is the point. {@see self::serializationFormat()} looks like a proxy for it and
+     * is not: 14.0 and 14.1 have the `Serializer` (so they reduce paths to relative +
+     * `basePath`, and stamp a first-line marker) but declare no format NUMBER, so a
+     * `serializationFormat() === null` test reads them as pre-14 and concludes the opposite of
+     * the truth about both. CI caught exactly that on 14.0.0, in three test assertions.
+     */
+    public static function usesSerializer(): bool
+    {
+        return self::hasClass(self::SERIALIZER) && self::hasClass(self::UNSERIALIZER);
     }
 
     /** A `Serialization\Serializer`, or null on php-code-coverage 11-13, which has none. */
@@ -99,9 +114,14 @@ final class CoverageFormat
     }
 
     /**
-     * The `--coverage-php` serialization format the installed php-code-coverage writes AND is
-     * willing to read, or null when it still writes the pre-14 `Report\PHP` shape (which
-     * carries no format marker at all).
+     * The `--coverage-php` serialization format NUMBER the installed php-code-coverage writes
+     * and is willing to read.
+     *
+     * null means "declares no number", which is TWO different installations, not one: the
+     * pre-14 `Report\PHP` (no marker at all) and 14.0/14.1 (a `Serializer` that stamps its own
+     * exact version instead). Never branch on this to decide whether the 14 file shape is in
+     * play — {@see self::usesSerializer()} answers that — and never to build a first-line
+     * marker: {@see self::ownMarker()} does that for all three identities.
      */
     public static function serializationFormat(): ?int
     {
@@ -186,7 +206,7 @@ final class CoverageFormat
             return self::MARKER_FORMAT . $format;
         }
 
-        return self::hasClass(self::SERIALIZER) ? self::MARKER_VERSION . self::version() : null;
+        return self::usesSerializer() ? self::MARKER_VERSION . self::version() : null;
     }
 
     /**
@@ -211,7 +231,7 @@ final class CoverageFormat
             self::major(),
             $format !== null
                 ? self::MARKER_FORMAT . $format
-                : (self::hasClass(self::SERIALIZER) ? 'ser' : 'php'),
+                : (self::usesSerializer() ? 'ser' : 'php'),
             self::SNAPSHOT_FORMAT,
         );
     }

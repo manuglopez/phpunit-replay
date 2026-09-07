@@ -145,20 +145,35 @@ final class CoverageMergerTest extends TestCase
         self::assertSame($body, file_get_contents($outputPath), 'copied verbatim, not re-serialized');
     }
 
+    /**
+     * The other half of the defensive path: a run coverage file that IS in this installation's
+     * own format but whose content cannot be read is a genuine failure, not a foreign format,
+     * so it must not be copied through as if it were fine.
+     *
+     * The file is produced by the archive and then corrupted below its first line, so it
+     * carries whichever marker this installation writes — none on php-code-coverage 11-13, an
+     * exact version on 14.0/14.1, a format number on 14.2+. Building that first line by hand
+     * from `serializationFormat()` is what made this test wrong on 14.0.0, where the number is
+     * null but the file shape is emphatically not the pre-14 one: the hand-built file came out
+     * unmarked, which on 14.0 is FOREIGN, so `merge()` correctly copied it through and returned
+     * true while the test still expected false.
+     */
     #[Test]
     public function merge_returns_false_when_the_run_coverage_is_this_format_but_unreadable(): void
     {
-        $runPath = $this->dir . '/coverage.php';
-        $format = CoverageFormat::serializationFormat();
+        $runPath = $this->writeRun(CoverageFixture::native(
+            ['T1' => [$this->dir . '/src/A.php' => [1 => CoverageFixture::HIT]]],
+            ['T1' => ['size' => 'small', 'status' => 'passed', 'time' => 0.0]],
+        ));
 
-        TempDir::write(
-            $runPath,
-            $format === null
-                ? "<?php\nreturn 'not a CodeCoverage';\n"
-                : '<?php // phpunit/php-code-coverage serialization format ' . $format . "\nreturn 'not an array';\n",
-        );
+        $firstLine = strtok((string) file_get_contents($runPath), "\n");
+        TempDir::write($runPath, $firstLine . "\nreturn 'not coverage data';\n");
 
-        self::assertFalse(CoverageMerger::merge($runPath, [], $this->dir . '/merged.php'));
+        self::assertFalse(CoverageFormat::isForeign($runPath), 'still this installation\'s own format');
+
+        $outputPath = $this->dir . '/merged.php';
+        self::assertFalse(CoverageMerger::merge($runPath, [], $outputPath));
+        self::assertFileDoesNotExist($outputPath, 'nothing is written when the run coverage cannot be read');
     }
 
     #[Test]
