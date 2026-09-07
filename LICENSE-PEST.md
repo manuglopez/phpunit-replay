@@ -1,6 +1,6 @@
 # Pest license (portions of this package are derived from Pest)
 
-Portions of `orlegitech/phpunit-replay` are derived from [Pest](https://github.com/pestphp/pest)
+Portions of `manuglopez/phpunit-replay` are derived from [Pest](https://github.com/pestphp/pest)
 (`src/Plugins/Tia/*`, commit `17d709e32bed028005c8e8a825c7161d73af3468`), © Nuno Maduro, licensed MIT.
 Each derived file carries an `@see` docblock pointing at its origin. The original license follows.
 

@@ -7,9 +7,9 @@ namespace Manuglopez\Replay\Cache;
 /**
  * Derived from Pest (© Nuno Maduro, MIT). @see https://github.com/pestphp/pest/blob/17d709e/src/Plugins/Tia/ContentHash.php
  *
- * Deviation from Pest (SPEC §4.4, DECISIONS.md D-005): `ofContent()` takes
- * `(string $content, string $pathForType)` — Pest's original is `(string $path, string $raw)`.
- * `of()` also returns `?string` (null when unreadable) instead of Pest's `string|false`.
+ * Deviation from Pest (SPEC §4.4): `ofContent()` takes `(string $content, string $pathForType)`
+ * — Pest's original is `(string $path, string $raw)`. `of()` also returns `?string` (null when
+ * unreadable) instead of Pest's `string|false`.
  */
 final class ContentHash
 {

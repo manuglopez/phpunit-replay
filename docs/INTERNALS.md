@@ -3,7 +3,7 @@
 Working contract between components. SPEC.md is the source of truth for behaviour; this file
 pins down class names, signatures and data shapes so components built in parallel fit together.
 When SPEC.md and this file disagree on a signature, this file wins (it reflects the real PHPUnit
-API); when they disagree on behaviour, SPEC.md wins and the deviation goes to DECISIONS.md.
+API); when they disagree on behaviour, SPEC.md wins and the deviation is documented inline or in the phase reports.
 
 Conventions: `declare(strict_types=1)` everywhere, `final` by default, `readonly` where the
 object is immutable, PSR-12 via `vendor/bin/pint`, PHPStan level max. Target PHP 8.2: no typed class constants, no `#[\Override]`, readonly classes are fine. All paths handed between
@@ -543,7 +543,7 @@ final class Select\RunListBuilder          // was RunPipeline::computeRunList/un
 }
 ```
 
-### In-process replay (SPEC §3.2, §6; DECISIONS D-004; docs/spikes/in-process-replay.md)
+### In-process replay (SPEC §3.2, §6; docs/spikes/in-process-replay.md)
 
 ```php
 namespace Manuglopez\Replay\PHPUnit\Decision;
@@ -563,7 +563,7 @@ public static function markReplayed(string $testId, Decision $decision): void;  
 public static function counters(): array{affected:int, uncached:int, replayed:int, quarantined:int, executed:int}
 public static function isDependsProvider(string $className, string $methodName): bool;   // MetadataRegistry::parser()->forClass($className): any DependsOnMethod metadata targeting $methodName (cache per class)
 public static function persistInProcess(): void;   // at TestRunner\ExecutionFinished: build RunPartial in memory (replayed ids → cached result restored: status/time/assertions/message), GraphUpdater::apply(recordsEdges = driver && !resultsOnly, complete = !truncated), BaselineWriter::commit, Quarantine save
-public static function summaryLine(): ?string;     // printed by PrintSummaryOnApplicationFinished (Application\Finished — the only event emitted after PHPUnit prints its result; see D-018)
+public static function summaryLine(): ?string;     // printed by PrintSummaryOnApplicationFinished (Application\Finished — the only event emitted after PHPUnit prints its result)
 ```
 
 Trait `PHPUnit\Replayable` (public API: `isReplaying(): bool`; everything else prefixed `__replay`):
@@ -631,7 +631,7 @@ Fixture `tests/Fixtures/Projects/laravel-lite`: created from `composer create-pr
 
 ### Paratest (SPEC §13)
 
-Wrapper: `--parallel|-p[=N]` → launches `vendor/bin/paratest -c <xml> --processes N --passthru-php="-d pcov.enabled=1 -d pcov.directory=<root>"` with the same env; `RunWriter` uses `runs/<id>/worker-<TEST_TOKEN>-{edges,results,tables,not_cacheable}.json` when env `TEST_TOKEN` is set; `RunPartial::load()` merges worker files (edges by union, results last-write-wins, meta from any worker, truncated = any). `brianium/paratest` becomes a dev dependency (DECISIONS).
+Wrapper: `--parallel|-p[=N]` → launches `vendor/bin/paratest -c <xml> --processes N --passthru-php="-d pcov.enabled=1 -d pcov.directory=<root>"` with the same env; `RunWriter` uses `runs/<id>/worker-<TEST_TOKEN>-{edges,results,tables,not_cacheable}.json` when env `TEST_TOKEN` is set; `RunPartial::load()` merges worker files (edges by union, results last-write-wins, meta from any worker, truncated = any). `brianium/paratest` becomes a dev dependency.
 
 ## Phase 3 contracts — distribution
 

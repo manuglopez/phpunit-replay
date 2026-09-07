@@ -172,12 +172,12 @@ Lectura: primera pasada graba (35 tests, 7 test files, 12 fuentes, 18 aristas); 
 
 ## Qué quedó fuera y por qué
 
-- **Modo in-process (trait `Replayable`)** — fase 2 por spec. Además `TestCase::runTest()` es `private` en 11.5 y 12 (D-004); el spike `docs/spikes/in-process-replay.md` verifica los dos mecanismos viables (`invokeTestMethod()` en 12.5; swap por reflexión de `methodName` en 11.5/12.5).
+- **Modo in-process (trait `Replayable`)** — fase 2 por spec. Además `TestCase::runTest()` es `private` en 11.5 y 12; el spike `docs/spikes/in-process-replay.md` verifica los dos mecanismos viables (`invokeTestMethod()` en 12.5; swap por reflexión de `methodName` en 11.5/12.5).
 - **`explain`, `prune`, hermeticidad (`#[NotCacheable]`, globs, cuarentena), `verify`, Laravel, Paratest** — fase 2. `--explain` como opción de `run` sí está.
 - **Caché remota, `push`/`pull`, `CoverageMerger`** — fase 3. `--no-remote` se acepta y no hace nada.
-- **`generator` en graph.json** — no se escribe todavía (D pendiente en fase 2 junto a `Version::ID`).
+- **`generator` en graph.json** — no se escribe todavía (`Version::ID` se añade en fase 2).
 - **CI del paquete (matriz 8.2/8.3/8.4 × 11.5/12 × pcov/xdebug)** — fase 3 (`.github/workflows/ci.yml`). Localmente solo 8.4 + 12.5; 11.5 verificado a nivel de API (firmas) y en el spike, no con la suite completa.
-- **Xdebug del sistema** — el paquete `xdebug` de pacman es para PHP 8.5; se compiló 3.5.3 para 8.4 en el scratchpad (D-006). No se ha tocado `/etc/php84`.
+- **Xdebug del sistema** — el paquete `xdebug` de pacman es para PHP 8.5; se compiló 3.5.3 para 8.4 en el scratchpad. No se ha tocado `/etc/php84`.
 
 ## Cómo probarlo en un proyecto real
 

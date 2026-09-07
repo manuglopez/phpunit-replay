@@ -15,7 +15,7 @@ final class XdebugDriverTest extends TestCase
     public function it_reports_unavailable_when_the_extension_is_not_loaded(): void
     {
         if (extension_loaded('xdebug')) {
-            self::markTestSkipped('ext-xdebug is loaded in this environment; nothing to assert here (see D-002).');
+            self::markTestSkipped('ext-xdebug is loaded in this environment; nothing to assert here.');
         }
 
         self::assertFalse(XdebugDriver::available());

@@ -10,9 +10,8 @@ use PHPUnit\Framework\TestCase;
 
 /**
  * `#[Depends]` providers must never be replayed: the dependent test would receive `null`
- * instead of the provider's return value (DECISIONS.md D-004,
- * docs/spikes/in-process-replay.md row B5). The `plain` fixture's `DependsTest` is the
- * real-world shape this is detected on.
+ * instead of the provider's return value (docs/spikes/in-process-replay.md row B5).
+ * The `plain` fixture's `DependsTest` is the real-world shape this is detected on.
  */
 final class DependsProviderTest extends TestCase
 {

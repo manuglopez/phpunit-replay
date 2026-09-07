@@ -388,7 +388,7 @@ final class ReplayState
     /**
      * Whether another test in `$className` declares `#[Depends]` on `$methodName`. Such
      * a test is never replayed: the dependent would receive `null` instead of the
-     * provider's return value (DECISIONS.md D-004, docs/spikes/in-process-replay.md).
+     * provider's return value (see docs/spikes/in-process-replay.md).
      */
     public static function isDependsProvider(string $className, string $methodName): bool
     {

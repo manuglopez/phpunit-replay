@@ -1,4 +1,4 @@
-# orlegitech/phpunit-replay — Especificación técnica
+# manuglopez/phpunit-replay — Especificación técnica
 
 > Test Impact Analysis + replay de resultados para PHPUnit puro (11.5+ / 12).
 > Documento pensado para entregarse íntegro a Claude Code como prompt de implementación.
@@ -28,7 +28,7 @@ Diferencias con lo que ya existe (`jasonmccreary/phpunit-tia`, `gosuperscript/ph
 
 ## 1. Nombre, identidad y layout
 
-**Nombre Composer:** `orlegitech/phpunit-replay`
+**Nombre Composer:** `manuglopez/phpunit-replay`
 **Namespace PHP:** `Manuglopez\Replay`
 **Binario:** `vendor/bin/phpunit-replay`
 **Directorio de estado local:** `~/.phpunit-replay/<project-key>/` (configurable; alternativa `.phpunit-replay/` en el repo, gitignored)
@@ -106,7 +106,7 @@ phpunit-replay/
 
 ```json
 {
-  "name": "orlegitech/phpunit-replay",
+  "name": "manuglopez/phpunit-replay",
   "description": "Test Impact Analysis and result replay for PHPUnit: run only what your changes affect, replay the rest from cache.",
   "type": "library",
   "license": "MIT",
@@ -125,8 +125,8 @@ phpunit-replay/
     "ext-xdebug": "Alternative coverage driver (mode=coverage)",
     "brianium/paratest": "Parallel execution support"
   },
-  "autoload": { "psr-4": { "Orlegitech\\Replay\\": "src/" } },
-  "autoload-dev": { "psr-4": { "Orlegitech\\Replay\\Tests\\": "tests/" } },
+  "autoload": { "psr-4": { "Manuglopez\\Replay\\": "src/" } },
+  "autoload-dev": { "psr-4": { "Manuglopez\\Replay\\Tests\\": "tests/" } },
   "bin": ["bin/phpunit-replay"],
   "config": { "sort-packages": true },
   "minimum-stability": "stable"
@@ -226,14 +226,14 @@ Este modo también permite `phpunit --coverage-html` con TIA: la extensión no p
 └── remote/                 # cache local de objetos remotos descargados
 ```
 
-`ProjectKey`: `slug(basename(root)) . '-' . substr(sha256(normalizedOriginUrl ?? realpath(root)), 0, 16)`. Normalización de URL: quitar protocolo, usuario, `.git`, pasar a minúsculas → `github.com/orlegitech/emasex`. Así clones y worktrees comparten estado.
+`ProjectKey`: `slug(basename(root)) . '-' . substr(sha256(normalizedOriginUrl ?? realpath(root)), 0, 16)`. Normalización de URL: quitar protocolo, usuario, `.git`, pasar a minúsculas → `github.com/manuglopez/phpunit-replay`. Así clones y worktrees comparten estado.
 
 ### 4.2 graph.json (schema 1)
 
 ```json
 {
   "schema": 1,
-  "generator": "orlegitech/phpunit-replay 0.1.0",
+  "generator": "manuglopez/phpunit-replay 0.1.0",
   "fingerprint": {
     "structural": {
       "schema": 1,
@@ -514,7 +514,7 @@ Implementaciones v1: `FilesystemRemoteCache` (cualquier ruta: NFS, `rclone mount
 // phpunit-replay.php
 return [
     'state_dir' => null,                       // null = ~/.phpunit-replay/<key>
-    'remote'    => env('PHPUNIT_REPLAY_REMOTE'), // 'file:///mnt/replay-cache' | 'https://cache.orlegitech.com/replay/'
+    'remote'    => env('PHPUNIT_REPLAY_REMOTE'), // 'file:///mnt/replay-cache' | 'https://cache.example.com/replay/'
     'remote_token' => env('PHPUNIT_REPLAY_REMOTE_TOKEN'),
     'default_branch' => null,                  // null = autodetect (origin/HEAD, init.defaultBranch)
     'watch' => [],
@@ -664,7 +664,7 @@ Atribución obligatoria: fichero `LICENSE-PEST.md` con el texto MIT original; p�
 Copia desde aquí:
 
 ```
-Vas a crear desde cero el paquete Composer `orlegitech/phpunit-replay` siguiendo al pie de la letra la especificación adjunta (phpunit-replay-spec.md). Es una librería de Test Impact Analysis y replay de resultados para PHPUnit 11.5+/12, sin dependencia de Pest.
+Vas a crear desde cero el paquete Composer `manuglopez/phpunit-replay` siguiendo al pie de la letra la especificación adjunta (phpunit-replay-spec.md). Es una librería de Test Impact Analysis y replay de resultados para PHPUnit 11.5+/12, sin dependencia de Pest.
 
 Reglas de trabajo:
 - Antes de escribir nada, clona `https://github.com/pestphp/pest` (checkout del commit 17d709e32bed028005c8e8a825c7161d73af3468) en un directorio temporal y porta los ficheros según la tabla de la sección 16b de la spec: copia, cambia el namespace a Manuglopez\Replay\..., elimina las dependencias de Pest indicadas y añade el docblock @see de origen. Crea LICENSE-PEST.md con el MIT original. Solo escribe desde cero lo que la tabla marca como "no portar" o lo que no existe en Pest (wrapper CLI, ReplayExtension, trait Replayable, caché remota, cuarentena, JUnitMerger).

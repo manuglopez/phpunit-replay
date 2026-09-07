@@ -6,15 +6,15 @@ Estado: **cerrada** (tag `v0.1.0-beta1`). Sobre la fase 1 (filtered) se añaden:
 
 | Bloque | Ficheros clave | Notas |
 |---|---|---|
-| In-process | `PHPUnit/Replayable.php`, `ReplayableTestCase.php`, `PHPUnit/Decision/*`, `ReplayState::{bootInProcess,decide,persistInProcess}`, `Subscribers/{PersistInProcessOnExecutionFinished,PrintSummaryOnApplicationFinished}` | `runTest()` es private (D-004): hook `invokeTestMethod()` en PHPUnit 12, swap por reflexión en 11.5 (`PHPUNIT_REPLAY_LEGACY_HOOK=1` lo fuerza en 12 para probarlo). Spike en `docs/spikes/in-process-replay.md`. |
+| In-process | `PHPUnit/Replayable.php`, `ReplayableTestCase.php`, `PHPUnit/Decision/*`, `ReplayState::{bootInProcess,decide,persistInProcess}`, `Subscribers/{PersistInProcessOnExecutionFinished,PrintSummaryOnApplicationFinished}` | `runTest()` es private: hook `invokeTestMethod()` en PHPUnit 12, swap por reflexión en 11.5 (`PHPUNIT_REPLAY_LEGACY_HOOK=1` lo fuerza en 12 para probarlo). Spike en `docs/spikes/in-process-replay.md`. |
 | Servicios compartidos | `Cache/{RunContext,BaselineWriter}`, `Select/{RunList,RunListBuilder}`, `Console/ExplainFormatter` | Extraídos de `RunPipeline`; wrapper y extensión usan la misma persistencia y la misma lista de ejecución. |
-| Hermeticidad | `Attributes/NotCacheable`, `Record/NotCacheableCollector`, `Hermeticity/{Policy,Quarantine,DivergenceLog}`, `Support/Glob` | Flip = misma clave `k`, clase de estado distinta (D-033 excluye "falló → curado"). `flaky.json`, `divergence.json`. |
+| Hermeticidad | `Attributes/NotCacheable`, `Record/NotCacheableCollector`, `Hermeticity/{Policy,Quarantine,DivergenceLog}`, `Support/Glob` | Flip = misma clave `k`, clase de estado distinta (se excluyen transiciones cuyo estado cacheado era failure/error). `flaky.json`, `divergence.json`. |
 | Comandos | `Commands/{Explain,Prune,Verify}Command`, `Report/{VerifySummary,DryRunSummary}` | `verify` = suite completa en modo record + comparación con lo que se habría replayado. |
 | Laravel | `Laravel/{TableExtractor,TableTracker,BladeTracker,BladeReferences,MigrationTables,LaravelDetector,LaravelIntegration,UsesDatabaseCollector}`, `Select/Rules/{Migration,Sibling,Blade}Rule`, `Subscribers/{ArmLaravelTrackersOnPrepared,FlushUsesDatabaseOnExecutionFinished}` | Sin dependencia `illuminate/*` en el paquete. Fixture `tests/Fixtures/Projects/laravel-lite` (Laravel 13.30, sqlite memoria, 3 migraciones, 2 modelos, 4 Feature, 3 vistas). |
 | Paratest | `Console/Runner/ParatestProcess`, `RunWriter::pathFor`, `RunPartial::readMerged` | `brianium/paratest` 7.20 solo como dev-dep; workers escriben `worker-<TEST_TOKEN>-*.json`. |
-| Contadores | `Report/Summary`, `RunPipeline::classifyExecuted` | Todos en tests: `executed = affected + uncached + quarantined` (D-041). |
+| Contadores | `Report/Summary`, `RunPipeline::classifyExecuted` | Todos en tests: `executed = affected + uncached + quarantined`. |
 
-Total: 117 ficheros en `src/` (12705 líneas), 81 clases de test. Decisiones D-018…D-043 en DECISIONS.md.
+Total: 117 ficheros en `src/` (12705 líneas), 81 clases de test.
 
 ## Gate de fase 2
 
@@ -167,7 +167,7 @@ direct dependents: 1
 
 Lecturas:
 - **A**: `NotCacheableTest` (2 tests) se ejecuta en cada pasada y se contabiliza en el hueco `quarantined` del resumen (el único que la spec reserva para "siempre se ejecuta"); `verify` limpio da 0 divergencias; con `FIXTURE_FLIP=1` detecta 1 divergencia, la mete en cuarentena y el histórico pasa a `1 in 2 runs`; `prune --flaky` la libera.
-- **B**: in-process sin wrapper: PHPUnit ve 35 tests / 61 aserciones en ambas pasadas; la segunda ejecuta solo `DependsTest::testFirst` (proveedor de `#[Depends]`, nunca se replaya, D-020) y `.setup-count` pasa de 35 a 1: el guard `isReplaying()` ahorró el `setUp()` caro de los 34 replayados. La ruta por reflexión da lo mismo.
+- **B**: in-process sin wrapper: PHPUnit ve 35 tests / 61 aserciones en ambas pasadas; la segunda ejecuta solo `DependsTest::testFirst` (proveedor de `#[Depends]`, nunca se replaya) y `.setup-count` pasa de 35 a 1: el guard `isReplaying()` ahorró el `setUp()` caro de los 34 replayados. La ruta por reflexión da lo mismo.
 - **C**: Paratest: mismos números que la grabación secuencial.
 - **D**: Laravel: `record` traza 27 fuentes (vistas Blade incluidas) y 3 tablas; tocar la migración de `comments` selecciona exactamente los 3 tests que usan `RefreshDatabase` (todas las tablas de migraciones les pertenecen, spec §10) y replaya `HomePageTest`; tocar `welcome.blade.php` selecciona solo `HomePageTest` por arista (`BladeTracker` la registró al grabar).
 
