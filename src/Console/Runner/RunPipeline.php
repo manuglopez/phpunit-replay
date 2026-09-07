@@ -30,6 +30,7 @@ use Manuglopez\Replay\Hermeticity\Policy;
 use Manuglopez\Replay\Hermeticity\Quarantine;
 use Manuglopez\Replay\Laravel\LaravelDetector;
 use Manuglopez\Replay\Laravel\LaravelIntegration;
+use Manuglopez\Replay\Laravel\ParallelIsolation;
 use Manuglopez\Replay\PHPUnit\ConfigurationReader;
 use Manuglopez\Replay\PHPUnit\ConfigurationWriter;
 use Manuglopez\Replay\Record\DriverDetector;
@@ -1385,6 +1386,21 @@ final class RunPipeline
      * (SPEC.md §13, `--parallel`/`-p`): every other call site in this class hands off here
      * instead of constructing a process runner directly.
      *
+     * Also the one place that decides whether Paratest gets Laravel's per-worker database
+     * isolation wired up ({@see ParallelIsolation}). Three of the gate's four "no" answers
+     * are silent, because the feature simply does not apply: non-Laravel project, config
+     * opt-out, and Paratest missing (already warned about in {@see ParatestProcess::run()}).
+     * The fourth warns from inside {@see ParallelIsolation::enabled()}: Laravel and Paratest
+     * are both present, but `Illuminate\Testing\ParallelRunner` could not be resolved in the
+     * project, so the run would otherwise proceed with exactly the behaviour this isolation
+     * exists to prevent.
+     *
+     * A project that DOES pass the gate and still cannot resolve a Laravel application
+     * ({@see ParallelIsolation::applicationResolvable()}) gets a warning here instead:
+     * without that check, Paratest's own top-level process would crash outright
+     * (`RuntimeException('Parallel Runner unable to resolve application.')`, thrown before a
+     * single test runs) rather than degrading.
+     *
      * @param list<string> $iniFlags
      * @param list<string> $phpunitArgs
      * @param array<string, string> $env
@@ -1401,9 +1417,20 @@ final class RunPipeline
             return (new PhpunitProcess())->run($this->phpunitBin, $configFile, $iniFlags, $phpunitArgs, $appendNoCoverage, $env, $cwd);
         }
 
-        $paratestBin = ($this->root ?? $cwd) . '/vendor/bin/paratest';
+        $root = $this->root ?? $cwd;
+        $paratestBin = $root . '/vendor/bin/paratest';
 
-        return (new ParatestProcess())->run($paratestBin, $this->phpunitBin, $configFile, $iniFlags, $phpunitArgs, $appendNoCoverage, $env, $cwd, $this->request->parallel);
+        $laravelParallelIsolation = false;
+
+        if (ParallelIsolation::enabled($root, $this->config)) {
+            if (ParallelIsolation::applicationResolvable($root)) {
+                $laravelParallelIsolation = true;
+            } else {
+                Warnings::warn('Laravel detected but no bootstrap/app.php or Tests\\CreatesApplication was found; running --parallel without per-worker database isolation');
+            }
+        }
+
+        return (new ParatestProcess())->run($paratestBin, $this->phpunitBin, $configFile, $iniFlags, $phpunitArgs, $appendNoCoverage, $env, $cwd, $this->request->parallel, $laravelParallelIsolation);
     }
 
     private function degrade(RunRequest $request, string $reason): int

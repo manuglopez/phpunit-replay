@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- `--parallel`/`-p` on a Laravel project invoked `vendor/bin/paratest` directly, without Laravel's
+  own `--runner=\Illuminate\Testing\ParallelRunner` or `LARAVEL_PARALLEL_TESTING=1`: every worker
+  migrated the SAME database instead of a per-worker one, surfacing as
+  `ERROR 1213 (40001) Deadlock found when trying to get lock` on `DROP TABLE` rather than a clean
+  test failure. Both are now wired up automatically whenever Laravel, Paratest, and a resolvable
+  `Illuminate\Testing\ParallelRunner` are all present (`Laravel\ParallelIsolation`); opt out with
+  `laravel_parallel_isolation: false`. Degrades with a warning — never a crash — when the project's
+  Laravel application can't be resolved, or when Paratest is present but `ParallelRunner` isn't.
+- The `laravel-lite` fixture's `sqlite :memory:` configuration is why the package's own suite never
+  caught this (every worker already gets its own isolated database by construction); a second,
+  file-based-sqlite testsuite (`tests/ParallelFileDb`) now proves real per-worker database
+  separation end to end.
+
 ## [0.1.0] — 2026-09-07
 
 - Remote cache, content-addressed: filesystem (`file://`), HTTP (S3/MinIO presigned, WebDAV) and a dedicated git repository backend (`GitRemoteCache`: shallow mirror, append-only objects, reset+rewrite reconciliation, `prune --remote [--keep-months] [--squash]`).

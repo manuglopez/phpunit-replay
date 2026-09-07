@@ -24,6 +24,13 @@ use Symfony\Component\Process\Process;
  * Falls back to a sequential {@see PhpunitProcess} run, with a warning, when `$paratestBin`
  * does not exist (the caller always passes `<root>/vendor/bin/paratest`, missing whenever
  * Paratest was not installed as a dev dependency).
+ *
+ * `$laravelParallelIsolation` (the gate decided by {@see \Manuglopez\Replay\Laravel\ParallelIsolation::enabled()},
+ * called from `RunPipeline`) wires up Laravel's own per-worker database isolation: a single
+ * `--runner=\Illuminate\Testing\ParallelRunner` argv token (never split across two array
+ * entries the way `--processes`/`--passthru-php` are — the `=` form is deliberate, SPEC.md
+ * §13) plus `LARAVEL_PARALLEL_TESTING=1` in the environment. Without both, every worker
+ * migrates the SAME database instead of a per-token one.
  */
 final class ParatestProcess
 {
@@ -44,6 +51,7 @@ final class ParatestProcess
         array $env,
         string $cwd,
         int $parallel,
+        bool $laravelParallelIsolation = false,
     ): int {
         if (! is_file($paratestBin)) {
             Warnings::warn('--parallel requested but vendor/bin/paratest is missing; running PHPUnit sequentially');
@@ -51,7 +59,11 @@ final class ParatestProcess
             return (new PhpunitProcess())->run($phpunitBin, $configFile, $iniFlags, $phpunitArgs, $appendNoCoverage, $env, $cwd);
         }
 
-        $command = $this->buildCommand($configFile, $iniFlags, $phpunitArgs, $appendNoCoverage, $paratestBin, $parallel);
+        $command = $this->buildCommand($configFile, $iniFlags, $phpunitArgs, $appendNoCoverage, $paratestBin, $parallel, $laravelParallelIsolation);
+
+        if ($laravelParallelIsolation) {
+            $env['LARAVEL_PARALLEL_TESTING'] = '1';
+        }
 
         $process = new Process($command, $cwd, $env);
         $process->setTimeout(null);
@@ -80,6 +92,7 @@ final class ParatestProcess
         bool $appendNoCoverage,
         string $paratestBin,
         int $parallel,
+        bool $laravelParallelIsolation = false,
     ): array {
         $command = [PHP_BINARY, ...$iniFlags, $paratestBin];
 
@@ -91,6 +104,10 @@ final class ParatestProcess
         if ($parallel > 0) {
             $command[] = '--processes';
             $command[] = (string) $parallel;
+        }
+
+        if ($laravelParallelIsolation) {
+            $command[] = '--runner=\Illuminate\Testing\ParallelRunner';
         }
 
         $passthruPhp = self::passthruPhp($iniFlags);

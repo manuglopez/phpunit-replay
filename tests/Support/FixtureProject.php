@@ -184,6 +184,32 @@ final class FixtureProject
     }
 
     /**
+     * Same as {@see self::phpunit()} but runs `vendor/bin/paratest` directly, bypassing
+     * phpunit-replay entirely — for a control/"before the fix" run exactly the way a
+     * developer's own `vendor/bin/paratest -p N` invocation would (tests/Integration/LaravelLiteParallelDatabaseTest.php).
+     *
+     * @param list<string> $args
+     * @param array<string, string> $env
+     * @return array{exitCode: int, stdout: string, stderr: string}
+     */
+    public function paratest(array $args = [], array $env = []): array
+    {
+        $process = new Process(
+            ['php', 'vendor/bin/paratest', ...$args],
+            $this->root(),
+            self::sanitizedEnv($env),
+        );
+        $process->setTimeout(120.0);
+        $process->run();
+
+        return [
+            'exitCode' => $process->getExitCode() ?? -1,
+            'stdout' => $process->getOutput(),
+            'stderr' => $process->getErrorOutput(),
+        ];
+    }
+
+    /**
      * Runs PHPUnit inside the fixture copy the way a developer would (no wrapper), with
      * `HOME` pointed at this instance's temp home so the extension's state directory is
      * isolated. `CI`/`GITHUB_*`/`PHPUNIT_REPLAY_*` are already stripped by
