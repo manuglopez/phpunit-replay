@@ -659,6 +659,7 @@ final class Cache\Remote\HttpRemoteCache           // remote = http(s)://host/pr
 final class Cache\Remote\GitRemoteCache            // remote = git+ssh://…, git+https://…, or any URL ending in .git
 final class Cache\Remote\RemoteCacheFactory        // from Config: scheme → backend; unknown → Null + warning
 final class Cache\Remote\ObjectStore               // put/get of objects/<shard>/<k>.json + graph/<key>/<branch>.json on top of RemoteCache; local read-through cache in <stateDir>/remote/
+                                                    // deviation: the project key is fixed at construction (`__construct(RemoteCache $remote, string $stateDir, string $projectKey)`), not a per-call argument — `graph(string $branch)`/`graphOf(string $branch, string $projectRoot)` take only the branch
 ```
 
 ### GitRemoteCache — automatic maintenance
@@ -673,11 +674,12 @@ final class Cache\Remote\ObjectStore               // put/get of objects/<shard>
 
 ### Pipeline changes
 
-- Startup without local graph: `ObjectStore::graph(key, branch) ?? graph(key, defaultBranch)` → fingerprint reconcile (structural must match; environmental drift clears results) → sha must be an ancestor of HEAD, else use it only as a source of `objects` by key (edges still useful) — record fresh but replay-remote by `k` still applies.
+- Startup without local graph: `ObjectStore::graph(branch) ?? graph(defaultBranch)` (the project key is fixed on the `ObjectStore` instance, not passed to `graph()`/`graphOf()` — see above) → fingerprint reconcile (structural must match; environmental drift clears results) → sha must be an ancestor of HEAD, else use it only as a source of `objects` by key (edges still useful) — record fresh but replay-remote by `k` still applies.
 - Replay: for every test file in the run list that is `affected` (not unknown/rerun/quarantined/not-cacheable): compute `k_now`; `ObjectStore::object(k_now)` hit → mark file **replayed-remote**, drop from the run list, merge its results with `key = k_now` (Summary: `M replayed (R from remote)`).
 - After the run: `put objects/<shard>/<k>.json` for each executed test file (results of that file, with `k`); `put graph/<key>/<branch>.json` when `remote_push === 'all'` and the pass was complete. `CI=true`: objects only unless `--allow-ci-baseline`.
 - Commands: `push [--graph]` (force a push of the current graph and all objects derivable from it), `pull` (fetch graph for the current branch/default and store locally as baseline), `prune --remote`.
 - `--no-remote` disables all of the above for one run; `remote => null` disables permanently.
+- Deviation: `verify` and `results-only` (a partial CLI selection: `--filter`/`--group`/`--testsuite`/an explicit path) never publish — they persist the local graph the same way a full pass does, but never reach the `putObject`/`putGraph` step above. Only `record` and a full/replay `run` (`RunPipeline::pushAfterRun()`) publish; `verify`'s whole point is comparing against what is already cached, and a partial selection has nothing complete enough to be worth sharing.
 
 ### CoverageMerger (SPEC §3.2, port of Pest CoverageMerger)
 
@@ -711,6 +713,19 @@ Algorithm: candidates = [current branch (own baseline)] + `baseline_branches`; f
 (local graph first, then `graph/<key>/<branch>.json` from the remote), keep those where
 `git merge-base --is-ancestor <sha> <head>`; `distance` = `git diff --name-only <sha>..<head> | count`;
 pick the smallest distance (ties → order of preference); own baseline wins when its distance is ≤ the best
-candidate's. `Graph::results()` reads for the current branch then fall back to the resolved branch's results
-(replacing the single `defaultBranch` fallback). `status`/`--explain` print `baseline develop@abc1234 (nearest, 3 files away)`.
+candidate's. When the winner is not the current branch, `Graph::setNearestBranch()` records it and
+`Graph::results()`/`mergedResults()` layers three tiers, own on top: **own → nearest → default**, each
+complete layer authoritative for the test files it covers (a result the layer below holds for one of
+those files is dropped, never merged, so a renamed test does not keep reporting the old name too). The
+nearest branch is a narrower layer inserted ABOVE the default branch, not a replacement for it: a
+branch's own baseline and its nearest one are both deltas (partial re-recordings of whatever changed
+since they diverged), so the default branch remains the only layer with results for everything neither
+of them ever touched. `status`/`--explain` print `baseline develop@abc1234 (nearest, 3 files away)`.
 Detached HEAD: candidates only. No candidate is an ancestor → fresh record (as today).
+
+Deviation: `status` resolves the nearest baseline locally only — `StatusCommand::execute()` builds its
+`BaselineResolver` with `$remote = null`, so `shaFor()` never reaches the `graph/<key>/<branch>.json`
+remote fallback and only ever reports `source: 'own'|'local'`, never `'remote'`. `run --explain`, by
+contrast, resolves through the same real, remote-aware `BaselineResolver` a normal `run` does
+(`RunPipeline::resolveBaseline()`, `$this->objects`). `status` is a read-only, offline-safe report of
+what the local graph already knows, never a network call.
