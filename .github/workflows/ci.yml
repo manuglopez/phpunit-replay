@@ -24,6 +24,30 @@
 # by the `test` job's PHP 8.4 x PHPUnit ^13.0 cells. 3 more cells.
 #
 # 12 + 3 = 15 cells total.
+#
+# ## The Laravel fixture (tests/Fixtures/Projects/laravel-lite) runs BOTH a realistic and a
+# ## reaching configuration — do not collapse this to a single pin.
+#
+# The fixture's own committed composer.json pins `phpunit/phpunit: ^12.5.12` — exactly what
+# `composer create-project laravel/laravel` resolves TODAY (php-code-coverage 12.5.x,
+# `LegacyArchive`), because that is what most Laravel users actually run and a regression
+# there is the expensive kind to miss. Every cell below EXCEPT the ones explicitly called out
+# as "pinned to this cell" below installs the fixture with a plain `composer install` — no
+# override — so it reproduces that real, unmodified default every time (see the fixture's own
+# README.md).
+#
+# That default alone would never reach `SerializedArchive` at all: PHPUnit 13.0 still means
+# php-code-coverage 13 (`LegacyArchive`); `SerializedArchive` only starts at PHPUnit 13.1 (cc
+# 14.1), and PHPUnit 13 needs PHP >=8.4.1 while the fixture's `laravel/framework` needs PHP
+# ^8.3 — so only a PHP 8.4 cell running PHPUnit >=13.1 can ever reach it. The cells below
+# marked "pinned to this cell" read the OUTER package's own resolved phpunit/phpunit and
+# php-code-coverage back off `composer.lock` (not off `matrix.phpunit`, which is a caret range
+# or a wildcard, not a valid exact pin) and `composer require --dev --no-update` +
+# `composer update --with` the SAME exact pair into the fixture — every one of them a PHP 8.4
+# cell whose OWN phpunit already resolved past 13.1, so the Laravel integration tests go
+# through `SerializedArchive` there instead: `test`'s PHP 8.4 x PHPUnit ^13.0 cells (both
+# drivers, reaching cc 14.3.x) and every row of `coverage-format` (reaching cc 14.0/14.1/14.2
+# respectively) — between the two, all four on-disk cc-14 shapes get a Laravel-fixture run.
 name: CI
 
 on:
@@ -87,13 +111,37 @@ jobs:
       - name: Lint
         run: composer lint
 
-      # Installed before the suite runs so tests/Integration/LaravelLite*Test.php actually
-      # exercise the fixture instead of skipping themselves for a missing vendor/autoload.php
-      # (the fixture's own composer.json requires php ^8.3, laravel/framework ^13).
+      # Only the PHP 8.4 x PHPUnit ^13.0 cells resolve a phpunit past the ^12.5.12 skeleton
+      # pin far enough to reach php-code-coverage 14 (see the file header) — read back off
+      # composer.lock, not off matrix.phpunit, so this is the exact pair this cell resolved.
+      - name: Resolve this cell's phpunit/phpunit and php-code-coverage versions
+        id: cell
+        if: matrix.phpunit == '^13.0'
+        run: |
+          echo "phpunit=$(jq -r '(.packages + .["packages-dev"])[] | select(.name == "phpunit/phpunit") | .version' composer.lock)" >> "$GITHUB_OUTPUT"
+          echo "php_code_coverage=$(jq -r '(.packages + .["packages-dev"])[] | select(.name == "phpunit/php-code-coverage") | .version' composer.lock)" >> "$GITHUB_OUTPUT"
+
+      # Realistic default (see the file header): every cell except PHP 8.4 x PHPUnit ^13.0
+      # installs the fixture exactly as committed — phpunit/phpunit ^12.5.12, the same
+      # constraint a clean `laravel new` resolves today — so the Laravel integration tests
+      # exercise LegacyArchive the way most users' suites actually do.
       - name: Install Laravel fixture dependencies
-        if: matrix.php != '8.2'
+        if: matrix.php != '8.2' && matrix.phpunit != '^13.0'
         working-directory: tests/Fixtures/Projects/laravel-lite
         run: composer install --no-interaction --prefer-dist
+
+      # Reach (see the file header): pinned to THIS cell's own phpunit/phpunit and
+      # php-code-coverage — both already past the skeleton's ^12.5.12 pin on this cell — so
+      # the Laravel integration tests exercise SerializedArchive here instead.
+      - name: Pin the Laravel fixture's phpunit/phpunit to this cell
+        if: matrix.php != '8.2' && matrix.phpunit == '^13.0'
+        working-directory: tests/Fixtures/Projects/laravel-lite
+        run: composer require --dev --no-update phpunit/phpunit:"${{ steps.cell.outputs.phpunit }}"
+
+      - name: Install Laravel fixture dependencies pinned to php-code-coverage ${{ steps.cell.outputs.php_code_coverage }}
+        if: matrix.php != '8.2' && matrix.phpunit == '^13.0'
+        working-directory: tests/Fixtures/Projects/laravel-lite
+        run: composer update --with phpunit/php-code-coverage:"${{ steps.cell.outputs.php_code_coverage }}" --prefer-stable --prefer-dist --no-interaction
 
       - name: Run test suite (pcov)
         if: matrix.coverage == 'pcov'
@@ -150,9 +198,29 @@ jobs:
       - name: Lint
         run: composer lint
 
-      - name: Install Laravel fixture dependencies
+      # Reach (see the file header): every row here already resolves past the fixture's own
+      # ^12.5.12 skeleton pin by construction, so every row gets the tracking pin, never the
+      # plain install. Read back off composer.lock (not off matrix.phpunit /
+      # matrix.php-code-coverage) so this is the exact pair this cell resolved — the matrix
+      # values above are a caret range and a wildcard, neither of which is itself a valid
+      # exact pin.
+      - name: Resolve this cell's phpunit/phpunit and php-code-coverage versions
+        id: cell
+        run: |
+          echo "phpunit=$(jq -r '(.packages + .["packages-dev"])[] | select(.name == "phpunit/phpunit") | .version' composer.lock)" >> "$GITHUB_OUTPUT"
+          echo "php_code_coverage=$(jq -r '(.packages + .["packages-dev"])[] | select(.name == "phpunit/php-code-coverage") | .version' composer.lock)" >> "$GITHUB_OUTPUT"
+
+      # Pinned to THIS cell's own phpunit/phpunit and php-code-coverage (not whatever the
+      # fixture's own composer.json would resolve on its own) so the Laravel integration
+      # tests exercise the same CoverageArchive path as the rest of the suite on this cell
+      # (docs/INTERNALS.md, laravel-lite fixture note).
+      - name: Pin the Laravel fixture's phpunit/phpunit to this cell
         working-directory: tests/Fixtures/Projects/laravel-lite
-        run: composer install --no-interaction --prefer-dist
+        run: composer require --dev --no-update phpunit/phpunit:"${{ steps.cell.outputs.phpunit }}"
+
+      - name: Install Laravel fixture dependencies pinned to php-code-coverage ${{ steps.cell.outputs.php_code_coverage }}
+        working-directory: tests/Fixtures/Projects/laravel-lite
+        run: composer update --with phpunit/php-code-coverage:"${{ steps.cell.outputs.php_code_coverage }}" --prefer-stable --prefer-dist --no-interaction
 
       - name: Run test suite (pcov)
         run: php -d pcov.enabled=1 -d pcov.directory=$PWD vendor/bin/phpunit
