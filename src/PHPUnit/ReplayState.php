@@ -11,6 +11,9 @@ use Manuglopez\Replay\Cache\Fingerprint;
 use Manuglopez\Replay\Cache\Graph;
 use Manuglopez\Replay\Cache\GraphStore;
 use Manuglopez\Replay\Cache\GraphUpdater;
+use Manuglopez\Replay\Cache\ProjectKey;
+use Manuglopez\Replay\Cache\Remote\ObjectStore;
+use Manuglopez\Replay\Cache\Remote\RemoteCacheFactory;
 use Manuglopez\Replay\Cache\RunContext;
 use Manuglopez\Replay\Cache\StateDirectory;
 use Manuglopez\Replay\Change\ChangedFiles;
@@ -107,14 +110,23 @@ final class ReplayState
 
     private static ?Config $config = null;
 
+    private static ?ObjectStore $objects = null;
+
+    private static bool $remoteOpen = false;
+
+    /** @var array<string, true> test ids whose cached result was merged in from a remote object, for the `replayedRemote` counter */
+    private static array $remoteTestIds = [];
+
     /** @var array<string, Decision> */
     private static array $decisions = [];
 
     /** @var array<string, TestResultArray> */
     private static array $replayed = [];
 
-    /** @var array{affected: int, uncached: int, replayed: int, quarantined: int, notCacheable: int} */
-    private static array $counters = ['affected' => 0, 'uncached' => 0, 'replayed' => 0, 'quarantined' => 0, 'notCacheable' => 0];
+    /** @var array{affected: int, uncached: int, replayed: int, quarantined: int, notCacheable: int, replayedRemote: int} */
+    private static array $counters = [
+        'affected' => 0, 'uncached' => 0, 'replayed' => 0, 'quarantined' => 0, 'notCacheable' => 0, 'replayedRemote' => 0,
+    ];
 
     private static float $savedSeconds = 0.0;
 
@@ -171,27 +183,17 @@ final class ReplayState
         $branch ??= 'HEAD';
         $defaultBranch = $config->defaultBranch ?? $git->defaultBranch() ?? 'main';
 
-        $store = new GraphStore($stateDir, $root);
-        $graph = self::reconcileGraph($store->load(), $fingerprint, $defaultBranch);
+        // Remote cache (SPEC.md §9): config `remote` only — in-process mode has no
+        // `--no-remote` flag/`PHPUNIT_REPLAY=0` equivalent to check. `end()` happens once,
+        // from self::persistInProcess(), whatever mode this settles on.
+        self::openRemote($config, $stateDir, $root);
 
-        // TODO(phase 3): the remote cache (SPEC.md §9) is wired into the wrapper pipeline
-        // only. In-process mode still runs local-only, which means a project whose team
-        // shares a cache has to go through `phpunit-replay run` to benefit from it. What is
-        // missing here, in the order it would go in:
-        //   1. `RemoteCacheFactory::fromConfig($config, $stateDir)` + `begin()` here, with
-        //      `end()` from a shutdown/ApplicationFinished subscriber;
-        //   2. `$graph ??= <ObjectStore>::graphOf(<branch or nearest candidate>, $root)`
-        //      reconciled by self::reconcileGraph() and saved through $store, plus
-        //      `Change\BaselineResolver` -> `Graph::setNearestBranch()` (D-039);
-        //   3. inside self::prepareReplay(), after the run list is built: for each
-        //      affected-only test file, `ContentKey::forTestFile()` -> `ObjectStore::object()`
-        //      -> merge the results into the graph and drop the file from the run list, which
-        //      is all self::decide() needs to replay them;
-        //   4. `ObjectStore::putObject()` per executed test file where self::persist()
-        //      commits the graph, under the same `remote_push`/CI rules as
-        //      `Console\Runner\RunPipeline::pushAfterRun()`.
-        // `Report\Summary::$replayedRemote` and `self::counters()` already have room for
-        // the counter.
+        $store = new GraphStore($stateDir, $root);
+        $localGraph = $store->load();
+        $graph = $localGraph !== null
+            ? self::reconcileGraph($localGraph, $fingerprint, $defaultBranch)
+            : self::reconcileGraph(self::pullStartingGraph($config, $branch, $defaultBranch, $root, $store), $fingerprint, $defaultBranch);
+
         $mode = self::decideMode($config, $reader, $graph, $branch, $driver !== null);
 
         if ($mode === Mode::Off) {
@@ -378,6 +380,10 @@ final class ReplayState
         self::$replayed[$testId] = $cached;
         self::$counters['replayed']++;
         self::$savedSeconds += $cached['time'];
+
+        if (isset(self::$remoteTestIds[$testId])) {
+            self::$counters['replayedRemote']++;
+        }
     }
 
     /**
@@ -397,7 +403,7 @@ final class ReplayState
      * `RunList::primaryReasonFor()`, which still folds `notCacheable` files into
      * `'quarantined'` until `RunPipeline::classifyExecuted()` is wired to split them too.
      *
-     * @return array{affected: int, uncached: int, replayed: int, quarantined: int, notCacheable: int, executed: int}
+     * @return array{affected: int, uncached: int, replayed: int, quarantined: int, notCacheable: int, replayedRemote: int, executed: int}
      */
     public static function counters(): array
     {
@@ -432,6 +438,8 @@ final class ReplayState
         $mode = self::$mode;
 
         if (! self::$inProcess || $graph === null || $mode === null || $mode === Mode::Off) {
+            self::closeRemote();
+
             return;
         }
 
@@ -457,7 +465,7 @@ final class ReplayState
         }
 
         $updater = new GraphUpdater($graph, $root, new ContentKey($root), self::$quarantine);
-        $updater->apply($partial, self::$branch, recordsEdges: $recordsEdges, complete: $complete);
+        $applied = $updater->apply($partial, self::$branch, recordsEdges: $recordsEdges, complete: $complete);
 
         $git = self::$git ?? new Git($root);
 
@@ -477,6 +485,76 @@ final class ReplayState
 
         if (self::$quarantine !== null && self::$quarantine->all() !== []) {
             self::$quarantine->save(self::stateDir());
+        }
+
+        self::pushAfterRun($graph, $applied['touched'], $complete);
+        self::closeRemote();
+    }
+
+    /**
+     * docs/INTERNALS.md "Pipeline changes", mirrored from
+     * `Console\Runner\RunPipeline::pushAfterRun()`: publish one `objects/<shard>/<k>.json`
+     * per test file this pass executed, and the whole graph when `remote_push` is `all` and
+     * the pass earned a complete, persistable baseline. `remote_push => 'off'` makes the
+     * remote pull-only; `CI=true` publishes objects but never the graph (in-process mode has
+     * no `--allow-ci-baseline` override to check, unlike the wrapper).
+     *
+     * @param list<string> $executedTestFiles project-relative, from GraphUpdater::apply()['touched']
+     */
+    private static function pushAfterRun(Graph $graph, array $executedTestFiles, bool $complete): void
+    {
+        $objects = self::$objects;
+        $config = self::$config;
+
+        if ($objects === null || $config === null || $config->remotePush === 'off') {
+            return;
+        }
+
+        $branch = self::$branch;
+        $contentKey = new ContentKey(self::root());
+        $own = $graph->ownResults($branch);
+        $pushed = 0;
+
+        foreach ($executedTestFiles as $file) {
+            if ($graph->isNotCacheable($file)) {
+                continue;
+            }
+
+            $key = $contentKey->forTestFile($graph, $file);
+
+            if ($key === null) {
+                continue;
+            }
+
+            $results = [];
+
+            foreach ($own as $testId => $result) {
+                if (($result['file'] ?? null) === $file) {
+                    $results[$testId] = $result;
+                }
+            }
+
+            if ($results !== [] && $objects->putObject($key, $file, $results)) {
+                $pushed++;
+            }
+        }
+
+        Warnings::debug('remote: ' . $pushed . ' object(s) published');
+
+        if ($config->remotePush !== 'all' || ! $complete || ! self::$persist) {
+            return;
+        }
+
+        if (RunContext::ciDetected()) {
+            Warnings::debug('remote: CI detected, the branch graph was not published (no --allow-ci-baseline override in-process)');
+
+            return;
+        }
+
+        $body = $graph->encode();
+
+        if ($body !== null) {
+            $objects->putGraph($branch, $body);
         }
     }
 
@@ -512,7 +590,7 @@ final class ReplayState
             $counters['affected'],
             $counters['uncached'],
             $counters['replayed'],
-            0,
+            $counters['replayedRemote'],
             $counters['quarantined'],
             self::$persist ? self::$branch : null,
             self::$persist ? self::$head : null,
@@ -547,9 +625,14 @@ final class ReplayState
         self::$defaultBranch = 'main';
         self::$persist = false;
         self::$config = null;
+        self::$objects = null;
+        self::$remoteOpen = false;
+        self::$remoteTestIds = [];
         self::$decisions = [];
         self::$replayed = [];
-        self::$counters = ['affected' => 0, 'uncached' => 0, 'replayed' => 0, 'quarantined' => 0, 'notCacheable' => 0];
+        self::$counters = [
+            'affected' => 0, 'uncached' => 0, 'replayed' => 0, 'quarantined' => 0, 'notCacheable' => 0, 'replayedRemote' => 0,
+        ];
         self::$savedSeconds = 0.0;
         self::$dependedUpon = [];
         self::$scannedForDepends = [];
@@ -670,7 +753,7 @@ final class ReplayState
         $reader = self::$reader ?? new ConfigurationReader($configuration);
 
         self::$policy = $policy;
-        self::$runList = (new RunListBuilder(
+        $runList = (new RunListBuilder(
             $graph,
             $testPaths,
             $watch,
@@ -679,8 +762,84 @@ final class ReplayState
             $root,
             LaravelIntegration::rulesFor($graph, $root, $config),
         ))->build($changed, $branch);
+        self::$runList = self::replayAffectedFromRemote($graph, $runList, $branch, $root);
 
         Warnings::debug('changed: ' . ($changed === [] ? '(none)' : implode(', ', $changed)));
+    }
+
+    /**
+     * SPEC.md §9 / docs/INTERNALS.md "Pipeline changes", mirrored from
+     * `Console\Runner\RunPipeline::replayFromRemote()`: every test file the run list holds
+     * *only* because the rule chain selected it (never unknown/rerun/quarantined/
+     * not-cacheable, which must always execute regardless of the cache) gets its content
+     * key recomputed from the graph's existing edges and looked up on the remote. A hit
+     * merges the file's results into the graph under the current branch and drops the file
+     * from the returned list's selection, so `self::decide()`'s normal cached-result path
+     * replays each of its tests and `self::markReplayed()` counts them under
+     * `replayedRemote` (`self::$remoteTestIds`).
+     */
+    private static function replayAffectedFromRemote(Graph $graph, RunList $runList, string $branch, string $root): RunList
+    {
+        $objects = self::$objects;
+
+        if ($objects === null) {
+            return $runList;
+        }
+
+        $contentKey = new ContentKey($root);
+        $skip = array_fill_keys(
+            [...$runList->unknown, ...$runList->rerun, ...$runList->quarantined, ...$runList->notCacheable],
+            true,
+        );
+        $hit = [];
+
+        foreach ($runList->selection->testFiles() as $file) {
+            if (isset($skip[$file]) || $graph->isNotCacheable($file)) {
+                continue;
+            }
+
+            $key = $contentKey->forTestFile($graph, $file);
+            $object = $key === null ? null : $objects->object($key);
+
+            if ($key === null || $object === null || self::holdsARerun($object['results'])) {
+                continue;
+            }
+
+            foreach ($object['results'] as $testId => $result) {
+                $result['file'] = $file;
+                $result['key'] = $key;
+                $graph->setResult($branch, $testId, $result);
+                self::$remoteTestIds[$testId] = true;
+            }
+
+            $hit[] = $file;
+            Warnings::debug('remote: replayed ' . $file . ' from objects/*/' . $key . '.json');
+        }
+
+        return $hit === [] ? $runList : $runList->withoutFromSelection($hit);
+    }
+
+    /**
+     * A cached failure/error always re-runs (SPEC.md §6.2), so an object carrying one is no
+     * use here either.
+     *
+     * @param array<string, TestResultArray> $results
+     */
+    private static function holdsARerun(array $results): bool
+    {
+        $reader = self::$reader;
+
+        if ($reader === null) {
+            return false;
+        }
+
+        foreach ($results as $result) {
+            if ($reader->shouldRerun($result['status'])) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /** SPEC.md §6.1: `off` → Off, partial selection → ResultsOnly, no usable baseline → Record. */
@@ -737,6 +896,88 @@ final class ReplayState
         $graph->setDefaultBranch($defaultBranch);
 
         return $graph;
+    }
+
+    /**
+     * The remote cache for this in-process run (SPEC.md §9), mirrored from
+     * `Console\Runner\RunPipeline::openRemote()`: built from config and opened once with
+     * `begin()` (a git mirror fetch); `end()` happens once from {@see self::persistInProcess()}.
+     * A backend that cannot open only warns — a remote is an accelerator, never a
+     * dependency — and `remote => null`/`''` (the common case) never even builds one.
+     */
+    private static function openRemote(Config $config, string $stateDir, string $root): void
+    {
+        $remote = RemoteCacheFactory::fromConfig($config, $stateDir);
+
+        if ($remote->name() === 'null') {
+            return;
+        }
+
+        $remote->begin();
+        self::$remoteOpen = true;
+        self::$objects = new ObjectStore($remote, $stateDir, ProjectKey::for($root));
+
+        Warnings::debug('remote: ' . $remote->name() . ' opened (push: ' . $config->remotePush . ')');
+    }
+
+    /** `end()` exactly once, whatever this run settled on. */
+    private static function closeRemote(): void
+    {
+        if (! self::$remoteOpen) {
+            return;
+        }
+
+        self::$remoteOpen = false;
+        self::$objects?->remote()->end();
+    }
+
+    /**
+     * `ObjectStore::graphOf()` for the branch itself, then the configured baseline
+     * candidates (Config::baselineCandidates()) — the implicit `pull` a developer (or an
+     * ephemeral CI job) starting with nothing gets from `phpunit-replay run`
+     * (docs/INTERNALS.md "Pipeline changes"), mirrored here for in-process mode. The first
+     * candidate the remote actually has becomes this machine's local graph too, so the next
+     * run needs no remote at all. Null (record fresh) when there is no remote, or it holds
+     * none of the candidates.
+     */
+    private static function pullStartingGraph(Config $config, string $branch, string $defaultBranch, string $root, GraphStore $store): ?Graph
+    {
+        $objects = self::$objects;
+
+        if ($objects === null) {
+            return null;
+        }
+
+        $seen = [];
+
+        foreach ([$branch, ...$config->baselineCandidates($defaultBranch)] as $candidate) {
+            if ($candidate === '' || $candidate === 'HEAD' || isset($seen[$candidate])) {
+                continue;
+            }
+
+            $seen[$candidate] = true;
+            $graph = $objects->graphOf($candidate, $root);
+
+            if ($graph === null) {
+                continue;
+            }
+
+            // Every result this graph already carries came from the remote (this machine
+            // has never recorded anything): counted as replayed-remote the same way a
+            // by-key hit in self::replayAffectedFromRemote() is.
+            foreach ($graph->branches() as $recorded) {
+                foreach (array_keys($graph->ownResults($recorded)) as $testId) {
+                    self::$remoteTestIds[$testId] = true;
+                }
+            }
+
+            $store->save($graph);
+            Warnings::debug('remote: adopted the ' . $candidate . ' baseline as the local graph');
+
+            return $graph;
+        }
+
+        return null;
     }
 
     private static function freshGraph(string $root, Graph $previous): Graph

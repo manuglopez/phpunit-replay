@@ -121,6 +121,48 @@ final class RunList
     }
 
     /**
+     * A copy of this list with the given files dropped from {@see self::$selection} only
+     * (SPEC.md §9, docs/INTERNALS.md "Pipeline changes": a test file whose content key was
+     * found on the remote leaves the run list — its tests then decide from the merged-in
+     * cached result instead of re-running). Every other bucket is passed through unchanged:
+     * a file eligible for this in the first place is never one already held for another
+     * reason (unknown/rerun/quarantined/not-cacheable files are excluded from remote-replay
+     * eligibility by the caller).
+     *
+     * @param list<string> $files
+     */
+    public function withoutFromSelection(array $files): self
+    {
+        if ($files === []) {
+            return $this;
+        }
+
+        $drop = array_fill_keys($files, true);
+        $selection = new Selection($this->selection->sourcePhpChanged);
+
+        foreach ($this->selection->reasons() as $file => $reasons) {
+            if (isset($drop[$file])) {
+                continue;
+            }
+
+            foreach ($reasons as $reason) {
+                $selection->add($file, $reason);
+            }
+        }
+
+        return new self(
+            $selection,
+            $this->unknown,
+            $this->rerun,
+            $this->quarantined,
+            $this->rerunStatuses,
+            $this->quarantineReasons,
+            $this->notCacheable,
+            $this->notCacheableReasons,
+        );
+    }
+
+    /**
      * The single bucket an executed test file's tests are counted under for
      * Report\Summary (docs/INTERNALS.md "Summary counters", SPEC.md §11): the rule-chain
      * selection first (`'affected'`), then the synthetic unknown/rerun buckets

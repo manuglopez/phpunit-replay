@@ -54,9 +54,9 @@ final class FixtureProject
      * extend a base `App\Tests\TestCase` carrying the `Replayable` trait, with the
      * extension registered in its own phpunit.xml (SPEC.md §3.2).
      */
-    public static function inprocess(): self
+    public static function inprocess(?string $root = null): self
     {
-        return self::fromProject('inprocess');
+        return self::fromProject('inprocess', $root);
     }
 
     private static function fromProject(string $name, ?string $root = null): self
