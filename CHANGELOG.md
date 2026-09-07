@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.0] — 2026-09-07
+
+- Remote cache, content-addressed: filesystem (`file://`), HTTP (S3/MinIO presigned, WebDAV) and a dedicated git repository backend (`GitRemoteCache`: shallow mirror, append-only objects, reset+rewrite reconciliation, `prune --remote [--keep-months] [--squash]`).
+- `push [--graph]`, `pull`; replay by content key across machines (`N replayed (R from remote)`), also in in-process mode; `remote_push` policy (objects|all|off); CI never publishes a baseline without `--allow-ci-baseline`.
+- Nearest-baseline selection for git-flow: `baseline_branches`, fallback chain own → nearest → default.
+- Coverage with replay: `--coverage-php=FILE` records per-test-file snapshots (piggyback on PHPUnit's coverage) and merges them for replayed files; works with nothing executed.
+- Summary distinguishes `not cacheable` from `quarantined`; remote project key independent of the checkout directory name.
+- PHPUnit 11.5 compatibility verified (configuration reader, replay hook via reflection); package CI matrix PHP 8.2–8.4 × PHPUnit 11.5/12 × pcov/xdebug; example workflows (`tia-baseline`, two-lane `ci`, `tia-gc`).
+- Docs: README rewritten (problem-first, comparison, cross-language landscape), `docs/sharing-the-cache.md`.
+
 ## [0.1.0-beta1] — 2026-09-07 — phase 2
 
 - In-process mode: `Manuglopez\Replay\PHPUnit\Replayable` trait / `ReplayableTestCase`; replay as pass with the original assertion count (PHPUnit 12 `invokeTestMethod()` hook, PHPUnit 11.5 reflection fallback); `#[Depends]` providers and failures never replayed.
