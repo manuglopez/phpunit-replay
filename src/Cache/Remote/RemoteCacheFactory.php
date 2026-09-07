@@ -18,15 +18,11 @@ use Manuglopez\Replay\Console\Runner\Warnings;
  *   http(s)://host/prefix/                          → {@see HttpRemoteCache}
  *   anything else                                   → NullRemoteCache + a warning
  *
- * The git backend is resolved by name at runtime rather than referenced statically: it is
- * an independent unit and a build without it must still start with a warning instead of a
- * fatal error.
+ * The git backend ({@see GitRemoteCache}) ships in the same package, so it is referenced
+ * statically like every other backend.
  */
 final class RemoteCacheFactory
 {
-    /** @var string */
-    private const GIT_BACKEND = 'Manuglopez\\Replay\\Cache\\Remote\\GitRemoteCache';
-
     public static function fromConfig(Config $config, string $stateDir): RemoteCache
     {
         $remote = $config->remote === null ? '' : trim($config->remote);
@@ -36,7 +32,7 @@ final class RemoteCacheFactory
         }
 
         if (self::looksLikeGit($remote)) {
-            return self::git($config, $stateDir);
+            return GitRemoteCache::fromConfig($config, $stateDir);
         }
 
         $filesystem = FilesystemRemoteCache::fromRemote($remote);
@@ -77,22 +73,5 @@ final class RemoteCacheFactory
         }
 
         return str_ends_with(rtrim($remote, '/'), '.git');
-    }
-
-    private static function git(Config $config, string $stateDir): RemoteCache
-    {
-        $factory = [self::GIT_BACKEND, 'fromConfig'];
-
-        if (class_exists(self::GIT_BACKEND) && is_callable($factory)) {
-            $cache = $factory($config, $stateDir);
-
-            if ($cache instanceof RemoteCache) {
-                return $cache;
-            }
-        }
-
-        Warnings::warn('git remote backend not available');
-
-        return new NullRemoteCache();
     }
 }

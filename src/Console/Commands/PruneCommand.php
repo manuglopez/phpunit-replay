@@ -8,7 +8,8 @@ use DateTimeImmutable;
 use FilesystemIterator;
 use Manuglopez\Replay\Cache\GraphStore;
 use Manuglopez\Replay\Cache\Remote\GitRemoteCache;
-use Manuglopez\Replay\Cache\Remote\RemoteCache;
+use Manuglopez\Replay\Cache\Remote\NullRemoteCache;
+use Manuglopez\Replay\Cache\Remote\RemoteCacheFactory;
 use Manuglopez\Replay\Cache\StateDirectory;
 use Manuglopez\Replay\Change\Git;
 use Manuglopez\Replay\Config;
@@ -21,7 +22,6 @@ use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Output\OutputInterface;
-use Throwable;
 
 /**
  * `phpunit-replay prune` (SPEC.md §11): drops stale state without touching a live pass.
@@ -139,17 +139,17 @@ final class PruneCommand extends Command
     {
         $url = $config->remote;
 
-        if ($url === null || $url === '') {
+        if ($url === null || trim($url) === '') {
             $output->writeln('prune --remote: no remote configured');
 
             return Command::SUCCESS;
         }
 
-        $cache = self::isGitRemote($url)
-            ? GitRemoteCache::fromConfig($config, $stateDir)
-            : self::buildFilesystemBackend($config, $stateDir, $output);
+        $cache = RemoteCacheFactory::fromConfig($config, $stateDir);
 
-        if ($cache === null) {
+        if ($cache instanceof NullRemoteCache) {
+            $output->writeln('prune --remote: unsupported or unavailable remote backend');
+
             return Command::SUCCESS;
         }
 
@@ -226,40 +226,6 @@ final class PruneCommand extends Command
         }
 
         return Command::SUCCESS;
-    }
-
-    private static function isGitRemote(string $url): bool
-    {
-        if (str_starts_with($url, 'git+') || str_starts_with($url, 'ssh://')) {
-            return true;
-        }
-
-        if (str_ends_with($url, '.git')) {
-            return true;
-        }
-
-        return preg_match('#^[\w.\-]+@[\w.\-]+:#', $url) === 1;
-    }
-
-    private static function buildFilesystemBackend(Config $config, string $stateDir, OutputInterface $output): ?RemoteCache
-    {
-        $class = '\\Manuglopez\\Replay\\Cache\\Remote\\FilesystemRemoteCache';
-
-        if (! class_exists($class)) {
-            $output->writeln('prune --remote needs the git or file backend');
-
-            return null;
-        }
-
-        try {
-            $cache = $class::fromConfig($config, $stateDir);
-        } catch (Throwable) {
-            $output->writeln('prune --remote needs the git or file backend');
-
-            return null;
-        }
-
-        return $cache instanceof RemoteCache ? $cache : null;
     }
 
     /**

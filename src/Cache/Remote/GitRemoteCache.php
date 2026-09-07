@@ -11,7 +11,6 @@ use Manuglopez\Replay\Support\AtomicFile;
 use Manuglopez\Replay\Support\Paths;
 use RecursiveDirectoryIterator;
 use RecursiveIteratorIterator;
-use ReflectionProperty;
 use SplFileInfo;
 
 /**
@@ -54,9 +53,8 @@ final class GitRemoteCache implements RemoteCache
 
     /**
      * Builds an instance from the package Config: `$config->remote` is the URL, the mirror
-     * lives at `<stateDir>/remote/git`. `remoteBranch` / `remoteRefreshSeconds` / `remoteTimeout`
-     * are read defensively (Config does not declare them today) so this keeps working unchanged
-     * if a later Config gains those knobs.
+     * lives at `<stateDir>/remote/git`, and `remoteBranch` / `remoteRefreshSeconds` /
+     * `remoteTimeout` are read straight off the Config object.
      */
     public static function fromConfig(Config $config, string $stateDir): self
     {
@@ -65,9 +63,9 @@ final class GitRemoteCache implements RemoteCache
         return new self(
             $config->remote ?? '',
             $mirrorDir,
-            self::optionalStringProperty($config, 'remoteBranch', 'main'),
-            self::optionalIntProperty($config, 'remoteRefreshSeconds', 300),
-            self::optionalIntProperty($config, 'remoteTimeout', 60),
+            $config->remoteBranch,
+            $config->remoteRefreshSeconds,
+            $config->remoteTimeout,
         );
     }
 
@@ -589,28 +587,6 @@ final class GitRemoteCache implements RemoteCache
     private static function resolveUrl(string $url): string
     {
         return str_starts_with($url, 'git+') ? substr($url, 4) : $url;
-    }
-
-    private static function optionalStringProperty(Config $config, string $name, string $default): string
-    {
-        if (! property_exists($config, $name)) {
-            return $default;
-        }
-
-        $value = (new ReflectionProperty($config, $name))->getValue($config);
-
-        return is_string($value) && $value !== '' ? $value : $default;
-    }
-
-    private static function optionalIntProperty(Config $config, string $name, int $default): int
-    {
-        if (! property_exists($config, $name)) {
-            return $default;
-        }
-
-        $value = (new ReflectionProperty($config, $name))->getValue($config);
-
-        return is_int($value) ? $value : $default;
     }
 
     /**
