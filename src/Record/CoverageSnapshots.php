@@ -32,6 +32,18 @@ use Throwable;
  * installed `phpunit/php-code-coverage` — paired with PHPUnit ^12, not Pest's PHPUnit ^13 —
  * does not have: {@see ProcessedCodeCoverageData::lineCoverage()} here already returns the
  * test id strings directly per line, so no `testIds()` lookup exists or is needed).
+ *
+ * Version tolerance (this package supports PHPUnit ^11.5 || ^12.0, i.e. php-code-coverage 11
+ * or 12): `ProcessedCodeCoverageData::lineCoverage()` carries a precise
+ * `array<string, array<int, list<string>|null>>` return type ONLY on the version paired with
+ * PHPUnit 12 — on the version paired with 11.5 the method has no generic return annotation at
+ * all, so its actual shape is validated at runtime ({@see self::buildSnapshot()}) rather than
+ * declared. `CodeCoverage::getTests()`'s `TestType` (imported below) differs too — the 11.5
+ * pairing's lacks a `time` key — but since entries are never destructured, only forwarded
+ * key-filtered back to `setTests()`, importing the alias directly from `CodeCoverage` keeps
+ * both sides of that round trip resolved against whichever shape is actually installed.
+ *
+ * @phpstan-import-type TestType from CodeCoverage
  */
 final class CoverageSnapshots
 {
@@ -120,8 +132,16 @@ final class CoverageSnapshots
      * only included in the snapshot when at least one of its lines was actually hit by one
      * of `$testIds` — a file this test file merely autoloaded contributes nothing.
      *
-     * @param array<string, array<int, null|list<string>>> $lineCoverage
-     * @param array<string, array{size: string, status: string, time: float}> $tests
+     * `$lineCoverage` is typed loosely and validated at runtime rather than trusted to
+     * match `array<string, array<int, list<string>|null>>` (see the class docblock): on the
+     * php-code-coverage version paired with PHPUnit 11.5 it is genuinely just `array` as far
+     * as static analysis can tell. `$restricted` is always rebuilt from scratch to exactly
+     * that shape regardless, which is what actually reaches `setLineCoverage()`.
+     *
+     * @param array<mixed> $lineCoverage raw `ProcessedCodeCoverageData::lineCoverage()`
+     * @param array<string, TestType> $tests raw `CodeCoverage::getTests()`, forwarded to
+     *        `setTests()` untouched (key-filtered only) — never destructured, so the `time`
+     *        key difference between php-code-coverage versions never matters here
      * @param list<string> $testIds
      */
     private function buildSnapshot(array $lineCoverage, array $tests, array $testIds): ?CodeCoverage
@@ -130,17 +150,36 @@ final class CoverageSnapshots
         $restricted = [];
 
         foreach ($lineCoverage as $file => $lines) {
+            if (! is_string($file) || $file === '' || ! is_array($lines)) {
+                continue;
+            }
+
             $filtered = [];
             $fileHasHit = false;
 
             foreach ($lines as $line => $ids) {
+                if (! is_int($line)) {
+                    continue;
+                }
+
                 if ($ids === null) {
                     $filtered[$line] = null;
 
                     continue;
                 }
 
-                $kept = array_values(array_filter($ids, static fn (string $id): bool => isset($wanted[$id])));
+                if (! is_array($ids)) {
+                    continue;
+                }
+
+                $kept = [];
+
+                foreach ($ids as $id) {
+                    if (is_string($id) && isset($wanted[$id])) {
+                        $kept[] = $id;
+                    }
+                }
+
                 $filtered[$line] = $kept;
 
                 if ($kept !== []) {

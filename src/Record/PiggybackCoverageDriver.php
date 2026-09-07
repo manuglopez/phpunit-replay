@@ -96,6 +96,12 @@ final class PiggybackCoverageDriver implements CoverageDriver
     }
 
     /**
+     * `ProcessedCodeCoverageData::lineCoverage()` is typed loosely and validated at runtime
+     * rather than trusted to match `array<string, array<int, list<string>|null>>`: on the
+     * php-code-coverage version paired with PHPUnit 11.5 the method carries no generic
+     * return annotation at all, so its actual shape cannot be relied upon statically (see
+     * the equivalent note on {@see \Manuglopez\Replay\Record\CoverageSnapshots}).
+     *
      * @param list<string> $testIds
      * @return array<string, array<int, int>>
      */
@@ -105,19 +111,19 @@ final class PiggybackCoverageDriver implements CoverageDriver
         $out = [];
 
         foreach ($coverage->getData(true)->lineCoverage() as $file => $lines) {
-            if (! $this->scope->contains($file)) {
+            if (! is_string($file) || ! is_array($lines) || ! $this->scope->contains($file)) {
                 continue;
             }
 
             $hits = [];
 
             foreach ($lines as $line => $ids) {
-                if ($ids === null) {
+                if (! is_int($line) || ! is_array($ids)) {
                     continue;
                 }
 
                 foreach ($ids as $id) {
-                    if (isset($wanted[$id])) {
+                    if (is_string($id) && isset($wanted[$id])) {
                         $hits[$line] = 1;
 
                         break;
