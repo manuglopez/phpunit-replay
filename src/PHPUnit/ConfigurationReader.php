@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace Manuglopez\Replay\PHPUnit;
 
-use Error;
 use PHPUnit\TextUI\CliArguments\Builder as CliArgumentsBuilder;
 use PHPUnit\TextUI\Configuration\Configuration;
 use PHPUnit\TextUI\Configuration\Merger;
@@ -122,36 +121,32 @@ final readonly class ConfigurationReader
     }
 
     /**
-     * PHPUnit 12 exposes `includeTestSuites(): list<string>`; PHPUnit 11.5 only has the
-     * deprecated, comma-joined `includeTestSuite(): string`. A `method_exists()` guard
-     * would have PHPStan flag it as "always true" against whichever single version is
-     * actually installed, so the version gap is instead bridged with a try/catch around
-     * the call to the newer method — behaviourally identical to `method_exists()` (PHP
-     * raises `Error: Call to undefined method` for a genuinely missing method) but not
-     * something PHPStan can narrow away at analysis time.
+     * PHPUnit 12 exposes plural, list-returning `includeTestSuites()` / `excludeTestSuites()`;
+     * PHPUnit 11.5 only has the single, comma-joined `includeTestSuite()` / `excludeTestSuite()`
+     * (in 12 these are kept as deprecated aliases and the plural methods are themselves
+     * implemented as `$value === '' ? [] : explode(',', $value)` over the very same string —
+     * see `PHPUnit\TextUI\Configuration\Configuration::includeTestSuites()`). Reading only the
+     * singular getters and doing that split ourselves therefore reproduces PHPUnit 12's own
+     * behaviour exactly, on both versions, without ever calling a method absent from 11.5 —
+     * so there is nothing here for PHPStan to narrow to "always true/false" against either
+     * installed version, unlike a `method_exists()` guard on the plural name would be.
      *
      * @return list<string>
      */
     private function includeTestSuites(): array
     {
-        try {
-            return $this->configuration->includeTestSuites();
-        } catch (Error) {
-            $single = $this->configuration->includeTestSuite();
-
-            return $single === '' ? [] : [$single];
-        }
+        return self::splitTestSuiteNames($this->configuration->includeTestSuite());
     }
 
     /** @return list<string> */
     private function excludeTestSuites(): array
     {
-        try {
-            return $this->configuration->excludeTestSuites();
-        } catch (Error) {
-            $single = $this->configuration->excludeTestSuite();
+        return self::splitTestSuiteNames($this->configuration->excludeTestSuite());
+    }
 
-            return $single === '' ? [] : [$single];
-        }
+    /** @return list<string> */
+    private static function splitTestSuiteNames(string $value): array
+    {
+        return $value === '' ? [] : explode(',', $value);
     }
 }

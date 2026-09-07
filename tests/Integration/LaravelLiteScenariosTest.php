@@ -43,7 +43,13 @@ final class LaravelLiteScenariosTest extends TestCase
 
     protected function tearDown(): void
     {
-        $this->fixture->destroy();
+        // setUp() may have marked the test skipped (fixture vendor missing) before ever
+        // assigning $this->fixture; the typed property is then uninitialized rather than
+        // null, so isset() (safe on an uninitialized typed property, unlike a direct read)
+        // is the guard.
+        if (isset($this->fixture)) {
+            $this->fixture->destroy();
+        }
 
         parent::tearDown();
     }
