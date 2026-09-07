@@ -4,7 +4,7 @@ Run only the tests your change could possibly affect. Replay everything else as 
 
 [Packagist](https://packagist.org/packages/manuglopez/phpunit-replay) · [CI](https://github.com/manuglopez/phpunit-replay/actions)
 
-Composer package `manuglopez/phpunit-replay`, namespace `Manuglopez\Replay`. Plain PHPUnit 11.5+/12, no dependency on Pest.
+Composer package `manuglopez/phpunit-replay`, namespace `Manuglopez\Replay`. Plain PHPUnit 11.5+, 12, or 13, no dependency on Pest.
 
 ## The problem
 
@@ -88,8 +88,8 @@ Requirements:
 
 | | |
 |---|---|
-| PHP | ^8.2 |
-| PHPUnit | ^11.5 or ^12 |
+| PHP | ^8.2 (PHPUnit 12 itself needs PHP >=8.3, PHPUnit 13 needs PHP >=8.4.1) |
+| PHPUnit | ^11.5, ^12, or ^13 |
 | Git | a repository with at least one commit — baselines and diffs are computed against git history |
 | Coverage driver | `ext-pcov` **or** Xdebug with `xdebug.mode=coverage`, to record the dependency graph |
 | `phpunit.xml`/`phpunit.xml.dist` | any valid PHPUnit configuration |
@@ -199,7 +199,7 @@ and register the extension in `phpunit.xml`:
 
 `setUp()` **always runs**, for every test, replayed or not — only the code guarded behind
 `isReplaying()` (and only if you call it *after* `parent::setUp()`) is skipped; the trait hooks
-the test method itself, never `setUp()`. On **PHPUnit 12** it overrides the
+the test method itself, never `setUp()`. On **PHPUnit 12 and 13** it overrides the
 `invokeTestMethod()` hook cleanly; on **PHPUnit 11.5**, which has no such hook, a `#[Before]`
 method swaps the test's private method name through reflection instead (see
 `docs/spikes/in-process-replay.md` for the two mechanisms verified side by side).
@@ -259,7 +259,7 @@ Environment variables — always win over `phpunit-replay.php`:
 | `PHPUNIT_REPLAY_DEFAULT_BRANCH` | Overrides `default_branch`. |
 | `PHPUNIT_REPLAY_MODE` | Overrides the extension `mode` (also accepts the internal `record-subset`/`results-only` values the wrapper itself uses). |
 | `PHPUNIT_REPLAY_KEEP_RUN=1` | Keeps the generated `.phpunit-replay.xml` and the run's partial directory for inspection. |
-| `PHPUNIT_REPLAY_LEGACY_HOOK=1` | Forces in-process mode's PHPUnit 11.5 reflection fallback even on PHPUnit 12. |
+| `PHPUNIT_REPLAY_LEGACY_HOOK=1` | Forces in-process mode's PHPUnit 11.5 reflection fallback even on PHPUnit 12 or 13. |
 | `CI` | Detected automatically; gates whether a `run` may publish a branch baseline (see `--allow-ci-baseline`). |
 
 A few more `PHPUNIT_REPLAY_*` variables exist purely for internal wrapper-to-extension
@@ -505,7 +505,7 @@ Being specific about what each tool actually does, rather than what it aims to d
 
 | | [Pest 5 TIA](https://github.com/pestphp/pest) | [jasonmccreary/phpunit-tia](https://github.com/jasonmccreary/phpunit-tia) | [gosuperscript/phpunit-tia](https://github.com/gosuperscript/phpunit-tia) | phpunit-replay |
 |---|---|---|---|---|
-| Runner | Pest only (aborts on plain PHPUnit test classes) | PHPUnit | PHPUnit | PHPUnit 11.5+ and 12, no Pest |
+| Runner | Pest only (aborts on plain PHPUnit test classes) | PHPUnit | PHPUnit | PHPUnit 11.5+, 12, and 13, no Pest |
 | Unaffected tests | Synthetic pass, real assertion count | **Skipped** | **Skipped** | Filtered mode: never loaded at all. In-process mode: synthetic pass with the real assertion count |
 | Complete summary/JUnit | Yes | No — skipped tests lose their assertion count | No | Yes — cached results merge into the summary and, on request, into JUnit |
 | Cosmetic-only changes ignored | Yes (tokenizer) | Partial | Partial | Yes (tokenizer-based content hash) |

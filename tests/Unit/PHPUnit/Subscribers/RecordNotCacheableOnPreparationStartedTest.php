@@ -7,6 +7,7 @@ namespace Manuglopez\Replay\Tests\Unit\PHPUnit\Subscribers;
 use Manuglopez\Replay\Attributes\NotCacheable;
 use Manuglopez\Replay\PHPUnit\Subscribers\RecordNotCacheableOnPreparationStarted;
 use Manuglopez\Replay\Record\NotCacheableCollector;
+use Manuglopez\Replay\Tests\Support\TelemetryFixture;
 use Manuglopez\Replay\Tests\Support\TempDir;
 use PHPUnit\Event\Code\TestDox;
 use PHPUnit\Event\Code\TestMethod;
@@ -41,20 +42,7 @@ final class RecordNotCacheableOnPreparationStartedTest extends TestCase
 
     private function telemetryInfo(): Telemetry\Info
     {
-        $snapshot = new Telemetry\Snapshot(
-            Telemetry\HRTime::fromSecondsAndNanoseconds(0, 0),
-            Telemetry\MemoryUsage::fromBytes(0),
-            Telemetry\MemoryUsage::fromBytes(0),
-            new Telemetry\GarbageCollectorStatus(0, 0, 0, 0, 0.0, 0.0, 0.0, 0.0, false, false, false, 0),
-        );
-
-        return new Telemetry\Info(
-            $snapshot,
-            Telemetry\Duration::fromSecondsAndNanoseconds(0, 0),
-            Telemetry\MemoryUsage::fromBytes(0),
-            Telemetry\Duration::fromSecondsAndNanoseconds(0, 0),
-            Telemetry\MemoryUsage::fromBytes(0),
-        );
+        return TelemetryFixture::info();
     }
 
     private function testMethod(string $class, string $method, string $file): TestMethod

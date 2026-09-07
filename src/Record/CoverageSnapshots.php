@@ -5,18 +5,16 @@ declare(strict_types=1);
 namespace Manuglopez\Replay\Record;
 
 use Manuglopez\Replay\Cache\ContentHash;
+use Manuglopez\Replay\Coverage\LineHits;
+use Manuglopez\Replay\Coverage\Snapshot;
 use Manuglopez\Replay\Support\AtomicFile;
 use Manuglopez\Replay\Support\Paths;
 use SebastianBergmann\CodeCoverage\CodeCoverage;
-use SebastianBergmann\CodeCoverage\Data\ProcessedCodeCoverageData;
-use SebastianBergmann\CodeCoverage\Driver\Selector;
-use SebastianBergmann\CodeCoverage\Filter;
-use Throwable;
 
 /**
  * SPEC.md §3.2 last paragraph, docs/INTERNALS.md "CoverageMerger": at record time, when the
  * user asked PHPUnit for `--coverage-php`, every test file's own slice of PHPUnit's coverage
- * data is serialized independently and written to `<stateDir>/coverage/<k>.cov` — `k` being
+ * data is written to `<stateDir>/coverage/<k>.cov` — `k` being
  * {@see \Manuglopez\Replay\Cache\ContentHash::of()} of the test file itself, computable from
  * disk alone (unlike `Cache\ContentKey`, which additionally needs a `Graph` for the file's
  * dependencies — not available inside the PHPUnit child process in filtered/wrapper mode).
@@ -27,23 +25,14 @@ use Throwable;
  * The accessor for "what did PHPUnit's own coverage collect, per test" is the same one
  * `Pest\Plugins\Tia\CoverageCollector` uses (© Nuno Maduro, MIT,
  * @see https://github.com/pestphp/pest/blob/17d709e/src/Plugins/Tia/CoverageCollector.php):
- * `PHPUnit\Runner\CodeCoverage::instance()->codeCoverage()->getData()`. Pest's version reads
- * hit test ids through a `lineCoverage()`/`testIds()` index pair (an index-based scheme this
- * installed `phpunit/php-code-coverage` — paired with PHPUnit ^12, not Pest's PHPUnit ^13 —
- * does not have: {@see ProcessedCodeCoverageData::lineCoverage()} here already returns the
- * test id strings directly per line, so no `testIds()` lookup exists or is needed).
+ * `PHPUnit\Runner\CodeCoverage::instance()->codeCoverage()->getData()`.
  *
- * Version tolerance (this package supports PHPUnit ^11.5 || ^12.0, i.e. php-code-coverage 11
- * or 12): `ProcessedCodeCoverageData::lineCoverage()` carries a precise
- * `array<string, array<int, list<string>|null>>` return type ONLY on the version paired with
- * PHPUnit 12 — on the version paired with 11.5 the method has no generic return annotation at
- * all, so its actual shape is validated at runtime ({@see self::buildSnapshot()}) rather than
- * declared. `CodeCoverage::getTests()`'s `TestType` (imported below) differs too — the 11.5
- * pairing's lacks a `time` key — but since entries are never destructured, only forwarded
- * key-filtered back to `setTests()`, importing the alias directly from `CodeCoverage` keeps
- * both sides of that round trip resolved against whichever shape is actually installed.
- *
- * @phpstan-import-type TestType from CodeCoverage
+ * Version tolerance: what that accessor RETURNS is not the same across the php-code-coverage
+ * majors this package supports (11, 12, 13, 14), and neither is the on-disk form a snapshot
+ * can safely take. Neither concern is handled here — {@see LineHits} normalises the per-line
+ * hit maps (11-14.2 store the test ids inline, 14.3 interns them behind an index table), and
+ * {@see Snapshot} owns the file shape, which is deliberately no longer a serialized
+ * php-code-coverage object. Both are documented on those classes.
  */
 final class CoverageSnapshots
 {
@@ -68,25 +57,23 @@ final class CoverageSnapshots
             return [];
         }
 
-        $lineCoverage = $coverage->getData(true)->lineCoverage();
+        $data = $coverage->getData(true);
+        $lineCoverage = $data->lineCoverage();
+        $testIds = LineHits::testIds($data);
         $tests = $coverage->getTests();
 
         $out = [];
 
-        foreach ($byFile as $fileAbsolute => $testIds) {
+        foreach ($byFile as $fileAbsolute => $wantedIds) {
             $key = ContentHash::of($fileAbsolute);
 
             if ($key === null) {
                 continue;
             }
 
-            $snapshot = $this->buildSnapshot($lineCoverage, $tests, $testIds);
+            $encoded = Snapshot::restrict($lineCoverage, $testIds, $tests, $wantedIds)?->encode();
 
-            if ($snapshot === null) {
-                continue;
-            }
-
-            if (! AtomicFile::write($this->path($key), serialize($snapshot))) {
+            if ($encoded === null || ! AtomicFile::write($this->path($key), $encoded)) {
                 continue;
             }
 
@@ -123,94 +110,5 @@ final class CoverageSnapshots
         }
 
         return $out;
-    }
-
-    /**
-     * Restricts `$lineCoverage` to the lines whose hit test ids intersect `$testIds`,
-     * preserving the null ("not executable") marker of every other line untouched so a
-     * later merge still tells dead code apart from code nobody happened to hit. A file is
-     * only included in the snapshot when at least one of its lines was actually hit by one
-     * of `$testIds` — a file this test file merely autoloaded contributes nothing.
-     *
-     * `$lineCoverage` is typed loosely and validated at runtime rather than trusted to
-     * match `array<string, array<int, list<string>|null>>` (see the class docblock): on the
-     * php-code-coverage version paired with PHPUnit 11.5 it is genuinely just `array` as far
-     * as static analysis can tell. `$restricted` is always rebuilt from scratch to exactly
-     * that shape regardless, which is what actually reaches `setLineCoverage()`.
-     *
-     * @param array<mixed> $lineCoverage raw `ProcessedCodeCoverageData::lineCoverage()`
-     * @param array<string, TestType> $tests raw `CodeCoverage::getTests()`, forwarded to
-     *        `setTests()` untouched (key-filtered only) — never destructured, so the `time`
-     *        key difference between php-code-coverage versions never matters here
-     * @param list<string> $testIds
-     */
-    private function buildSnapshot(array $lineCoverage, array $tests, array $testIds): ?CodeCoverage
-    {
-        $wanted = array_fill_keys($testIds, true);
-        $restricted = [];
-
-        foreach ($lineCoverage as $file => $lines) {
-            if (! is_string($file) || $file === '' || ! is_array($lines)) {
-                continue;
-            }
-
-            $filtered = [];
-            $fileHasHit = false;
-
-            foreach ($lines as $line => $ids) {
-                if (! is_int($line)) {
-                    continue;
-                }
-
-                if ($ids === null) {
-                    $filtered[$line] = null;
-
-                    continue;
-                }
-
-                if (! is_array($ids)) {
-                    continue;
-                }
-
-                $kept = [];
-
-                foreach ($ids as $id) {
-                    if (is_string($id) && isset($wanted[$id])) {
-                        $kept[] = $id;
-                    }
-                }
-
-                $filtered[$line] = $kept;
-
-                if ($kept !== []) {
-                    $fileHasHit = true;
-                }
-            }
-
-            if ($fileHasHit) {
-                $restricted[$file] = $filtered;
-            }
-        }
-
-        if ($restricted === []) {
-            return null;
-        }
-
-        $filter = new Filter();
-        $filter->includeFiles(array_keys($restricted));
-
-        try {
-            $driver = (new Selector())->forLineCoverage($filter);
-        } catch (Throwable) {
-            return null;
-        }
-
-        $snapshot = new CodeCoverage($driver, $filter);
-        $data = new ProcessedCodeCoverageData();
-        $data->setLineCoverage($restricted);
-        $snapshot->setData($data);
-        $snapshot->setTests(array_intersect_key($tests, $wanted));
-
-        return $snapshot;
     }
 }

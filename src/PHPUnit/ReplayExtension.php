@@ -25,6 +25,7 @@ use Manuglopez\Replay\PHPUnit\Subscribers\RecordPassed;
 use Manuglopez\Replay\PHPUnit\Subscribers\RecordPhpDeprecationTriggered;
 use Manuglopez\Replay\PHPUnit\Subscribers\RecordPhpNoticeTriggered;
 use Manuglopez\Replay\PHPUnit\Subscribers\RecordPhpWarningTriggered;
+use Manuglopez\Replay\PHPUnit\Subscribers\RecordRepeatOrRetryNotCacheableOnPreparationStarted;
 use Manuglopez\Replay\PHPUnit\Subscribers\RecordSkipped;
 use Manuglopez\Replay\PHPUnit\Subscribers\RecordWarningTriggered;
 use Manuglopez\Replay\PHPUnit\Subscribers\StartRecordingOnPreparationStarted;
@@ -142,6 +143,18 @@ final class ReplayExtension implements Extension
             return;
         }
 
+        // No wrapper in front of this process (the extension is registered directly in the
+        // user's own phpunit.xml), so this is the only place that ever sees --repeat/--retry
+        // for this entry point: RunPipeline's own check (ConfigurationReader::
+        // repeatOrRetryRequested()) never runs. Same hazard, same fix: skip registering any
+        // subscriber, which leaves this run exactly as if the extension were not there at
+        // all (no replay, no recording), same as PHPUNIT_REPLAY=0.
+        if ((new ConfigurationReader($configuration))->repeatOrRetryRequested()) {
+            Warnings::warn('--repeat/--retry requested: the test id it changes results on is not stable across runs, running without replay or recording');
+
+            return;
+        }
+
         $mode = ReplayState::bootInProcess($config, $configuration);
 
         if ($mode === Mode::Off) {
@@ -180,6 +193,7 @@ final class ReplayExtension implements Extension
         $facade->registerSubscribers(
             new CollectResultOnPreparationStarted($collector),
             new RecordNotCacheableOnPreparationStarted(ReplayState::notCacheableCollector(), ReplayState::root()),
+            new RecordRepeatOrRetryNotCacheableOnPreparationStarted(ReplayState::notCacheableCollector()),
             new RecordPassed($collector),
             new RecordFailed($collector),
             new RecordErrored($collector),

@@ -1,9 +1,29 @@
 # CI for this package (manuglopez/phpunit-replay) itself.
 #
-# Matrix: PHP 8.2/8.3/8.4 x PHPUnit ^11.5/^12.0 x coverage driver pcov/xdebug.
+# Two jobs cover two different axes of the compatibility surface:
+#
+# `test` — PHP 8.2/8.3/8.4 x PHPUnit ^11.5/^12.0/^13.0 x coverage driver pcov/xdebug.
 # phpunit/phpunit ^12.0 requires PHP >=8.3 (see vendor/phpunit/phpunit/composer.json
-# `require.php`), so the PHP 8.2 x PHPUnit ^12.0 cell is excluded for both drivers —
-# it can never resolve. That leaves 10 of the 12 possible cells.
+# `require.php`), so PHP 8.2 x PHPUnit ^12.0 is excluded for both drivers. phpunit/phpunit
+# ^13.0 requires PHP >=8.4.1, so PHP 8.2 x ^13.0 and PHP 8.3 x ^13.0 are excluded too. That
+# leaves PHP 8.2 x 11.5, PHP 8.3 x {11.5, 12.0}, PHP 8.4 x {11.5, 12.0, 13.0} = 6 PHP/PHPUnit
+# combinations, times 2 coverage drivers = 12 cells.
+#
+# `coverage-format` — a PHPUnit-version axis alone never reaches three of the four
+# php-code-coverage 14 file formats: plain `composer require phpunit/phpunit:^13.0` resolves
+# to 13.3.2 + php-code-coverage 14.3.2 (format "3"), so cc 14.0/14.1 (which stamp their own
+# exact version instead of a format number, and refuse any other) and cc 14.2 (format "1")
+# would go completely untested even though CoverageFormat/CoverageArchive have to keep reading
+# and writing all four correctly (see docs/INTERNALS.md — CoverageFormat). This job holds
+# PHPUnit at 13.1.14 (old enough to accept any cc 14.x on its own composer.json) and forces
+# `composer update --with phpunit/php-code-coverage:<minor>.*` for 14.0, 14.1 and 14.2 in
+# turn, WITHOUT touching this package's own `^11.5 || ^12.0 || ^13.0` composer.json
+# constraint — the same manual check already used to verify the fix, now run on every build.
+# One coverage driver (pcov) is enough here: which driver is active only changes behaviour on
+# cc 14.3 (hit counts vs. an inline test-id list), and that combination is already exercised
+# by the `test` job's PHP 8.4 x PHPUnit ^13.0 cells. 3 more cells.
+#
+# 12 + 3 = 15 cells total.
 name: CI
 
 on:
@@ -27,12 +47,17 @@ jobs:
       fail-fast: false
       matrix:
         php: ['8.2', '8.3', '8.4']
-        phpunit: ['^11.5', '^12.0']
+        phpunit: ['^11.5', '^12.0', '^13.0']
         coverage: [pcov, xdebug]
         exclude:
           # phpunit/phpunit ^12.0 requires PHP >=8.3 — cannot resolve on 8.2 with either driver.
           - php: '8.2'
             phpunit: '^12.0'
+          # phpunit/phpunit ^13.0 requires PHP >=8.4.1 — cannot resolve on 8.2 or 8.3.
+          - php: '8.2'
+            phpunit: '^13.0'
+          - php: '8.3'
+            phpunit: '^13.0'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -77,3 +102,47 @@ jobs:
       - name: Run test suite (xdebug)
         if: matrix.coverage == 'xdebug'
         run: vendor/bin/phpunit
+
+  coverage-format:
+    name: "php-code-coverage ${{ matrix.php-code-coverage }} (PHPUnit 13.1.14)"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        php-code-coverage: ['14.0.*', '14.1.*', '14.2.*']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup PHP 8.4 (pcov)
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          coverage: pcov
+          tools: composer:v2
+
+      - name: Require PHPUnit 13.1.14 for this cell
+        run: composer require --dev --no-update phpunit/phpunit:13.1.14
+
+      # `--with` overrides php-code-coverage's own resolved version for this update only;
+      # composer.json's `^11.5 || ^12.0 || ^13.0` constraint on phpunit/phpunit is untouched.
+      - name: Install dependencies pinned to php-code-coverage ${{ matrix.php-code-coverage }}
+        run: composer update --with phpunit/php-code-coverage:"${{ matrix.php-code-coverage }}" --prefer-stable --prefer-dist --no-interaction
+
+      - name: Validate composer.json
+        run: composer validate --strict
+
+      - name: Static analysis
+        run: composer stan
+
+      - name: Lint
+        run: composer lint
+
+      - name: Install Laravel fixture dependencies
+        working-directory: tests/Fixtures/Projects/laravel-lite
+        run: composer install --no-interaction --prefer-dist
+
+      - name: Run test suite (pcov)
+        run: php -d pcov.enabled=1 -d pcov.directory=$PWD vendor/bin/phpunit
