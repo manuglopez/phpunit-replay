@@ -43,7 +43,12 @@ final class LaravelLiteScenariosTest extends TestCase
 
     protected function tearDown(): void
     {
-        $this->fixture->destroy();
+        // setUp() marks the test skipped (and returns) before assigning $this->fixture when
+        // the laravel-lite fixture's vendor/ was never installed: the typed property is then
+        // never initialised, and accessing it here would turn that skip into an error.
+        if (isset($this->fixture)) {
+            $this->fixture->destroy();
+        }
 
         parent::tearDown();
     }
