@@ -1,123 +1,173 @@
 # phpunit-replay
 
-Composer package: `manuglopez/phpunit-replay`.
+Run only the tests your change could possibly affect. Replay everything else as a real pass — with its real assertion count — instead of skipping it.
 
-`phpunit-replay` is a Test Impact Analysis and result-replay tool for plain PHPUnit (11.5+ and
-12), with no dependency on Pest. It records, per test file, which source files were exercised
-while that file's tests ran — using pcov or Xdebug as a raw coverage driver — together with each
-test's own result (status, assertion count, message, duration). On a later run it compares the
-working tree against a stored baseline (a git commit plus normalized content hashes) to work out
-which test files are affected by what changed, executes only those, and replays the rest as
-passes carrying their real, previously recorded assertion counts. Reported test and assertion
-totals stay accurate even though most of the suite did not actually run.
+[Packagist](https://packagist.org/packages/manuglopez/phpunit-replay) · [CI](https://github.com/manuglopez/phpunit-replay/actions)
 
-## Status
+Composer package `manuglopez/phpunit-replay`, namespace `Manuglopez\Replay`. Plain PHPUnit 11.5+/12, no dependency on Pest.
 
-This is v0.1. Phase 1 (filtered mode) and phase 2 (fidelity and ergonomics) are both done — this
-is what exists today:
+## The problem
 
-- **Phase 1**: filtered mode, and the `run`, `record`, `status`, and `baseline-path` commands.
-- **Phase 2**: the in-process replay trait (`Replayable`/`ReplayableTestCase`), the `explain` and
-  `prune` commands, `verify` and its divergence metric, hermeticity (`#[NotCacheable]`,
-  `never_cache` globs, automatic quarantine), the Laravel integration (table/Blade tracking,
-  migration/sibling/Blade-aware selection), and Paratest support.
+A PHPUnit suite grows with the codebase, but most of it is irrelevant to any single change. If a
+project has 3,000 tests and you edit one method in one class, the overwhelming majority of those
+tests import code that never calls, is never called by, and shares no runtime path with what you
+touched — nothing you did can change their outcome. Yet the default is to run all 3,000 of them,
+every time, on every commit, in every PR. That costs CI minutes that scale with test count instead
+of change size, and it costs developers a feedback loop measured in minutes when it could be
+measured in seconds.
 
-Still planned, **phase 3**: the remote cache (filesystem, HTTP, or a dedicated git repository),
-`push`/`pull`, replaying by content key across machines, `baseline_branches` nearest-baseline
-selection for git-flow branching, coverage-report merging, and example GitHub Actions workflows.
+**Test Impact Analysis (TIA)** is the answer: instead of guessing from file paths or naming
+conventions, record which source files a test actually *executed* the last time it ran, then use
+that recorded dependency to decide, on the next run, which tests a given change could possibly
+affect. Say `app/Services/Pricing.php` changes. Only test files whose last recorded run actually
+executed `Pricing.php` — directly, or several calls deep — are candidates for a different result;
+every other test file's outcome is provably unchanged, because its last run never touched that
+code. A `README.md` edit, a comment, or a config file no test ever reads through affects nothing at
+all — the common case in most commits.
 
-Do not rely on planned features; check `CHANGELOG.md` for what has actually shipped.
+## How phpunit-replay solves it
 
-## How it compares
+Three ideas, in the order they run:
 
-| | Pest 5 TIA | phpunit-tia (`jasonmccreary`/`gosuperscript`) | phpunit-replay |
+**(a) Record.** While the suite runs once with pcov or Xdebug active as a raw coverage driver
+(not PHPUnit's own `--coverage-*`, which stays off during recording), phpunit-replay watches which
+source files execute while each test *file*'s tests run, and reduces that to a dependency edge:
+`test file → source file`. It also records each individual test's own result — status, assertion
+count, message, duration — keyed by test id. Both are written to a single `graph.json`.
+
+**(b) Detect what changed, select what could differ.** On a later run, phpunit-replay diffs the
+working tree against the git commit the graph was recorded at, plus anything currently
+staged/unstaged/untracked. A **content hash that ignores comments and whitespace** (tokenizer-based
+for `.php`, similar normalization for Blade/JS/TS) drops cosmetic-only edits from that diff before
+selection ever runs — a renamed variable re-runs tests, a reformatted docblock does not. What
+remains goes through a chain of rules (see [How selection works](#how-selection-works)) that maps
+changed files to the test files whose recorded edges include them. Anything unknown to the graph
+(a new test) and any cached failure also always runs — a failure is never assumed fixed by itself.
+
+**(c) Replay the rest — as a pass, not a skip.** Every test file *not* selected is never
+re-executed; its last recorded result is served instead. Critically, phpunit-replay reports that
+result as the **same status it actually had** — a pass with its real assertion count, a skip with
+its real message — not as a synthetic "skipped, not run" placeholder. That distinction is the
+reason for the name: results are *replayed*, not hidden.
+
+| | Executed this run | Replayed by phpunit-replay | Skipped (typical file-level TIA) |
 |---|---|---|---|
-| Runner | Pest only (aborts on plain PHPUnit test classes) | PHPUnit 12/13 | PHPUnit 11.5+ and 12 |
-| Unaffected tests | Synthetic pass, real assertion count | **Skipped** | Filtered mode: not loaded at all. In-process mode: synthetic pass with the real assertion count |
-| Full summary/JUnit | Yes | No | Yes — the wrapper merges cached results into its summary line and, on request, into JUnit |
-| Cosmetic-only changes ignored | Yes (tokenizer) | Partial | Yes (tokenizer-based content hash) |
-| Per-branch baselines | Yes | No | Yes |
-| Remote cache | GitHub Actions artifact via `gh` | No | Content-addressed, backend-agnostic (filesystem, HTTP/S3, or a dedicated git repo) — planned, phase 3 |
-| Non-hermetic test detection | No | No | `#[NotCacheable]`, `never_cache` globs, automatic quarantine on a pass/fail flip |
-| Laravel awareness (DB tables, Blade) | Yes | No | Yes, optional, autodetected |
-| Parallel (Paratest) | Yes, built in | No | Yes, via `--parallel`/`-p` |
+| Test body actually ran | yes | no | no |
+| Counted in the summary totals | yes | yes | yes |
+| Carries its real assertion count | yes (fresh) | yes (from the baseline) | **no — assertions are lost** |
+| Triggers `--fail-on-skipped` | no | no | **yes, if your CI enables it** |
+| Appears in JUnit as a complete test | yes | yes (`replayed="true"` property) | yes, but marked `<skipped/>` |
 
-The distinction that matters most: an unaffected test in `phpunit-tia` is reported as **skipped**,
-losing the assertion count and silently hiding a test that would otherwise never run again. In
-`phpunit-replay` it either never enters the run at all (filtered mode) or is reported as a pass
-with the assertion count it actually produced last time (in-process mode) — the summary reflects
-what last really happened, not a gap.
+An annotated real summary line, printed below PHPUnit's own output:
 
-No code from `jasonmccreary/phpunit-tia` or `gosuperscript/phpunit-tia` was copied; roughly 60% of
-Pest's own TIA engine, the framework-agnostic part, was ported by copy under its MIT license — see
-[Attribution](#attribution).
+```
+Replay  ✓ 31 executed (31 affected, 0 uncached) · 4 replayed · 0 quarantined · baseline main@abc1234
+```
 
-## Requirements
+| Segment | Meaning |
+|---|---|
+| `✓`/`✗` | overall PHPUnit result for this pass |
+| `31 executed` | ran for real this pass = `affected + uncached + quarantined` |
+| `31 affected` | selected by a rule (PhpEdge, TestFile, Sibling, Blade, Migration, Watch) |
+| `0 uncached` | new to the graph, or forced to re-run (cached failure, a risky/incomplete result your config surfaces) |
+| `4 replayed` | served from cache as their real recorded status, not run |
+| `0 quarantined` | content key unchanged but result flipped (see [Keeping the cache honest](#keeping-the-cache-honest)) — always executed for real |
+| `baseline main@abc1234` | git branch + commit the graph was recorded against |
 
-- PHP ^8.2
-- PHPUnit ^11.5 or ^12
-- A git repository with at least one commit (baselines and diffs are computed against git history)
-- `ext-pcov` or Xdebug with `xdebug.mode=coverage`, to record the dependency graph. Without
-  either, phpunit-replay disables itself with a warning and PHPUnit runs exactly as it would
-  without the package.
-- No `php.ini` changes are needed for pcov: the wrapper enables it per invocation with
-  `-d pcov.enabled=1 -d pcov.directory=<project root>`.
+Totals stay honest either way: `--fail-on-skipped` is never tripped by a replayed test (it isn't a
+skip), and `--log-junit` output produced by phpunit-replay contains one complete `<testcase>` per
+test, real or replayed.
 
-## Installation
+## Install
 
 ```bash
 composer require --dev manuglopez/phpunit-replay
 ```
 
+Requirements:
+
+| | |
+|---|---|
+| PHP | ^8.2 |
+| PHPUnit | ^11.5 or ^12 |
+| Git | a repository with at least one commit — baselines and diffs are computed against git history |
+| Coverage driver | `ext-pcov` **or** Xdebug with `xdebug.mode=coverage`, to record the dependency graph |
+| `phpunit.xml`/`phpunit.xml.dist` | any valid PHPUnit configuration |
+| Optional | `brianium/paratest` (`composer require --dev brianium/paratest`) for `--parallel`/`-p` |
+
+No `php.ini` changes are needed for pcov: the wrapper enables it per invocation with
+`-d pcov.enabled=1 -d pcov.directory=<project root>` (pcov instruments nothing without an explicit
+`pcov.directory`, even though `phpinfo()` shows a cwd-derived default). Without pcov or Xdebug,
+phpunit-replay disables itself with a warning and PHPUnit runs exactly as it would unpackaged.
+
 ## Quick start
 
 ```bash
-vendor/bin/phpunit-replay record   # once, records a baseline
-```
-```
-Replay  ● recorded 1240 tests in 42 test files · 318 source files · 3120 edges · graph.json 210 KB · baseline main@a1b2c3d · 4m12s
-```
+$ vendor/bin/phpunit-replay status
+root:      /home/you/project
+branch:    main (default: main)
+head:      0742ab4
+state dir: ~/.phpunit-replay/project-a8138fc79c736026
+driver:    pcov (loaded, enabled per run)
+framework: plain
 
-Run again with nothing changed: everything replays. Change a class several test files exercise and
-run again: only those tests execute, the rest still replays from the baseline.
-
-```
-Replay  ✓ 0 executed (0 affected, 0 uncached) · 35 replayed · 0 quarantined · baseline main@abc1234
-Replay  ✓ 31 executed (31 affected, 0 uncached) · 4 replayed · 0 quarantined · baseline main@abc1234
+no baseline yet
 ```
 
-See [Summary line](#summary-line) for what each number means. `run` is the default subcommand, so
-`vendor/bin/phpunit-replay` and `vendor/bin/phpunit-replay run` are the same thing; anything after
-a literal `--` (`vendor/bin/phpunit-replay -- --testdox`) is passed straight through to PHPUnit.
+```bash
+$ vendor/bin/phpunit-replay record
+............................S......                               35 / 35 (100%)
+OK, but some tests were skipped!
+Tests: 35, Assertions: 61, Skipped: 1.
+Replay  ● recorded 35 tests in 7 test files · 12 source files · 18 edges · graph.json 6 KB · baseline main@0742ab4 · 0s
+```
 
-`vendor/bin/phpunit-replay status` shows the current baseline; `vendor/bin/phpunit-replay
-baseline-path` prints the state directory path, useful for CI (see [CI in two
-lanes](#ci-in-two-lanes)).
+```bash
+$ vendor/bin/phpunit-replay
+Replay  ✓ 0 executed (0 affected, 0 uncached) · 35 replayed · 0 quarantined · baseline main@0742ab4
+```
 
-## Two modes
+Nothing changed, so nothing runs: the whole pass finishes in about 180 ms, PHP bootstrap included.
+Now edit `src/Pricing.php` and ask what that would affect, without running anything:
 
-### Filtered mode (default)
+```bash
+$ vendor/bin/phpunit-replay --explain --dry-run
+tests/CartTest.php                       ← PhpEdge  src/Pricing.php
+tests/PricingTest.php                    ← PhpEdge  src/Pricing.php
+Replay  2 test files would run (2 affected, 0 uncached, 0 quarantined), 33 tests would replay
+```
 
-This is the mode used unless you opt into in-process mode, and needs no changes to your test code.
-The wrapper resolves the affected test files (see [How selection works](#how-selection-works)),
-then builds `.phpunit-replay.xml` next to your real configuration: a copy of your
-`phpunit.xml`/`phpunit.xml.dist` with `<testsuites>` replaced by a single `<testsuite>` listing one
-`<file>` per test file to run (`<source>`, `<php>`, `<extensions>`, bootstrap kept verbatim, the
-`ReplayExtension` bootstrap injected if not already registered). PHPUnit runs against that file
-with `--no-coverage` (the raw pcov/Xdebug driver, not PHPUnit's own, is what records edges), and
-the generated file is deleted once the run finishes (`PHPUNIT_REPLAY_KEEP_RUN=1` keeps it for
-inspection). Add `.phpunit-replay.xml` to your `.gitignore`.
+```bash
+$ vendor/bin/phpunit-replay
+Replay  ✓ 6 executed (6 affected, 0 uncached) · 29 replayed · 0 quarantined · baseline main@0742ab4
+```
 
-Passing a PHPUnit selection option — `--filter`, `--group`, `--exclude-group`, `--testsuite`, an
-explicit path, `--covers`, `--uses` — disables the selection logic for that run: PHPUnit runs
-exactly what you asked for, and the extension only refreshes results for the tests that ran.
+Only the two test files with a recorded edge to `Pricing.php` ran; everything else replayed.
 
-### In-process mode
+## Two ways to run it
 
-For situations where PHPUnit needs to see the whole suite regardless of the wrapper — an IDE
-launching `phpunit` directly, `--coverage-html`, or simply not wanting the wrapper in the loop.
-Extend `Manuglopez\Replay\PHPUnit\ReplayableTestCase` instead of `PHPUnit\Framework\TestCase`, or
-add the trait to your own base `TestCase`:
+### The wrapper (filtered mode) — the default, zero changes to your tests
+
+`vendor/bin/phpunit-replay` resolves the affected test files (see
+[How selection works](#how-selection-works)), then writes `.phpunit-replay.xml` next to your real
+configuration: your `phpunit.xml`/`phpunit.xml.dist` verbatim, except `<testsuites>` is replaced by
+a single suite listing one `<file>` per test file that must actually run (`<source>`, `<php>`,
+`<extensions>`, bootstrap all kept as-is; `ReplayExtension` is injected as a bootstrap extension if
+not already registered). PHPUnit then runs against that generated file with `--no-coverage` — the
+raw pcov/Xdebug driver, not PHPUnit's own coverage, is what records edges — and the generated file
+is deleted once the run finishes (`PHPUNIT_REPLAY_KEEP_RUN=1` keeps it for inspection).
+
+Add `.phpunit-replay.xml` to your `.gitignore`.
+
+Passing a PHPUnit selection option yourself — `--filter`, `--group`, `--exclude-group`,
+`--testsuite`, an explicit path, `--covers`, `--uses` — disables the selection logic for that run:
+PHPUnit runs exactly what you asked for, and only the results of the tests that ran are refreshed.
+
+### The in-process trait — for when PHPUnit must see the whole suite
+
+For an IDE that launches `phpunit` directly, `--coverage-html`, or simply not wanting the wrapper
+in the loop. Extend `Manuglopez\Replay\PHPUnit\ReplayableTestCase` instead of
+`PHPUnit\Framework\TestCase`, or add the trait to your own base class:
 
 ```php
 abstract class TestCase extends \PHPUnit\Framework\TestCase
@@ -127,96 +177,133 @@ abstract class TestCase extends \PHPUnit\Framework\TestCase
     protected function setUp(): void
     {
         parent::setUp();
-        if ($this->isReplaying()) { return; } // optional: skip expensive boot work too
+
+        if ($this->isReplaying()) {
+            return; // optional: skip expensive boot work too, not just the test body
+        }
+
+        // ...boot the app, RefreshDatabase, etc.
     }
 }
 ```
 
-and register the extension in `phpunit.xml`: `<extensions><bootstrap
-class="Manuglopez\Replay\PHPUnit\ReplayExtension"><parameter name="mode" value="auto"/>
-</bootstrap></extensions>` (`mode`: `auto|record|replay|off`).
+and register the extension in `phpunit.xml`:
 
-`setUp()` **always runs**, for every test, replayed or not — only the code guarded behind
-`isReplaying()` is skipped. The trait hooks the test method itself, not `setUp()`.
-`TestCase::runTest()` is `private` on both PHPUnit versions, so the hook differs: **PHPUnit 12**
-declares `protected function invokeTestMethod()`, which the trait overrides to apply the decision
-instead of calling the real method; **PHPUnit 11.5** has no such hook, so a `#[Before]` method
-swaps the private `TestCase::$methodName` property, via reflection, to an internal stub that
-applies the decision and restores the property (`PHPUNIT_REPLAY_LEGACY_HOOK=1` forces this
-fallback on PHPUnit 12 too, for test coverage of both paths).
-
-Never replayed, in-process or filtered: a `#[Depends]` provider for another test (a replayed
-provider would hand its dependents a `null` return value, so such a test is never marked
-replayable), a cached failure or error (always reruns), a test unknown to the graph (new), a test
-marked `#[NotCacheable]` or matched by `never_cache`, and a quarantined test (see
-[Hermeticity](#hermeticity)).
-
-After the run, the extension prints its own summary line below PHPUnit's own, same format as the
-wrapper: `Replay  ✓ 1 executed (0 affected, 1 uncached) · 34 replayed · 0 quarantined · baseline
-main@a1b2c3d`.
-
-## Parallel
-
-Add `--parallel`/`-p` to `run` (the default command) or `record` to run the same filtered
-configuration through [Paratest](https://github.com/paratestphp/paratest) instead of a single
-`vendor/bin/phpunit` process:
-
-```sh
-phpunit-replay --parallel          # Paratest's own auto-detected process count
-phpunit-replay -p 4                # 4 worker processes
-phpunit-replay record -p 4         # a full parallel recording pass
+```xml
+<extensions>
+    <bootstrap class="Manuglopez\Replay\PHPUnit\ReplayExtension">
+        <parameter name="mode" value="auto"/> <!-- auto|record|replay|off -->
+    </bootstrap>
+</extensions>
 ```
 
-Paratest is an optional `require-dev` dependency (`brianium/paratest`). When `--parallel`/`-p` is
-given but `vendor/bin/paratest` isn't installed, the wrapper warns on stderr and falls back to a
-sequential PHPUnit run rather than failing.
+`setUp()` **always runs**, for every test, replayed or not — only the code guarded behind
+`isReplaying()` (and only if you call it *after* `parent::setUp()`) is skipped; the trait hooks
+the test method itself, never `setUp()`. On **PHPUnit 12** it overrides the
+`invokeTestMethod()` hook cleanly; on **PHPUnit 11.5**, which has no such hook, a `#[Before]`
+method swaps the test's private method name through reflection instead (see
+`docs/spikes/in-process-replay.md` for the two mechanisms verified side by side).
 
-Each worker writes its own `runs/<run-id>/worker-<TEST_TOKEN>-*.json` partial; the wrapper merges
-them back together before updating the graph (edges by union, results last-write-wins, everything
-else by union), so the baseline and summary line are the same regardless of process count. The
-coverage driver's ini flags travel to Paratest's workers via `--passthru-php` (Paratest's own
-main process is never instrumented).
+Never replayed, in either mode: a `#[Depends]` provider for another test (a replayed provider
+would hand its dependents a `null` return value), a cached failure or error (always reruns), a
+test unknown to the graph (new), a test marked `#[NotCacheable]` or matched by `never_cache`, and a
+quarantined test (see [Keeping the cache honest](#keeping-the-cache-honest)).
+
+## Commands
+
+`run` is the default, so `vendor/bin/phpunit-replay` and `vendor/bin/phpunit-replay run` are the
+same thing. Anything after a literal `--`, or the first token phpunit-replay doesn't recognise, is
+forwarded to `vendor/bin/phpunit` untouched.
+
+| Command | Options | What it does |
+|---|---|---|
+| `run` (default) | `--fresh` `--no-remote` `--explain` `--dry-run` `--log-junit=FILE` `--allow-ci-baseline` `--parallel`/`-p[=N]` `[-- <phpunit args>]` | Runs only what's affected, replays the rest. See below for each option. |
+| `record` | `--fresh` `--parallel`/`-p[=N]` | Runs the full suite unconditionally and records a fresh baseline. What CI runs on the default branch after a merge. |
+| `verify` | `[-- <phpunit args>]` | Runs the full suite in record mode and compares every result against what a replay pass would have served — the divergence metric (see [Keeping the cache honest](#keeping-the-cache-honest)). |
+| `status` | — | Prints the cached graph: root, branch, state dir, coverage driver, framework, file/edge/table counts, `graph.json` size, per-branch results, fingerprint drift, quarantine, not-cacheable count, remote, lifetime divergences. |
+| `explain <path>` | — | Prints which recorded test files a change to `<path>` would affect, and by which rule — without running anything. |
+| `prune` | `--flaky` `--branches` `--all` `--remote --keep-months=N` `--squash` | Drops stale state without touching a live pass. See below. |
+| `push` | `--graph` | Publishes cached objects (and, with `--graph`, the branch baseline) to the configured remote. |
+| `pull` | — | Fetches the branch baseline from the remote and stores it locally. |
+| `baseline-path` | — | Prints the resolved state directory and nothing else — for CI to know what to archive. |
+
+`run` options in detail:
+
+| Option | Effect |
+|---|---|
+| `--fresh` | Ignore any cached baseline and record a fresh one. |
+| `--no-remote` | Never contact a configured remote cache for this run. |
+| `--explain` | Print which rule selected each test file, and why (same table as `explain <path>`). |
+| `--dry-run` | Print what would run without running it; implies `--explain`. |
+| `--log-junit=FILE` | Write a merged JUnit report to `FILE` — real results plus replayed ones, replayed entries marked `<property name="replayed" value="true"/>`. |
+| `--allow-ci-baseline` | Let a run detected as CI (`CI` env var set) publish a branch baseline; without it, a CI run never updates the stored baseline. |
+| `--parallel`/`-p[=N]` | Run through [Paratest](#parallel) instead of a single `phpunit` process. |
+
+`prune` options: `--flaky` clears the quarantine; `--branches` removes baselines for branches git
+no longer knows; `--all` deletes the whole state directory's contents; with no flag, prunes deleted
+test files plus `--branches`. `--remote` switches to garbage-collecting the *remote* cache instead
+of the local graph: it deletes object shards older than `--keep-months` (default 3) except objects
+still referenced by a branch baseline, and `--squash` (git backend only) rewrites the remote
+branch as a single orphan commit.
+
+Environment variables — always win over `phpunit-replay.php`:
+
+| Variable | Effect |
+|---|---|
+| `PHPUNIT_REPLAY=0` | Disables phpunit-replay entirely, even with the extension registered in `phpunit.xml`. |
+| `PHPUNIT_REPLAY_DEBUG=1` | Prints every selection decision to stderr. |
+| `PHPUNIT_REPLAY_STATE_DIR` | Overrides `state_dir`. |
+| `PHPUNIT_REPLAY_REMOTE` / `PHPUNIT_REPLAY_REMOTE_TOKEN` | Override `remote` / `remote_token`. |
+| `PHPUNIT_REPLAY_REMOTE_PUSH` | Overrides `remote_push` (`objects`\|`all`\|`off`). |
+| `PHPUNIT_REPLAY_BASELINE_BRANCHES` | Comma-separated, overrides `baseline_branches`. |
+| `PHPUNIT_REPLAY_DEFAULT_BRANCH` | Overrides `default_branch`. |
+| `PHPUNIT_REPLAY_MODE` | Overrides the extension `mode` (also accepts the internal `record-subset`/`results-only` values the wrapper itself uses). |
+| `PHPUNIT_REPLAY_KEEP_RUN=1` | Keeps the generated `.phpunit-replay.xml` and the run's partial directory for inspection. |
+| `PHPUNIT_REPLAY_LEGACY_HOOK=1` | Forces in-process mode's PHPUnit 11.5 reflection fallback even on PHPUnit 12. |
+| `CI` | Detected automatically; gates whether a `run` may publish a branch baseline (see `--allow-ci-baseline`). |
+
+A few more `PHPUNIT_REPLAY_*` variables exist purely for internal wrapper-to-extension
+communication (run id, resolved root/binary path); you shouldn't need to set them by hand.
 
 ## How selection works
 
 **Changed files** are computed by diffing against the recorded baseline sha (it must be an
 ancestor of `HEAD`, or a fresh recording is forced), unioned with the current working-tree status
-(staged, unstaged, and untracked files, minus anything `git check-ignore` would exclude). Two more
-filters narrow that set:
+(staged, unstaged, untracked — minus anything `git check-ignore` would exclude). Two filters then
+narrow that set:
 
-- a **content-hash filter**: a file is dropped if its normalized content hash is unchanged from
-  the baseline commit — comments and whitespace-only edits to `.php` files (tokenizer-based),
-  Blade comments/whitespace, and JS/TS/Vue/Svelte comment/whitespace edits are all ignored this
-  way;
-- the **last-run snapshot**: a dirty file already accounted for in the previous run is dropped
-  again (touching the same uncommitted change twice doesn't re-run its tests), but a file that got
-  reverted is picked back up.
+- **Content-hash filter** — a file is dropped if its normalized content hash is unchanged from the
+  baseline commit: comment/whitespace-only edits to `.php` (tokenizer-based), Blade
+  comments/whitespace, and JS/TS/Vue/Svelte comment/whitespace edits are all ignored this way.
+- **Last-run snapshot** — a dirty file already accounted for in the previous run is dropped again
+  (touching the same uncommitted change twice doesn't re-run its tests), but a reverted file is
+  picked back up.
 
-**Selection rules** then run in order, each consuming what earlier rules didn't claim (the
-Laravel-only ones are no-ops on a non-Laravel project, see [Laravel](#laravel)):
+**Selection rules** run in order, each consuming what earlier rules didn't claim (the Laravel-only
+ones are no-ops on a non-Laravel project — see [Laravel](#laravel)):
 
-1. **MigrationRule** (Laravel) — a changed `database/migrations/**/*.php` file has its tables
-   extracted and intersected against every test file's recorded tables.
-2. **PhpEdgeRule** — a changed (or deleted) file that has an id in the graph affects every test
-   file whose recorded edges include it.
-3. **TestFileRule** — a changed file that matches PHPUnit's own notion of a test file (the
-   directories/suffixes from `<testsuites>`) and still exists on disk affects itself.
-4. **SiblingRule** (Laravel) — a new/unknown `.php` file under a provider/listener/event/observer/
-   policy/console-command/factory/seeder directory affects tests with an edge to another file in
-   the same directory.
-5. **BladeRule** (Laravel) — a changed `.blade.php` file unknown to the graph is walked through its
-   static references up to a Blade file the graph knows; tests with an edge to that ancestor are
-   affected.
-6. **WatchRule** — whatever is left and unknown to the graph is matched against glob → test
-   directory patterns: built-in generic defaults (`.env*`, `phpunit.xml*`, `docker-compose*.y*ml`,
-   test fixtures/snapshots), framework-specific defaults when detected, and your own `watch`
-   config, merged together.
+| # | Rule | Triggers on | Effect |
+|---|---|---|---|
+| 1 | `MigrationRule` (Laravel) | a changed `database/migrations/**/*.php` file | tables it creates/alters intersected against every test file's recorded tables |
+| 2 | `PhpEdgeRule` | a changed (or deleted) file with an id in the graph | every test file whose recorded edges include it |
+| 3 | `TestFileRule` | a changed file that is itself a test file (per `<testsuites>`) and still exists | affects itself |
+| 4 | `SiblingRule` (Laravel) | a new/unknown `.php` file under a provider/listener/event/observer/policy/console-command/factory/seeder directory | tests with an edge to another file in the same directory |
+| 5 | `BladeRule` (Laravel) | a changed `.blade.php` unknown to the graph | walked through static references (`@include`, `@extends`, `view()`, `<x-...>`) up to a Blade file the graph knows; tests with an edge to that ancestor |
+| 6 | `WatchRule` | whatever is left, unknown to the graph | glob → test directory patterns: generic defaults (`.env*`, `phpunit.xml*`, `docker-compose*.y*ml`, fixtures/snapshots), framework defaults when detected (see below), and your own `watch` config |
 
 On top of the rules, two more categories always run: **unknown test files** (on disk, matching
-PHPUnit's test-path rules, but no edges recorded — new tests) and any cached result whose
-**status must be re-run**: a failure or error always reruns; a risky/warning/notice/deprecation/
-incomplete/skipped result reruns only if your PHPUnit configuration's
-`--fail-on-*`/`displayDetailsOn*` settings would actually surface it.
+PHPUnit's test-path rules, but no recorded edges — new tests) and any cached result whose **status
+must be re-run**: a failure or error always reruns; a risky/warning/notice/deprecation/
+incomplete/skipped result reruns only if your PHPUnit configuration's `--fail-on-*` /
+`displayDetailsOn*` settings would actually surface it.
+
+Built-in `WatchRule` defaults by detected framework:
+
+| Framework (detected by) | Patterns |
+|---|---|
+| Generic (always) | `.env*`, `phpunit.xml*`, `docker-compose*.y*ml`, `tests/**/Fixtures/**`, `tests/**/__snapshots__/**` |
+| Laravel (`artisan` exists) | `config/**`, `routes/**`, `database/migrations/**`, `resources/views/**`, `lang/**`, `resources/lang/**`, `app/** !*.php`, `bootstrap/*.php` |
+| Symfony (`config/bundles.php` exists) | `config/**`, `migrations/**`, `templates/**`, `translations/**` |
 
 A **fingerprint** guards against incompatible baselines: its *structural* half (`composer.lock`,
 `phpunit.xml(.dist)`, `phpunit-replay.php`, the cache schema version) changing discards the whole
@@ -224,232 +311,296 @@ graph and forces a fresh recording; its *environmental* half (PHP `MAJOR.MINOR`,
 OS family) changing keeps the edges but discards cached results, which can't be trusted across a
 PHP version or driver change.
 
-Baselines are kept **per branch**, falling back to the default branch's result for a test with no
-result of its own on the current branch. One rule is deliberate: **a file no test ever executed
-affects nothing** — a `README.md` or docs change is the common case.
+Baselines are kept **per branch**. On a branch with no baseline of its own, phpunit-replay walks
+an ordered list of candidates (`baseline_branches`, or the single `default_branch` as shorthand),
+keeps only those whose recorded sha is an ancestor of `HEAD`, and picks whichever is **fewest files
+different** from the current tree — the setup git-flow teams want: a feature branch cut from
+`develop` inherits `develop`'s baseline, a hotfix cut from `main` inherits `main`'s, instead of
+everything falling back to one shared default. `status` and `--explain` report which baseline was
+chosen and why.
 
-## Commands
+One rule is deliberate and worth internalizing: **a file no test ever executed affects nothing.**
+A docs change, an unused helper, dead code — if no recorded edge points at it, it cannot change any
+test's outcome, so nothing runs.
 
-`run` is the default command, so `phpunit-replay` and `phpunit-replay run` are the same thing.
-Anything after a literal `--`, or the first token this application doesn't recognise, is
-forwarded to `vendor/bin/phpunit` untouched.
+## Configuration
 
-**`run [--fresh] [--no-remote] [--explain] [--dry-run] [--log-junit=FILE] [--allow-ci-baseline] [--parallel|-p[=N]] [-- <phpunit args>]`**
+An optional `phpunit-replay.php` at the project root, returning an array (every key optional):
 
-- `--fresh` — ignore any cached baseline and record a fresh one.
-- `--no-remote` — never contact a configured remote cache (no-op today; no remote cache until
-  phase 3).
-- `--explain` — print which rule selected each test file, and why (same table as `explain <path>`).
-- `--dry-run` — print what would run without running it; implies `--explain`.
-- `--log-junit=FILE` — write a merged JUnit report to `FILE` (real results plus replayed ones,
-  replayed entries marked `<property name="replayed" value="true"/>`).
-- `--allow-ci-baseline` — let a run detected as CI publish a branch baseline (SPEC §12.1);
-  without it, a CI run never updates the stored baseline.
-- `--parallel`/`-p[=N]` — run through Paratest (see [Parallel](#parallel)).
-
-A PHPUnit selection option (`--filter`, `--group`, `--exclude-group`, `--testsuite`, an explicit
-path, `--covers`, `--uses`) disables selection for that run instead: PHPUnit runs exactly what was
-asked, and only results for the tests that ran are refreshed.
-
-**`record [--fresh] [--parallel|-p[=N]]`** — runs the full suite unconditionally and records a
-fresh baseline. What CI runs on the default branch after a merge.
-
-**`verify [-- <phpunit args>]`** — runs the full suite with the extension in record mode, keeping
-the existing graph (unlike `record`, which always starts empty), and compares every new result
-against what a normal replay pass would have served from the same content key. A difference in
-result class (a cached pass that now fails, or the reverse) is a divergence: appended to
-`divergence.json`, the test is quarantined, and the baseline is still updated as `record` would.
-This is the command for the full-suite lane on `main`/nightly (see [CI in two
-lanes](#ci-in-two-lanes)): `Verify  ✓ 1240 tests · 1198 would replay · 0 divergences (lifetime: 2
-in 143 runs)` (`✗` when this run found a divergence, or PHPUnit itself failed).
-
-**`status`** — prints the cached graph: root, branch, state directory, coverage driver, detected
-framework, file/edge/table counts, `graph.json` size, per-branch results, fingerprint drift,
-quarantined test ids (with flip counts), not-cacheable count, and lifetime `verify` divergences.
-
-**`explain <path>`** — prints which recorded test files a change to `<path>` would affect and by
-which rule, computed from the stored graph without running anything (`tests/Feature/AdTest.php
-← PhpEdge  app/Services/Pricing.php`), followed by `direct dependents: N` and, for a file matching
-no rule, `no recorded test executes this file`.
-
-**`prune [--flaky] [--branches] [--all]`** — drops stale graph state without touching a live pass:
-`--flaky` clears the quarantine (`flaky.json`); `--branches` removes baselines for branches git no
-longer knows; `--all` deletes `graph.json`, `flaky.json`, `last-run.json`, `divergence.json`, and
-`runs/`; no flag prunes deleted test files from the graph plus `--branches`.
-
-**`baseline-path`** — prints the resolved state directory and nothing else, useful for CI to know
-what to archive as a build artifact.
-
-## Summary line
-
-Every number in the wrapper's own summary line — printed below PHPUnit's own — counts individual
-**tests**, never test files:
-
-```
-Replay  ✓ 38 executed (31 affected, 7 uncached) · 1202 replayed (14 from remote) · 2 quarantined · baseline main@a1b2c3d · saved 4m12s
+```php
+<?php
+// phpunit-replay.php
+return [
+    'state_dir' => null,                  // null = ~/.phpunit-replay/<project-key>
+    'remote' => null,                     // null | 'file:///mnt/replay-cache' | 'https://cache.example.com/replay/' | 'git@github.com:org/project-replay-cache.git'
+    'remote_token' => null,               // bearer token for the HTTP backend
+    'remote_push' => 'objects',           // 'objects' (this machine's results only) | 'all' (also publish branch baselines — CI only) | 'off' (pull only)
+    'remote_branch' => 'main',            // git backend: which branch of the cache repo to use
+    'remote_refresh_seconds' => 300,      // git backend: how often the local mirror re-fetches
+    'remote_timeout' => 60,               // git backend: total time budget for a push before giving up
+    'default_branch' => null,             // null = autodetect (origin/HEAD, init.defaultBranch, main/master)
+    'baseline_branches' => [],            // ordered nearest-baseline candidates for git-flow branching; [] = [default_branch]
+    'watch' => [],                        // extra glob => test directory/file mappings, merged with the built-in defaults
+    'never_cache' => [],                  // globs of test files that always run for real (see Keeping the cache honest)
+    'quarantine_release_after' => 20,     // stable passes needed to leave automatic quarantine
+    'laravel' => 'auto',                  // 'auto' | 'on' | 'off'
+    'junit_merge' => true,                // merge cached results into --log-junit output
+    'mode' => 'auto',                     // extension mode override; leave at 'auto' unless you know why not
+    'hermeticity_heuristics' => false,    // reserved for a future heuristic (flagging suspicious tests in `status`); not implemented — leave false
+];
 ```
 
-`executed` is however many tests PHPUnit actually ran, and always equals `affected` (selected by a
-rule — PhpEdge, Sibling, Blade, Migration, ...) plus `uncached` (new to the graph, or forced to
-rerun) plus `quarantined` (flaky or `#[NotCacheable]`) — each executed test is classified by its
-file's primary reason in the run list. `replayed` is cached results served without running them
-(`(N from remote)` is phase 3 plumbing; always 0 today). `saved` sums the recorded durations of
-everything replayed instead of executed.
+Environment variables always win over this file — see the table in [Commands](#commands).
 
-`--dry-run` has nothing executed yet to classify, so it counts test **files** instead (`Replay  12
-test files would run (9 affected, 2 uncached, 1 quarantined), 342 tests would replay`); `verify`
-prints its own line — see [Commands](#commands).
+## Keeping the cache honest
 
-## Hermeticity
-
-Three ways a test avoids ever being replayed, plus one that happens automatically:
+Replaying a stale or wrong result would be worse than not caching at all, so phpunit-replay gives
+you three ways to keep a test from ever being served stale, plus one that happens automatically:
 
 1. **`#[NotCacheable(reason: '...')]`** on a test class or method — read by reflection while
-   recording, persisted in the graph's `not_cacheable` list. The test always executes for real,
-   even when its content key is unchanged.
-2. **`never_cache`** globs in `phpunit-replay.php` — any test file matching one of these patterns
-   always runs (e.g. `tests/Browser/**`, or tests that hit real external services).
+   recording, persisted in the graph. The test always executes for real, even when its content key
+   is unchanged (`use Manuglopez\Replay\Attributes\NotCacheable;`).
+2. **`never_cache`** globs in `phpunit-replay.php` — any test file matching one always runs (e.g.
+   `tests/Browser/**`, or tests that hit real external services).
 3. **Automatic quarantine** — whenever new results are merged, a test whose content key is
    unchanged but whose result *class* flipped (pass↔fail, pass↔error) is recorded in `flaky.json`
-   (`{testId, firstSeen, flips, stable, lastKey, reason}`) and forced to run every subsequent
-   pass. A cached failure/error recovering to a pass is not a flip — that's the normal heal path.
-   Quarantine is released via `phpunit-replay prune --flaky` or automatically after
-   `quarantine_release_after` (default 20) consecutive stable passes.
+   and forced to run every subsequent pass, until it's released via `prune --flaky` or
+   automatically after `quarantine_release_after` (default 20) consecutive stable passes. A cached
+   failure recovering to a pass is not a flip — that's the normal heal path.
+4. **`verify`** is the objective metric for all of this: it runs the full suite in record mode and
+   compares every result against what a normal replay pass would have served. A mismatch is a
+   **divergence** — logged, quarantined automatically, and reflected in the summary:
 
-`phpunit-replay verify` is the objective metric for all of this — see [Commands](#commands);
-`phpunit-replay status` shows the current quarantine list, with flip counts, and the lifetime
-divergence count.
+   ```
+   Verify  ✓ 1240 tests · 1198 would replay · 0 divergences (lifetime: 2 in 143 runs)
+   ```
 
-`hermeticity_heuristics` (config, off by default) is reserved for a future heuristic — flagging
-tests that look non-hermetic (unfaked `Carbon`/`Faker`, HTTP without `Http::fake()`) in `status`
-without quarantining them. Not implemented in this build; leave it at `false`.
+`status` shows the current quarantine list (with flip counts) and the lifetime divergence count —
+the number to watch when deciding whether a fast `run` lane is trustworthy enough to become a PR
+gate on its own (see [CI in two lanes](#ci-in-two-lanes)).
+
+`hermeticity_heuristics` (off by default) is reserved for a future heuristic that would flag
+suspicious-looking tests (unfaked `Carbon`/`Faker`, HTTP without `Http::fake()`) in `status` without
+quarantining them — not implemented in this build; leave it `false`.
+
+## Sharing the cache with your team
+
+By default every machine — your laptop, a coworker's, each CI runner — keeps its own local
+`graph.json`, so each re-records from scratch the first time it sees a given commit. Configuring a
+**remote** turns that into a content-addressed object store any machine can push results to and
+pull results from, so work one machine already did is inherited instead of repeated.
+
+| | Local only (default) | Shared folder (`file://`) | HTTP (S3/MinIO, WebDAV) | Dedicated git repository | CI artifacts |
+|---|---|---|---|---|---|
+| Prerequisites | none | a mounted path all machines reach | an HTTP endpoint with GET/PUT/HEAD | an empty git repo + CI deploy key | none — built into GitHub Actions |
+| Best for | solo projects, evaluating the package | one office/VPN | teams already on object storage | teams with git but no object storage | GitHub-only, zero extra infra |
+| Failure behaviour | n/a | warning + local-only run | same | same | cache miss → full record for that job |
+
+See **[docs/sharing-the-cache.md](docs/sharing-the-cache.md)** for setup steps for each backend,
+`baseline_branches` for git-flow, and troubleshooting. A remote that's unreachable or misconfigured
+always degrades to a warning on stderr and a local-only pass — it can never break a test run.
+
+A brand-new checkout, once a baseline has been published:
+
+```
+$ vendor/bin/phpunit-replay
+Replay  ✓ 0 executed (0 affected, 0 uncached) · 35 replayed (35 from remote) · 0 quarantined · baseline main@a1b2c3d
+```
+
+`(35 from remote)` means every one of those results came from the shared cache, not a local
+recording — a machine that has never run this suite still gets a near-instant first pass.
+
+`remote_push` governs who publishes what: developer machines and PR jobs default to `objects`
+(only their own test-file results, keyed by content — safe to publish from anywhere, never
+conflicts); only the CI job that owns the branch baseline (`remote_push: 'all'`, typically gated by
+`--allow-ci-baseline`) publishes `graph/**`, which is what everyone else's cold start reads.
+
+## CI in two lanes
+
+The recommendation is the same one Pest gives for its own TIA: **PR CI keeps running the full,
+unfiltered suite** as the actual merge gate — `phpunit-replay verify` does this while also
+comparing every result against the cache, which is what keeps the baseline trustworthy and feeds
+the divergence metric. A fast, optional lane runs `phpunit-replay run` for quick feedback in
+minutes. A separate workflow records the baseline after each merge to the default branch
+(`run --allow-ci-baseline` or `record --fresh`, then `push --graph`).
+
+```
+fast (every PR):   vendor/bin/phpunit-replay run     — quick feedback, not the gate
+full (every PR):   vendor/bin/phpunit-replay verify  — the actual merge gate
+baseline (on push to main/develop): record/run + push --graph
+```
+
+Requirements: a checkout with enough history that the baseline sha is an ancestor of `HEAD`
+(`fetch-depth: 0` on GitHub Actions); pcov or Xdebug on the runner; a configured remote (or the
+`baseline-path` + `actions/cache` alternative) so state carries between jobs. Working examples for
+all three jobs, plus the monthly cache GC job, are in
+**[.github/workflows/examples/](.github/workflows/examples/)**
+(`ci.yml`, `tia-baseline.yml`, `tia-gc.yml`) — copy them into your own project's
+`.github/workflows/`.
 
 ## Laravel
 
-Autodetected: enabled when `<root>/artisan` exists and the `laravel` config key
-(`auto`/`on`/`off`, default `auto`) isn't `off`. The package has no `illuminate/*` dependency
-itself — Laravel is reached through `class_exists()`, string class names, and duck-typed calls.
+Autodetected: enabled when `<root>/artisan` exists and the `laravel` config key isn't `off`. The
+package has no `illuminate/*` dependency itself — Laravel is reached through `class_exists()`,
+string class names, and duck-typed calls.
 
 What gets tracked while recording, once the app has booted for a test file:
 
 - **Tables** — a query listener extracts the table name(s) touched by every
-  `select|insert|update|delete|with|replace` query and links them to the test file
-  (`migrations`, `sqlite_*`, `pg_*`, `information_schema*` excluded).
+  `select|insert|update|delete|with|replace` query and links them to the test file (`migrations`,
+  `sqlite_*`, `pg_*`, `information_schema*` excluded).
 - **Blade views** — a view composer on `'*'` links every rendered view's path as a source
   dependency of the test file, exactly like a PHP file it directly touched.
 - **Migration-aware tests** — every test file using `RefreshDatabase`, `DatabaseMigrations`, or
   `DatabaseTransactions` is additionally widened, when the graph is written, to cover every table
   any migration under `database/migrations/` creates — conservative by design.
 
-Three Laravel-only selection rules build on this — Migration, Sibling, Blade — see
-[How selection works](#how-selection-works). The package's own `laravel-lite` fixture (4 Feature
-tests, 3 migrations, 2 Blade views) demonstrates the effect end to end: adding a column to the
-`comments` migration re-runs 3 of its 4 test files (everything using `RefreshDatabase`;
-`HomePageTest`, which never touches the database, replays), and editing `welcome.blade.php`
-re-runs only 1 of the 4 (`HomePageTest`, the only test that renders it) — see
-`tests/Integration/LaravelLiteScenariosTest.php`.
+The package's own `laravel-lite` fixture (4 Feature tests, 3 migrations, 2 Blade views)
+demonstrates the effect end to end:
 
-## Configuration
+| Change | Result |
+|---|---|
+| Add a column to the `comments` migration | `3 executed (3 affected) · 1 replayed` — every test using `RefreshDatabase`; `HomePageTest`, which never touches the database, replays |
+| Edit `welcome.blade.php` | `1 executed · 3 replayed` — only `HomePageTest`, the one test that renders it |
 
-An optional `phpunit-replay.php` at the project root, returning an array (all keys optional):
+## Parallel
 
-```php
-<?php
-// phpunit-replay.php
-return [
-    'state_dir' => null,                 // null = ~/.phpunit-replay/<project-key>
-    'remote' => null,                    // planned (phase 3): 'file:///mnt/replay-cache' | 'https://cache.example.com/replay/' | a dedicated git repo URL
-    'remote_token' => null,              // planned (phase 3): bearer token for the remote above
-    'default_branch' => null,            // null = autodetect (origin/HEAD, init.defaultBranch, main/master)
-    'watch' => [],                       // extra glob => test directory/file mappings, merged with the built-in defaults
-    'never_cache' => [],                 // globs of test files that always run for real (see Hermeticity)
-    'quarantine_release_after' => 20,    // stable passes needed to leave automatic quarantine
-    'laravel' => 'auto',                 // 'auto'|'on'|'off'
-    'junit_merge' => true,               // merge cached results into --log-junit output
-    'mode' => 'auto',                    // extension mode override; leave at 'auto' unless you know why not
-    'hermeticity_heuristics' => false,   // reserved for a future heuristic (see Hermeticity); not implemented yet
-];
+Add `--parallel`/`-p` to `run` or `record` to run the same filtered configuration through
+[Paratest](https://github.com/paratestphp/paratest) instead of a single `phpunit` process:
+
+```bash
+phpunit-replay --parallel      # Paratest's own auto-detected process count
+phpunit-replay -p 4            # 4 worker processes
+phpunit-replay record -p 4     # a full parallel recording pass
 ```
 
-Environment variables always win over the config file: `PHPUNIT_REPLAY=0` disables phpunit-replay
-entirely, even with the extension registered; `PHPUNIT_REPLAY_STATE_DIR`,
-`PHPUNIT_REPLAY_REMOTE`/`PHPUNIT_REPLAY_REMOTE_TOKEN` (planned, phase 3), and
-`PHPUNIT_REPLAY_DEFAULT_BRANCH` override the matching config key; `PHPUNIT_REPLAY_MODE` overrides
-`mode` (also accepts the internal `record-subset`/`results-only` values the wrapper itself uses);
-`PHPUNIT_REPLAY_DEBUG=1` prints every selection decision to stderr; `PHPUNIT_REPLAY_KEEP_RUN=1`
-keeps the generated `.phpunit-replay.xml` and run partial directory for inspection;
-`PHPUNIT_REPLAY_LEGACY_HOOK=1` forces in-process mode's PHPUnit 11.5 reflection fallback even on
-PHPUnit 12. A few more `PHPUNIT_REPLAY_*` variables exist for internal wrapper-to-extension
-communication; you shouldn't need to set them by hand.
+Paratest is an optional `require-dev` dependency (`brianium/paratest`). When `--parallel`/`-p` is
+given but `vendor/bin/paratest` isn't installed, phpunit-replay warns on stderr and falls back to a
+sequential PHPUnit run rather than failing. Each worker writes its own partial results; they're
+merged back together before updating the graph (edges by union, results last-write-wins), so the
+summary line is the same regardless of process count. The coverage driver's ini flags travel to
+Paratest's workers via `--passthru-php`.
 
-## CI in two lanes
+## Coverage reports with replay
 
-The recommendation is the same one Pest gives for its own TIA: **PR CI keeps running the full,
-unfiltered suite** — that's your correctness gate, and it's what lets phpunit-replay's own
-baseline stay trustworthy. A separate workflow on `main` records the baseline after each merge,
-either with `vendor/bin/phpunit-replay record --fresh` or, to also get the divergence check (see
-[Hermeticity](#hermeticity)), `vendor/bin/phpunit-replay verify`.
+Pass `--coverage-php=FILE` through to PHPUnit as usual. When phpunit-replay records a test file
+with coverage active, it stores that file's own coverage slice (`<state dir>/coverage/<k>.cov`,
+keyed by content). On a later pass, PHPUnit's own coverage — from whatever actually executed — is
+merged with the stored snapshots of everything that replayed, so `--coverage-php` reflects the
+*whole* suite, not just what ran:
 
-Optionally, add a fast lane on PRs that runs `vendor/bin/phpunit-replay run` for quick feedback,
-with the full-suite job still acting as the actual gate. `status`'s lifetime divergence count is
-the objective signal for when that fast lane could graduate to being the actual PR gate.
+```
+Lines: 97.59% (81/83)          # 0 executed this pass — the figure came entirely from snapshots
+```
 
-Requirements: a checkout with enough history that the baseline sha is an ancestor of `HEAD`
-(`fetch-depth: 0` on GitHub Actions, or the equivalent — a shallow clone forces a fresh recording
-every job); pcov or Xdebug on the runner, so affected test files can have their edges re-recorded;
-and, since the remote cache (`push`/`pull`) is phase 3 and doesn't exist yet, the state directory
-has to be shared between jobs by hand — upload it as a build artifact from the `main` recording
-job and download it before a job that calls `run`. `vendor/bin/phpunit-replay baseline-path`
-prints the directory to point those upload/download steps at, without hardcoding
-`~/.phpunit-replay/...`.
+**Limitation:** a snapshot only exists for a test file that was recorded *with* `--coverage-php`
+active. A test that's risky, incomplete, skipped, or otherwise didn't produce a real coverage
+sample at record time carries no piggyback coverage into a merged report — it simply contributes
+nothing, the same as if it had never run. `--coverage-html`/`--coverage-clover` are produced by the
+user from the merged `.php` report, same as any other PHPUnit coverage workflow.
 
-## Trying it on your project
+## Comparison
 
-1. From the real project (not this repository): `composer config repositories.replay path
-   ../phpunit-replay && composer require --dev manuglopez/phpunit-replay:@dev`.
-2. `vendor/bin/phpunit-replay status` should say there is no baseline yet, and show the detected
-   coverage driver, git root, default branch, and test framework.
-3. `vendor/bin/phpunit-replay record` runs the whole suite once and ends with the recording
-   summary: test files, source files, edges, `graph.json` size, and time taken.
-4. Run `vendor/bin/phpunit-replay` again with nothing changed: 0 executed, everything replayed,
-   finishing in under 2 seconds plus PHP's own bootstrap time.
-5. Touch one class, then run `vendor/bin/phpunit-replay --explain --dry-run`: it lists which test
-   files are affected, and by which rule, without running anything.
-6. `vendor/bin/phpunit-replay verify` runs the whole suite again in record mode and reports how
-   many results diverge from what a normal replay pass would have served — `0 divergences` if
-   nothing has drifted.
-7. If something looks wrong: `--fresh` forces a clean recording, `status` shows what state is
-   currently stored, and `PHPUNIT_REPLAY_DEBUG=1 vendor/bin/phpunit-replay` prints every
-   selection decision to stderr.
+Being specific about what each tool actually does, rather than what it aims to do:
+
+| | [Pest 5 TIA](https://github.com/pestphp/pest) | [jasonmccreary/phpunit-tia](https://github.com/jasonmccreary/phpunit-tia) | [gosuperscript/phpunit-tia](https://github.com/gosuperscript/phpunit-tia) | phpunit-replay |
+|---|---|---|---|---|
+| Runner | Pest only (aborts on plain PHPUnit test classes) | PHPUnit | PHPUnit | PHPUnit 11.5+ and 12, no Pest |
+| Unaffected tests | Synthetic pass, real assertion count | **Skipped** | **Skipped** | Filtered mode: never loaded at all. In-process mode: synthetic pass with the real assertion count |
+| Complete summary/JUnit | Yes | No — skipped tests lose their assertion count | No | Yes — cached results merge into the summary and, on request, into JUnit |
+| Cosmetic-only changes ignored | Yes (tokenizer) | Partial | Partial | Yes (tokenizer-based content hash) |
+| Per-branch baselines | Yes | No | No | Yes, plus nearest-baseline resolution for git-flow (`baseline_branches`) |
+| Remote cache | GitHub Actions artifact via `gh` | No | No | Content-addressed, backend-agnostic: filesystem, HTTP/S3/MinIO, or a dedicated git repository |
+| Non-hermetic test handling | No detection | No detection | No detection | `#[NotCacheable]`, `never_cache` globs, automatic quarantine on a pass/fail flip, `verify`'s divergence metric |
+| Laravel awareness | Yes | No | No | Yes, optional, autodetected (tables, Blade, migration-aware tests) |
+| Parallel | Yes, built in | No | No | Yes, via Paratest (`--parallel`/`-p`) |
+
+The distinction that matters most: an unaffected test in either `phpunit-tia` package is reported
+as **skipped** — its assertion count is gone, and depending on your PHPUnit configuration a skip
+can even fail the build via `--fail-on-skipped`. In phpunit-replay it either never enters the run
+at all (filtered mode) or is reported as a pass with the exact assertion count it produced last
+time (in-process mode) — the summary reflects what really happened, not a gap papered over.
+
+No code from `jasonmccreary/phpunit-tia` or `gosuperscript/phpunit-tia` was used. Roughly 60% of
+Pest's own TIA engine — the framework-agnostic part — was ported by copy under its MIT license;
+see [Attribution](#attribution).
+
+## How other ecosystems do it, and where this sits
+
+Test/task selection and caching by recorded dependency is not a new idea — most language and build
+ecosystems have their own version of it:
+
+| Ecosystem | Approach |
+|---|---|
+| [Go's `go test`](https://go.dev/doc/go1.10#test) | Result cache keyed by a hash of the test binary and its inputs; a cache hit prints `(cached)` instead of re-running |
+| [Bazel](https://bazel.build/remote/caching) / [Buck2](https://buck2.build/) | Declared build/test graph plus a remote action cache keyed by action inputs |
+| [Nx](https://nx.dev/concepts/how-caching-works) / [Turborepo](https://turbo.build/repo/docs/crafting-your-repository/caching) | Task input hashing with a shareable remote cache, at the JS/TS monorepo task level |
+| [Jest `--onlyChanged`](https://jestjs.io/docs/cli#--onlychanged) / [Vitest](https://vitest.dev/guide/cli.html) | Static import-graph analysis from files git reports as changed |
+| [pytest-testmon](https://github.com/tarpas/pytest-testmon) | Coverage-based selection, but at **line/block** granularity, not file granularity |
+| [Ekstazi](http://ekstazi.org/) | Regression Test Selection for Java/Maven, via recorded class-level dependencies |
+| [Datadog Intelligent Test Runner](https://docs.datadoghq.com/tests/intelligent_test_runner/) | Coverage-based, skips tests unaffected by the diff |
+| [Gradle Predictive Test Selection](https://docs.gradle.com/enterprise/predictive-test-selection/) / [Launchable](https://www.launchableinc.com/) | ML-ranked test selection from historical failure data |
+
+phpunit-replay sits closest to **testmon** and **Ekstazi**: coverage-based regression test
+selection from a recorded dependency graph, not a static import guess. Its content-addressed
+sharing is the same idea as Go's and Bazel's remote caches — a result keyed by what actually went
+into producing it, reusable by any machine with the same inputs. Its replay-as-pass behavior is
+the PHPUnit analogue of Go's `(cached)` marker: a result reported honestly as "this is what already
+happened," not hidden. And its two-lane CI recommendation mirrors Gradle Predictive Test
+Selection's own guidance — a fast advisory lane plus a full lane that remains the actual gate. The
+one axis where phpunit-replay is intentionally coarser than testmon is granularity: **file-level**,
+not block-level — see [Known limitations](#known-limitations).
 
 ## Known limitations
 
 - **Edges are file-level, not method- or line-level.** Any change to a source file re-runs every
   test file whose recorded edges include it, even if the change touched an unrelated function.
 - **In-process mode still runs `setUp()` for every test** — only the code guarded behind
-  `isReplaying()` is skipped, so a replayed test still pays for anything outside that guard.
-- **PHPUnit 11.5 has no clean hook for in-process replay**, so it needs a `#[Before]`-phase
-  reflection swap of the private `methodName` property instead of overriding `invokeTestMethod()`
-  — fragile by nature, forced on PHPUnit 12 too with `PHPUNIT_REPLAY_LEGACY_HOOK=1`.
+  `isReplaying()`, called after `parent::setUp()`, is skipped; a replayed test still pays for
+  anything outside that guard.
 - **`#[Depends]` providers always execute for real**, in-process mode included: a replayed
   provider would hand its dependents a `null` return value, so such a test is never replayable.
-- **No merged coverage report, and no remote cache, until phase 3** — `--coverage-html`/
-  `--coverage-php` don't account for replayed tests, and every machine keeps its own local
-  `graph.json`; sharing state between CI jobs or developers is manual until then.
-- **pcov needs `pcov.directory` set explicitly** — it instruments nothing without it, even though
-  `phpinfo()` shows a cwd-derived default, so the wrapper always passes it explicitly.
-- State is written atomically; the wrapper never hides PHPUnit's output or changes its exit code;
-  any internal failure degrades to a plain PHPUnit run with a warning, never a misleading pass.
+- **Non-hermetic tests need an explicit marker.** phpunit-replay cannot detect on its own that a
+  test's result depends on something outside its recorded source edges (the system clock, an
+  external API); mark it `#[NotCacheable]` or a `never_cache` glob, or let automatic quarantine
+  catch it after its first pass/fail flip.
+- **The HTTP remote backend has no listing endpoint**, so `prune --remote` needs the filesystem or
+  git backend to enumerate and garbage-collect object shards.
+- **Coverage snapshots exist only for test files recorded with `--coverage-php` active** — a
+  merged report has no data for a test file whose baseline was recorded without it.
+- **A rebase invalidates a sha-based baseline** (the recorded commit is no longer an ancestor of
+  `HEAD`, forcing a fresh recording), but content-addressed replay still works: a test file whose
+  actual content is unchanged replays by its content key regardless of the rebase.
+
+## Trying it on your project
+
+1. From the real project (not this repository), to test a local checkout instead of a Packagist
+   release: `composer config repositories.replay path ../phpunit-replay && composer require --dev
+   manuglopez/phpunit-replay:@dev`.
+2. `vendor/bin/phpunit-replay status` should say there is no baseline yet, and show the detected
+   coverage driver, git root, default branch, and test framework.
+3. `vendor/bin/phpunit-replay record` runs the whole suite once and ends with the recording
+   summary: test files, source files, edges, `graph.json` size, and time taken.
+4. Run `vendor/bin/phpunit-replay` again with nothing changed: 0 executed, everything replayed,
+   finishing in under 2 seconds plus PHP's own bootstrap time.
+5. Touch one class, then run `vendor/bin/phpunit-replay --explain`: it lists which test files are
+   affected, and by which rule, without running anything.
+6. `vendor/bin/phpunit-replay verify` runs the whole suite again in record mode and reports how
+   many results diverge from what a normal replay pass would have served — `0 divergences` if
+   nothing has drifted.
+7. If something looks wrong: `--fresh` forces a clean recording, `status` shows what state is
+   currently stored, and `PHPUNIT_REPLAY_DEBUG=1 vendor/bin/phpunit-replay` prints every selection
+   decision to stderr.
 
 ## Attribution
 
 Portions of this package are derived from [Pest](https://github.com/pestphp/pest)
 (© Nuno Maduro, MIT license) — specifically the framework-agnostic parts of its Test Impact
-Analysis engine (`src/Plugins/Tia/`). The full original license text is in
+Analysis engine. The full original license text is in
 [`LICENSE-PEST.md`](LICENSE-PEST.md), and every ported file carries an `@see` docblock pointing at
 its exact origin (file and commit). This project is not affiliated with, endorsed by, or
 officially connected to Pest or its authors.
 
 ## License
 
-MIT. See [`LICENSE`](LICENSE).
+MIT. See [`LICENSE`](LICENSE). © Manuel González.
