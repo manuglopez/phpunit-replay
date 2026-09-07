@@ -1,38 +1,38 @@
-# Fase 3 — informe (distribución)
+# Phase 3 — development report (distribution)
 
-Estado: **cerrada** (tag `v0.1.0`). Sobre las fases 1–2 se añaden: caché remota content-addressed (backends filesystem, HTTP y **repositorio git dedicado**), `push`/`pull`, replay por clave de contenido `k` entre máquinas, selección de baseline más cercana (`baseline_branches`, git-flow), cobertura fusionada (`--coverage-php`), `prune --remote`, workflows de GitHub Actions de ejemplo y CI del paquete (matriz PHP 8.2/8.3/8.4 × PHPUnit 11.5/12 × pcov/xdebug), compatibilidad real con PHPUnit 11.5.
+Status: **closed** (tag `v0.1.0`). On top of phases 1–2, the following are added: content-addressed remote cache (filesystem, HTTP, and **dedicated git repository** backends), `push`/`pull`, replay by content key `k` across machines, nearest-baseline selection (`baseline_branches`, git-flow), merged coverage (`--coverage-php`), `prune --remote`, example GitHub Actions workflows, and package CI (PHP 8.2/8.3/8.4 × PHPUnit 11.5/12 × pcov/xdebug matrix), real compatibility with PHPUnit 11.5.
 
-## Qué se hizo
+## What was built
 
-| Bloque | Ficheros clave | Notas |
+| Block | Key files | Notes |
 |---|---|---|
-| Remoto | `Cache/Remote/{RemoteCache,NullRemoteCache,FilesystemRemoteCache,HttpRemoteCache,GitRemoteCache,RemoteCacheFactory,ObjectStore}` | Claves `graph/<clave-compartida>/<rama>.json` y `objects/<aaaa-mm>/<k>.json`; objetos append-only; espejo local con caché de lectura. La clave remota (`ProjectKey::shared`) depende solo del origin, no del nombre del directorio. |
-| Backend git | `GitRemoteCache` | Espejo shallow en el state dir; `begin()` refresca; `end()` = fetch + `reset --hard` a upstream + reescritura de lo escrito en la pasada + commit + push (sin rebase: los objetos nunca chocan, `graph/**` gana el nuestro); `flock`; re-clone si upstream fue reescrito. |
-| Pipeline | `RunPipeline`, `ReplayState` (in-process también), `Change/BaselineResolver`, `Graph::setNearestBranch` | Sin grafo local → adopta `graph/<clave>/<rama>` remoto; fichero afectado cuya `k_now` existe en el remoto → `replayed (from remote)`; tras la pasada `putObject` por fichero ejecutado y `putGraph` con `remote_push=all`. Cadena de fallback `propia → más cercana → default` (las baselines de rama son deltas). `verify` y `--filter` nunca publican. |
-| Comandos | `PushCommand`, `PullCommand`, `PruneCommand --remote [--keep-months] [--squash]`, `status` (`remote:`/`push:`) | |
-| Cobertura | `Record/{PiggybackCoverageDriver,CoverageSnapshots}`, `Report/{CoverageMerger,NullCoverageDriver}`, `Console/Runner/CoveragePhpOption` | Con `--coverage-*` la extensión lee la cobertura por test que PHPUnit ya recoge (sin chocar con pcov crudo); snapshots `<stateDir>/coverage/<k>.cov`; fusión al fichero pedido; con 0 ejecutados se construye desde snapshots con un driver no-op. |
-| CI | `.github/workflows/ci.yml`, `.github/workflows/examples/{tia-baseline,ci,tia-gc}.yml` | 10 celdas (8.2 excluido de PHPUnit 12). |
-| Docs | `README.md` (reescrito), `docs/sharing-the-cache.md`, `docs/README.md`, `docs/SPEC.md`, `docs/reports/` | Sin fases en README; comparativa con enlaces; panorama de otros ecosistemas. |
+| Remote | `Cache/Remote/{RemoteCache,NullRemoteCache,FilesystemRemoteCache,HttpRemoteCache,GitRemoteCache,RemoteCacheFactory,ObjectStore}` | Keys `graph/<shared-key>/<branch>.json` and `objects/<yyyy-mm>/<k>.json`; append-only objects; local mirror with a read cache. The remote key (`ProjectKey::shared`) depends only on the origin, not on the directory name. |
+| Git backend | `GitRemoteCache` | Shallow mirror in the state dir; `begin()` refreshes it; `end()` = fetch + `reset --hard` to upstream + rewrite of what was written during the run + commit + push (no rebase: objects never collide, `graph/**` uses ours); `flock`; re-clone if upstream was rewritten. |
+| Pipeline | `RunPipeline`, `ReplayState` (in-process too), `Change/BaselineResolver`, `Graph::setNearestBranch` | No local graph → adopts the remote `graph/<key>/<branch>`; an affected file whose `k_now` exists remotely → `replayed (from remote)`; after the run, `putObject` per executed file and `putGraph` with `remote_push=all`. Fallback chain `own → nearest → default` (branch baselines are deltas). `verify` and `--filter` never publish. |
+| Commands | `PushCommand`, `PullCommand`, `PruneCommand --remote [--keep-months] [--squash]`, `status` (`remote:`/`push:`) | |
+| Coverage | `Record/{PiggybackCoverageDriver,CoverageSnapshots}`, `Report/{CoverageMerger,NullCoverageDriver}`, `Console/Runner/CoveragePhpOption` | With `--coverage-*` the extension reads the per-test coverage that PHPUnit already collects (without colliding with raw pcov); snapshots `<stateDir>/coverage/<k>.cov`; merged into the requested file; with 0 executed it is built from snapshots with a no-op driver. |
+| CI | `.github/workflows/ci.yml`, `.github/workflows/examples/{tia-baseline,ci,tia-gc}.yml` | 10 cells (8.2 excluded from PHPUnit 12). |
+| Docs | `README.md` (rewritten), `docs/sharing-the-cache.md`, `docs/README.md`, `docs/SPEC.md`, `docs/reports/` | No phases in the README; comparison with links; overview of other ecosystems. |
 
-Total: 132 ficheros en `src/` (16731 líneas), 96 clases de test.
+Total: 132 files in `src/` (16731 lines), 96 test classes.
 
-## Gate de fase 3
+## Phase 3 gate
 
-| Requisito | Resultado |
+| Requirement | Result |
 |---|---|
 | `composer validate --strict` | OK |
-| `vendor/bin/phpstan analyse` (max, php 8.2) | `[OK] No errors` en PHPUnit 12.5.34 y 11.5.56 |
-| Suite pcov (PHPUnit 12.5.34) | `Tests: 714, Assertions: 2527, Skipped: 3` |
-| Suite PHPUnit 11.5.56 (paratest 7.8.5) | `Tests: 714, Skipped: 14` (paratest/laravel-lite ausentes en ese árbol), 0 fallos |
-| Suite Xdebug | ver `composer test:xdebug` en el informe de cierre |
-| Test "dos máquinas" | `TwoMachinesSharedCacheTest`, `InProcessRemoteCacheTest` (dos `HOME`, dos clones con distinto nombre, remoto `file://` compartido): la segunda hereda todo sin ejecutar nada |
-| Backend git | `GitRemoteCacheTest` (dos clientes concurrentes, squash upstream, offline), `PruneRemoteCommandTest`, `PruneRemoteArgvTest` |
-| Cobertura | `CoverageMergeTest` (incl. wrapper con `pcov.enabled=0`) |
+| `vendor/bin/phpstan analyse` (max, php 8.2) | `[OK] No errors` on PHPUnit 12.5.34 and 11.5.56 |
+| pcov suite (PHPUnit 12.5.34) | `Tests: 714, Assertions: 2527, Skipped: 3` |
+| PHPUnit 11.5.56 suite (paratest 7.8.5) | `Tests: 714, Skipped: 14` (paratest/laravel-lite absent on that tree), 0 failures |
+| Xdebug suite | see `composer test:xdebug` in the closing report |
+| "Two machines" test | `TwoMachinesSharedCacheTest`, `InProcessRemoteCacheTest` (two `HOME`s, two clones with different names, shared `file://` remote): the second inherits everything without executing anything |
+| Git backend | `GitRemoteCacheTest` (two concurrent clients, upstream squash, offline), `PruneRemoteCommandTest`, `PruneRemoteArgvTest` |
+| Coverage | `CoverageMergeTest` (incl. wrapper with `pcov.enabled=0`) |
 | git-flow | `Scenario13GitFlowNearestBaselineTest`, `BaselineResolverTest` |
 
-## Salida real
+## Real output
 
-Dos clones (`m1`, `m2`) del mismo origin, `HOME` distinto por máquina, `php bin/phpunit-replay` por subproceso. Script: `scratchpad/walk3.sh`. Salida íntegra:
+Two clones (`m1`, `m2`) of the same origin, a different `HOME` per machine, `php bin/phpunit-replay` as a subprocess. Script: `scratchpad/walk3.sh`. Full output:
 
 ```
 ############ A. two machines, shared folder remote (file://), remote_push=all
@@ -135,27 +135,27 @@ baseline main@8e3c1e3 (nearest, 0 files away)
 Replay  0 test files would run (0 affected, 0 uncached, 0 quarantined), 35 tests would replay
 ```
 
-Lecturas:
-- **A** (carpeta compartida): la máquina 2, sin grafo local, hereda la baseline y los 35 resultados (`35 replayed (35 from remote)`) sin arrancar PHPUnit; tras editar `Money.php` en la máquina 2 (31 ejecutados, objetos publicados), la misma edición en la máquina 1 se sirve del remoto (`31 from remote`, 0 ejecutados).
-- **B** (repositorio git): idéntico con un repo bare como remoto; historial `replay: init` + `replay: +8 objects`; `prune --remote --squash` deja un único commit.
-- **C** (cobertura): la pasada sin cambios no ejecuta nada y `cov2.php` se construye solo con snapshots (97,59 % de líneas, los 5 ficheros de `src/`).
-- **D** (git-flow): con `baseline_branches=develop,main` una feature cortada de `develop` usa `develop@…` y un hotfix cortado de `main` usa `main@…`, ambos "0 files away".
+Readings:
+- **A** (shared folder): machine 2, with no local graph, inherits the baseline and the 35 results (`35 replayed (35 from remote)`) without starting PHPUnit; after editing `Money.php` on machine 2 (31 executed, objects published), the same edit on machine 1 is served from the remote (`31 from remote`, 0 executed).
+- **B** (git repository): identical with a bare repo as the remote; history `replay: init` + `replay: +8 objects`; `prune --remote --squash` leaves a single commit.
+- **C** (coverage): the run with no changes executes nothing and `cov2.php` is built solely from snapshots (97.59% of lines, the 5 files in `src/`).
+- **D** (git-flow): with `baseline_branches=develop,main` a feature branch cut from `develop` uses `develop@…` and a hotfix cut from `main` uses `main@…`, both "0 files away".
 
-## Qué quedó fuera y por qué
+## What was left out, and why
 
-- **Heurística de hermeticidad** (`hermeticity_heuristics`): la clave existe; el marcado de "sospechosos" en `status` (aristas a `Carbon/`, `Faker/`, `Http/Client` sin fake) no está implementado.
-- **`HttpRemoteCache::keys()`**: HTTP no tiene listado genérico → `prune --remote` requiere backend `file` o `git`.
-- **Cobertura en `verify`/`--filter`**: no se redirige ni fusiona `--coverage-php` en esos modos.
-- **Cobertura de tests risky/incomplete/skipped**: PHPUnit no la anexa, los snapshots no la tienen.
-- **CI real**: los workflows de ejemplo se validaron como YAML; la matriz propia del paquete se ejecuta en GitHub Actions con cada push a `main`.
+- **Hermeticity heuristic** (`hermeticity_heuristics`): the key exists; flagging "suspicious" items in `status` (edges to `Carbon/`, `Faker/`, `Http/Client` without a fake) is not implemented.
+- **`HttpRemoteCache::keys()`**: HTTP has no generic listing → `prune --remote` requires the `file` or `git` backend.
+- **Coverage in `verify`/`--filter`**: `--coverage-php` is neither redirected nor merged in those modes.
+- **Coverage for risky/incomplete/skipped tests**: PHPUnit does not attach it, so the snapshots don't have it.
+- **Real CI**: the example workflows were validated as YAML; the package's own matrix runs on GitHub Actions on every push to `main`.
 
-## Cómo probarlo en un proyecto real
+## Trying it on a real project
 
-Además de los pasos del README ("Trying it on your project") y de `docs/sharing-the-cache.md`:
+In addition to the steps in the README ("Trying it on your project") and in `docs/sharing-the-cache.md`:
 
-1. Crea un repo vacío `org/proyecto-replay-cache`; en `phpunit-replay.php`: `'remote' => 'git@github.com:org/proyecto-replay-cache.git', 'remote_push' => 'objects'`; en CI `PHPUNIT_REPLAY_REMOTE_PUSH=all` con deploy key.
-2. `vendor/bin/phpunit-replay record && vendor/bin/phpunit-replay push --graph` una vez (o deja que lo haga el job de baseline).
-3. En otro clon/máquina: `vendor/bin/phpunit-replay` → debe decir `N replayed (N from remote)` sin ejecutar nada; `status` muestra `remote: git …` y `push:`.
-4. git-flow: `'baseline_branches' => ['develop', 'main']`; en una feature `status` debe mostrar `baseline develop@… (nearest, …)`.
-5. Cobertura: `vendor/bin/phpunit-replay record -- --coverage-php=build/cov.php`, luego `vendor/bin/phpunit-replay -- --coverage-php=build/cov.php` con 0 ejecutados sigue produciendo el fichero completo.
-6. Mantenimiento: `vendor/bin/phpunit-replay prune --remote --keep-months=3 --squash` (job mensual `tia-gc.yml`).
+1. Create an empty repo `org/proyecto-replay-cache`; in `phpunit-replay.php`: `'remote' => 'git@github.com:org/proyecto-replay-cache.git', 'remote_push' => 'objects'`; in CI `PHPUNIT_REPLAY_REMOTE_PUSH=all` with a deploy key.
+2. `vendor/bin/phpunit-replay record && vendor/bin/phpunit-replay push --graph` once (or let the baseline job do it).
+3. On another clone/machine: `vendor/bin/phpunit-replay` → should say `N replayed (N from remote)` without executing anything; `status` shows `remote: git …` and `push:`.
+4. git-flow: `'baseline_branches' => ['develop', 'main']`; on a feature branch `status` should show `baseline develop@… (nearest, …)`.
+5. Coverage: `vendor/bin/phpunit-replay record -- --coverage-php=build/cov.php`, then `vendor/bin/phpunit-replay -- --coverage-php=build/cov.php` with 0 executed still produces the full file.
+6. Maintenance: `vendor/bin/phpunit-replay prune --remote --keep-months=3 --squash` (monthly job `tia-gc.yml`).

@@ -1,37 +1,37 @@
-# Fase 2 — informe
+# Phase 2 — development report
 
-Estado: **cerrada** (tag `v0.1.0-beta1`). Sobre la fase 1 (filtered) se añaden: modo in-process (trait `Replayable`), comandos `explain`/`prune`/`verify`, hermeticidad (`#[NotCacheable]`, globs `never_cache`, cuarentena automática por flip, `divergence.json`), integración Laravel (tablas, Blade, reglas Migration/Sibling/Blade, fixture `laravel-lite`) y Paratest (`--parallel`).
+Status: **closed** (tag `v0.1.0-beta1`). On top of phase 1 (filtered), the following are added: in-process mode (`Replayable` trait), `explain`/`prune`/`verify` commands, hermeticity (`#[NotCacheable]`, `never_cache` globs, automatic quarantine on flip, `divergence.json`), Laravel integration (tables, Blade, Migration/Sibling/Blade rules, `laravel-lite` fixture) and Paratest (`--parallel`).
 
-## Qué se hizo
+## What was built
 
-| Bloque | Ficheros clave | Notas |
+| Block | Key files | Notes |
 |---|---|---|
-| In-process | `PHPUnit/Replayable.php`, `ReplayableTestCase.php`, `PHPUnit/Decision/*`, `ReplayState::{bootInProcess,decide,persistInProcess}`, `Subscribers/{PersistInProcessOnExecutionFinished,PrintSummaryOnApplicationFinished}` | `runTest()` es private: hook `invokeTestMethod()` en PHPUnit 12, swap por reflexión en 11.5 (`PHPUNIT_REPLAY_LEGACY_HOOK=1` lo fuerza en 12 para probarlo). Spike en `docs/spikes/in-process-replay.md`. |
-| Servicios compartidos | `Cache/{RunContext,BaselineWriter}`, `Select/{RunList,RunListBuilder}`, `Console/ExplainFormatter` | Extraídos de `RunPipeline`; wrapper y extensión usan la misma persistencia y la misma lista de ejecución. |
-| Hermeticidad | `Attributes/NotCacheable`, `Record/NotCacheableCollector`, `Hermeticity/{Policy,Quarantine,DivergenceLog}`, `Support/Glob` | Flip = misma clave `k`, clase de estado distinta (se excluyen transiciones cuyo estado cacheado era failure/error). `flaky.json`, `divergence.json`. |
-| Comandos | `Commands/{Explain,Prune,Verify}Command`, `Report/{VerifySummary,DryRunSummary}` | `verify` = suite completa en modo record + comparación con lo que se habría replayado. |
-| Laravel | `Laravel/{TableExtractor,TableTracker,BladeTracker,BladeReferences,MigrationTables,LaravelDetector,LaravelIntegration,UsesDatabaseCollector}`, `Select/Rules/{Migration,Sibling,Blade}Rule`, `Subscribers/{ArmLaravelTrackersOnPrepared,FlushUsesDatabaseOnExecutionFinished}` | Sin dependencia `illuminate/*` en el paquete. Fixture `tests/Fixtures/Projects/laravel-lite` (Laravel 13.30, sqlite memoria, 3 migraciones, 2 modelos, 4 Feature, 3 vistas). |
-| Paratest | `Console/Runner/ParatestProcess`, `RunWriter::pathFor`, `RunPartial::readMerged` | `brianium/paratest` 7.20 solo como dev-dep; workers escriben `worker-<TEST_TOKEN>-*.json`. |
-| Contadores | `Report/Summary`, `RunPipeline::classifyExecuted` | Todos en tests: `executed = affected + uncached + quarantined`. |
+| In-process | `PHPUnit/Replayable.php`, `ReplayableTestCase.php`, `PHPUnit/Decision/*`, `ReplayState::{bootInProcess,decide,persistInProcess}`, `Subscribers/{PersistInProcessOnExecutionFinished,PrintSummaryOnApplicationFinished}` | `runTest()` is private: `invokeTestMethod()` hook in PHPUnit 12, reflection swap in 11.5 (`PHPUNIT_REPLAY_LEGACY_HOOK=1` forces it in 12 for testing). Spike in `docs/spikes/in-process-replay.md`. |
+| Shared services | `Cache/{RunContext,BaselineWriter}`, `Select/{RunList,RunListBuilder}`, `Console/ExplainFormatter` | Extracted from `RunPipeline`; wrapper and extension use the same persistence and the same run list. |
+| Hermeticity | `Attributes/NotCacheable`, `Record/NotCacheableCollector`, `Hermeticity/{Policy,Quarantine,DivergenceLog}`, `Support/Glob` | Flip = same `k` key, different state class (transitions whose cached state was failure/error are excluded). `flaky.json`, `divergence.json`. |
+| Commands | `Commands/{Explain,Prune,Verify}Command`, `Report/{VerifySummary,DryRunSummary}` | `verify` = full suite in record mode + comparison with what would have been replayed. |
+| Laravel | `Laravel/{TableExtractor,TableTracker,BladeTracker,BladeReferences,MigrationTables,LaravelDetector,LaravelIntegration,UsesDatabaseCollector}`, `Select/Rules/{Migration,Sibling,Blade}Rule`, `Subscribers/{ArmLaravelTrackersOnPrepared,FlushUsesDatabaseOnExecutionFinished}` | No `illuminate/*` dependency in the package. Fixture `tests/Fixtures/Projects/laravel-lite` (Laravel 13.30, sqlite in-memory, 3 migrations, 2 models, 4 Feature, 3 views). |
+| Paratest | `Console/Runner/ParatestProcess`, `RunWriter::pathFor`, `RunPartial::readMerged` | `brianium/paratest` 7.20 only as a dev-dep; workers write `worker-<TEST_TOKEN>-*.json`. |
+| Counters | `Report/Summary`, `RunPipeline::classifyExecuted` | All in tests: `executed = affected + uncached + quarantined`. |
 
-Total: 117 ficheros en `src/` (12705 líneas), 81 clases de test.
+Total: 117 files in `src/` (12705 lines), 81 test classes.
 
-## Gate de fase 2
+## Phase 2 gate
 
-| Requisito | Resultado |
+| Requirement | Result |
 |---|---|
 | `composer validate --strict` | OK |
 | `vendor/bin/phpstan analyse` (max, php 8.2) | `[OK] No errors` |
-| Suite pcov | `Tests: 599, Assertions: 1959, Skipped: 3` |
-| Suite Xdebug (`XDEBUG_INI_DIR=… composer test:xdebug`) | `Tests: 599, Assertions: 1952, Skipped: 5` |
-| Escenarios §15 | 1–12 completos (`Scenario10InProcessReplayTest`, `Scenario12QuarantinedTestAlwaysRunsTest` añadidos) |
-| laravel-lite: migración → solo tests de esa tabla | `3 executed (3 affected) · 1 replayed` (los 3 con `RefreshDatabase`; `HomePageTest` replayado) — ver salida |
-| laravel-lite: vista Blade → solo tests que la renderizan | `1 executed (1 affected) · 3 replayed` — ver salida |
-| Paratest | `record -p 2` produce las mismas aristas que la grabación secuencial (`ParallelRunTest`) |
+| pcov suite | `Tests: 599, Assertions: 1959, Skipped: 3` |
+| Xdebug suite (`XDEBUG_INI_DIR=… composer test:xdebug`) | `Tests: 599, Assertions: 1952, Skipped: 5` |
+| Scenarios §15 | 1–12 complete (`Scenario10InProcessReplayTest`, `Scenario12QuarantinedTestAlwaysRunsTest` added) |
+| laravel-lite: migration → only tests for that table | `3 executed (3 affected) · 1 replayed` (the 3 with `RefreshDatabase`; `HomePageTest` replayed) — see output |
+| laravel-lite: Blade view → only tests that render it | `1 executed (1 affected) · 3 replayed` — see output |
+| Paratest | `record -p 2` produces the same edges as the sequential recording (`ParallelRunTest`) |
 
-## Salida real
+## Real output
 
-Fixtures copiados a tmp con `git init`, `HOME` aislado, `php bin/phpunit-replay` por subproceso. Salida íntegra:
+Fixtures copied to tmp with `git init`, isolated `HOME`, `php bin/phpunit-replay` as a subprocess. Full output:
 
 ```
 ############ A. plain fixture: explain / NotCacheable / flaky+quarantine / verify / prune
@@ -131,7 +131,7 @@ driver:    pcov (loaded, enabled per run)
 framework: laravel
 
 $ phpunit-replay record
-[30;42mOK (4 tests, 8 assertions)[0m
+[30;42mOK (4 tests, 8 assertions)[0m
 Replay  ● recorded 4 tests in 4 test files · 27 source files · 67 edges · graph.json 2 KB · baseline main@9c350e4 · 0s
 
 $ phpunit-replay
@@ -145,7 +145,7 @@ tests/Feature/UserModelTest.php          ← Migration database/migrations/2024_
 Replay  3 test files would run (3 affected, 0 uncached, 0 quarantined), 1 tests would replay
 
 $ phpunit-replay
-[30;42mOK (3 tests, 6 assertions)[0m
+[30;42mOK (3 tests, 6 assertions)[0m
 Replay  ✓ 3 executed (3 affected, 0 uncached) · 1 replayed · 0 quarantined · baseline main@9c350e4
 
 # edited resources/views/welcome.blade.php
@@ -154,7 +154,7 @@ tests/Feature/HomePageTest.php           ← PhpEdge  resources/views/welcome.bl
 Replay  1 test files would run (1 affected, 0 uncached, 0 quarantined), 3 tests would replay
 
 $ phpunit-replay
-[30;42mOK (1 test, 2 assertions)[0m
+[30;42mOK (1 test, 2 assertions)[0m
 Replay  ✓ 1 executed (1 affected, 0 uncached) · 3 replayed · 0 quarantined · baseline main@9c350e4
 
 $ phpunit-replay explain database/migrations/2024_01_03_000000_create_comments_table.php
@@ -165,26 +165,26 @@ tests/Feature/UserModelTest.php          ← Migration database/migrations/2024_
 direct dependents: 1
 ```
 
-Lecturas:
-- **A**: `NotCacheableTest` (2 tests) se ejecuta en cada pasada y se contabiliza en el hueco `quarantined` del resumen (el único que la spec reserva para "siempre se ejecuta"); `verify` limpio da 0 divergencias; con `FIXTURE_FLIP=1` detecta 1 divergencia, la mete en cuarentena y el histórico pasa a `1 in 2 runs`; `prune --flaky` la libera.
-- **B**: in-process sin wrapper: PHPUnit ve 35 tests / 61 aserciones en ambas pasadas; la segunda ejecuta solo `DependsTest::testFirst` (proveedor de `#[Depends]`, nunca se replaya) y `.setup-count` pasa de 35 a 1: el guard `isReplaying()` ahorró el `setUp()` caro de los 34 replayados. La ruta por reflexión da lo mismo.
-- **C**: Paratest: mismos números que la grabación secuencial.
-- **D**: Laravel: `record` traza 27 fuentes (vistas Blade incluidas) y 3 tablas; tocar la migración de `comments` selecciona exactamente los 3 tests que usan `RefreshDatabase` (todas las tablas de migraciones les pertenecen, spec §10) y replaya `HomePageTest`; tocar `welcome.blade.php` selecciona solo `HomePageTest` por arista (`BladeTracker` la registró al grabar).
+Readings:
+- **A**: `NotCacheableTest` (2 tests) runs on every pass and is counted in the summary's `quarantined` slot (the only one the spec reserves for "always runs"); a clean `verify` gives 0 divergences; with `FIXTURE_FLIP=1` it detects 1 divergence, puts it in quarantine, and the history moves to `1 in 2 runs`; `prune --flaky` releases it.
+- **B**: in-process without a wrapper: PHPUnit sees 35 tests / 61 assertions on both passes; the second run executes only `DependsTest::testFirst` (the `#[Depends]` provider, which is never replayed) and `.setup-count` goes from 35 to 1: the `isReplaying()` guard saved the expensive `setUp()` for the 34 replayed tests. The reflection path gives the same result.
+- **C**: Paratest: same numbers as the sequential recording.
+- **D**: Laravel: `record` traces 27 sources (Blade views included) and 3 tables; touching the `comments` migration selects exactly the 3 tests that use `RefreshDatabase` (all migration tables belong to them, spec §10) and replays `HomePageTest`; touching `welcome.blade.php` selects only `HomePageTest` via an edge (`BladeTracker` registered it when recording).
 
-## Qué quedó fuera y por qué
+## What was left out, and why
 
-- **Heurística de hermeticidad** (`hermeticity_heuristics`, §8.4): la clave de config existe pero no marca "sospechosos" en `status`. Fase 3 junto con el remoto (necesita aristas a `Carbon/`, `Faker/`, `Http/Client`).
-- **Cobertura fusionada** (`CoverageMerger`, `--coverage-php`) — fase 3 por spec.
-- **Etiqueta del resumen**: los tests `#[NotCacheable]` se cuentan como `quarantined`; en fase 3 el resumen distinguirá `N quarantined · M not cacheable`.
-- **PHPUnit 11.5 con suite completa**: solo verificado por API y en el spike (`docs/spikes`); la matriz real queda para `.github/workflows/ci.yml` (fase 3). El fixture laravel-lite resolvió PHPUnit 12.5, no 11.5.
-- **Paratest en modo in-process**: no probado (Paratest + trait); el wrapper con `-p` sí.
+- **Hermeticity heuristic** (`hermeticity_heuristics`, §8.4): the config key exists but does not flag "suspicious" items in `status`. Phase 3, together with the remote cache (needs edges to `Carbon/`, `Faker/`, `Http/Client`).
+- **Merged coverage** (`CoverageMerger`, `--coverage-php`) — phase 3 per spec.
+- **Summary label**: `#[NotCacheable]` tests are counted as `quarantined`; in phase 3 the summary will distinguish `N quarantined · M not cacheable`.
+- **PHPUnit 11.5 with the full suite**: only verified at the API level and in the spike (`docs/spikes`); the real matrix is left for `.github/workflows/ci.yml` (phase 3). The laravel-lite fixture resolved PHPUnit 12.5, not 11.5.
+- **Paratest in in-process mode**: not tested (Paratest + trait); the wrapper with `-p` is.
 
-## Cómo probarlo en un proyecto real
+## Trying it on a real project
 
-Además de los 7 pasos de fase 1 (README → "Trying it on your project"):
+In addition to the 7 steps from phase 1 (README → "Trying it on your project"):
 
-1. **In-process**: en tu `TestCase` base `use \Manuglopez\Replay\PHPUnit\Replayable;` (o extiende `ReplayableTestCase`), registra `<extensions><bootstrap class="Manuglopez\Replay\PHPUnit\ReplayExtension"><parameter name="mode" value="auto"/></bootstrap></extensions>` en `phpunit.xml` y lanza `vendor/bin/phpunit` normal dos veces: la segunda debe imprimir `Replay  ✓ … replayed` tras el resumen de PHPUnit con el mismo número de aserciones. Añade `if ($this->isReplaying()) return;` tras `parent::setUp()` para ahorrar el boot.
+1. **In-process**: in your base `TestCase` `use \Manuglopez\Replay\PHPUnit\Replayable;` (or extend `ReplayableTestCase`), register `<extensions><bootstrap class="Manuglopez\Replay\PHPUnit\ReplayExtension"><parameter name="mode" value="auto"/></bootstrap></extensions>` in `phpunit.xml` and run plain `vendor/bin/phpunit` twice: the second run should print `Replay  ✓ … replayed` after the PHPUnit summary with the same number of assertions. Add `if ($this->isReplaying()) return;` after `parent::setUp()` to save the boot.
 2. **Explain**: `vendor/bin/phpunit-replay explain app/Models/User.php`.
-3. **Flaky**: `vendor/bin/phpunit-replay verify` en `main` (o nightly); `status` muestra `divergences: N in R verify runs` y los ids en cuarentena; `prune --flaky` limpia.
-4. **Laravel**: `status` debe decir `framework: laravel` y `tables: N` tras `record`; toca una migración y comprueba con `--explain --dry-run` que salen solo los tests de BD.
-5. **Paralelo**: `composer require --dev brianium/paratest` y `vendor/bin/phpunit-replay record -p`.
+3. **Flaky**: `vendor/bin/phpunit-replay verify` on `main` (or nightly); `status` shows `divergences: N in R verify runs` and the quarantined ids; `prune --flaky` clears it.
+4. **Laravel**: `status` should say `framework: laravel` and `tables: N` after `record`; touch a migration and check with `--explain --dry-run` that only the DB tests show up.
+5. **Parallel**: `composer require --dev brianium/paratest` and `vendor/bin/phpunit-replay record -p`.

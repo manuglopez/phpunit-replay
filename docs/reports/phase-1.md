@@ -1,38 +1,38 @@
-# Fase 1 — informe
+# Phase 1 — development report
 
-Estado: **cerrada** (tag `v0.1.0-alpha1`). Paquete `manuglopez/phpunit-replay`, namespace `Manuglopez\Replay`, PHP 8.4.23, PHPUnit 12.5.34, pcov 1.0.12, Xdebug 3.5.3 (compilado localmente para 8.4).
+Status: **closed** (tag `v0.1.0-alpha1`). Package `manuglopez/phpunit-replay`, namespace `Manuglopez\Replay`, PHP 8.4.23, PHPUnit 12.5.34, pcov 1.0.12, Xdebug 3.5.3 (compiled locally for 8.4).
 
-## Qué se hizo
+## What was built
 
-| Área | Ficheros | Origen |
+| Area | Files | Origin |
 |---|---|---|
-| `Support/` Paths, AtomicFile, Json | 3 | nuevo |
-| `Cache/` ContentHash, Fingerprint, ProjectKey, StateDirectory, Graph, GraphStore, ContentKey, GraphUpdater | 8 | portado de Pest (ContentHash, Fingerprint, ProjectKey, Graph-modelo) + nuevo |
-| `Change/` Git, ChangedFiles, LastRunTree | 3 | portado de Pest + nuevo |
-| `Record/` CoverageDriver, PcovDriver, XdebugDriver, DriverDetector, SourceScope, Recorder, ResultCollector, RunWriter, RunPartial | 9 | portado (SourceScope, Recorder, ResultCollector) + nuevo |
-| `PHPUnit/` Mode, ConfigurationReader, ConfigurationWriter, ReplayState, ReplayExtension, 18 subscribers | 23 | subscribers portados de Pest; resto nuevo |
-| `Select/` TestPaths, WatchPatterns, WatchDefaults (Php/Laravel/Symfony), Rules (PhpEdge/TestFile/Watch), Selector | 14 | portado (TestPaths, WatchPatterns, defaults) + nuevo |
-| `Report/` Summary, RecordSummary, JUnitMerger | 4 | nuevo |
-| `Console/` Application, comandos run/record/status/baseline-path, RunPipeline, PhpunitProcess, ProjectLocator | 12 | nuevo |
-| `Config.php`, `Version.php`, `bin/phpunit-replay` | 3 | nuevo |
+| `Support/` Paths, AtomicFile, Json | 3 | new |
+| `Cache/` ContentHash, Fingerprint, ProjectKey, StateDirectory, Graph, GraphStore, ContentKey, GraphUpdater | 8 | ported from Pest (ContentHash, Fingerprint, ProjectKey, Graph model) + new |
+| `Change/` Git, ChangedFiles, LastRunTree | 3 | ported from Pest + new |
+| `Record/` CoverageDriver, PcovDriver, XdebugDriver, DriverDetector, SourceScope, Recorder, ResultCollector, RunWriter, RunPartial | 9 | ported (SourceScope, Recorder, ResultCollector) + new |
+| `PHPUnit/` Mode, ConfigurationReader, ConfigurationWriter, ReplayState, ReplayExtension, 18 subscribers | 23 | subscribers ported from Pest; rest new |
+| `Select/` TestPaths, WatchPatterns, WatchDefaults (Php/Laravel/Symfony), Rules (PhpEdge/TestFile/Watch), Selector | 14 | ported (TestPaths, WatchPatterns, defaults) + new |
+| `Report/` Summary, RecordSummary, JUnitMerger | 4 | new |
+| `Console/` Application, run/record/status/baseline-path commands, RunPipeline, PhpunitProcess, ProjectLocator | 12 | new |
+| `Config.php`, `Version.php`, `bin/phpunit-replay` | 3 | new |
 
-Total: 77 ficheros en `src/` (8116 líneas), 51 clases de test.
+Total: 77 files in `src/` (8116 lines), 51 test classes.
 
-Fixture `tests/Fixtures/Projects/plain`: 5 clases (`Money`, `TaxCalculator`, `Cart`, `Discount`, `Greeter`), 7 ficheros de test (35 tests: data provider, `#[Depends]`, fallo controlado por `FIXTURE_FAIL=1`, test skipped, fichero con solo comentarios), variantes en `plain-variants/`. `tests/Support/FixtureProject` copia el fixture a un tmp con `git init` y un shim de `vendor/` (sin `composer install`), y lanza `bin/phpunit-replay` por subproceso con `HOME` aislado.
+Fixture `tests/Fixtures/Projects/plain`: 5 classes (`Money`, `TaxCalculator`, `Cart`, `Discount`, `Greeter`), 7 test files (35 tests: data provider, `#[Depends]`, failure controlled by `FIXTURE_FAIL=1`, skipped test, file with only comments), variants in `plain-variants/`. `tests/Support/FixtureProject` copies the fixture to a tmp dir with `git init` and a `vendor/` shim (without `composer install`), and launches `bin/phpunit-replay` as a subprocess with an isolated `HOME`.
 
-## Gate de fase 1
+## Phase 1 gate
 
-| Requisito | Resultado |
+| Requirement | Result |
 |---|---|
 | `composer validate --strict` | OK |
-| `vendor/bin/phpstan analyse` (nivel max, `phpVersion: 80200`) | `[OK] No errors` |
-| Suite con pcov (`composer test`) | `Tests: 395, Assertions: 1200, Skipped: 3` (los 3 skips son guards de Xdebug ausente) — 15,7 s |
-| Suite con Xdebug (`XDEBUG_INI_DIR=… composer test:xdebug`) | `Tests: 395, Assertions: 1193, Skipped: 5` (skips = guards de pcov) — 17,3 s |
-| 12 escenarios §15 | 1–9 y 11 en `tests/Integration/Scenario*Test.php`; **10 (in-process) y 12 (cuarentena) son de fase 2** |
-| 8 criterios §16 | `tests/Integration/AcceptanceCriteriaTest.php` (ver métodos abajo) |
-| Escrituras atómicas | `Support\AtomicFile` (tmp + rename); criterio 8 mata el wrapper con SIGKILL y comprueba `graph.json` |
+| `vendor/bin/phpstan analyse` (max level, `phpVersion: 80200`) | `[OK] No errors` |
+| Suite with pcov (`composer test`) | `Tests: 395, Assertions: 1200, Skipped: 3` (the 3 skips are guards for missing Xdebug) — 15.7 s |
+| Suite with Xdebug (`XDEBUG_INI_DIR=… composer test:xdebug`) | `Tests: 395, Assertions: 1193, Skipped: 5` (skips = pcov guards) — 17.3 s |
+| 12 scenarios §15 | 1–9 and 11 in `tests/Integration/Scenario*Test.php`; **10 (in-process) and 12 (quarantine) belong to phase 2** |
+| 8 criteria §16 | `tests/Integration/AcceptanceCriteriaTest.php` (see methods below) |
+| Atomic writes | `Support\AtomicFile` (tmp + rename); criterion 8 kills the wrapper with SIGKILL and checks `graph.json` |
 
-Métodos de `AcceptanceCriteriaTest`:
+Methods of `AcceptanceCriteriaTest`:
 
 ```
 40  test_criterion_1_second_pass_with_no_changes_is_fast_and_replays_everything
@@ -45,9 +45,9 @@ Métodos de `AcceptanceCriteriaTest`:
 171  test_criterion_8_a_killed_wrapper_never_corrupts_state
 ```
 
-## Salida real sobre el fixture
+## Real output on the fixture
 
-Copia del fixture en un tmp (`git init` + commit), `HOME` aislado, `php bin/phpunit-replay` por subproceso. Salida íntegra de `scratchpad/walk.sh`:
+Copy of the fixture in a tmp dir (`git init` + commit), isolated `HOME`, `php bin/phpunit-replay` as a subprocess. Full output from `scratchpad/walk.sh`:
 
 ```
 $ phpunit-replay status
@@ -168,27 +168,27 @@ drwxr-xr-x 2 mglopez mglopez   40 sep  6 22:40 runs
 . .. composer.json composer.lock .git .gitignore .phpunit.cache phpunit.xml src tests vendor 
 ```
 
-Lectura: primera pasada graba (35 tests, 7 test files, 12 fuentes, 18 aristas); segunda pasada sin cambios 0 ejecutados / 35 replayed en **176 ms** de pared (bootstrap PHP incluido); cambiar `src/Money.php` ejecuta exactamente los 6 test files con arista a él (31 tests) y replaya los 4 de `GreeterTest`; cambiar solo comentarios ejecuta 0; un test fallido se guarda y se vuelve a ejecutar sin cambios (`1 uncached`); `--filter` no toca aristas ni sha (escenario 6).
+Reading: the first run records (35 tests, 7 test files, 12 sources, 18 edges); the second run with no changes gives 0 executed / 35 replayed in **176 ms** wall time (PHP bootstrap included); changing `src/Money.php` runs exactly the 6 test files with an edge to it (31 tests) and replays the 4 from `GreeterTest`; changing only comments runs 0; a failed test is saved and re-run without changes (`1 uncached`); `--filter` does not touch edges or sha (scenario 6).
 
-## Qué quedó fuera y por qué
+## What was left out, and why
 
-- **Modo in-process (trait `Replayable`)** — fase 2 por spec. Además `TestCase::runTest()` es `private` en 11.5 y 12; el spike `docs/spikes/in-process-replay.md` verifica los dos mecanismos viables (`invokeTestMethod()` en 12.5; swap por reflexión de `methodName` en 11.5/12.5).
-- **`explain`, `prune`, hermeticidad (`#[NotCacheable]`, globs, cuarentena), `verify`, Laravel, Paratest** — fase 2. `--explain` como opción de `run` sí está.
-- **Caché remota, `push`/`pull`, `CoverageMerger`** — fase 3. `--no-remote` se acepta y no hace nada.
-- **`generator` en graph.json** — no se escribe todavía (`Version::ID` se añade en fase 2).
-- **CI del paquete (matriz 8.2/8.3/8.4 × 11.5/12 × pcov/xdebug)** — fase 3 (`.github/workflows/ci.yml`). Localmente solo 8.4 + 12.5; 11.5 verificado a nivel de API (firmas) y en el spike, no con la suite completa.
-- **Xdebug del sistema** — el paquete `xdebug` de pacman es para PHP 8.5; se compiló 3.5.3 para 8.4 en el scratchpad. No se ha tocado `/etc/php84`.
+- **In-process mode (`Replayable` trait)** — phase 2 per spec. Also `TestCase::runTest()` is `private` in 11.5 and 12; the spike `docs/spikes/in-process-replay.md` verifies the two viable mechanisms (`invokeTestMethod()` in 12.5; reflection swap of `methodName` in 11.5/12.5).
+- **`explain`, `prune`, hermeticity (`#[NotCacheable]`, globs, quarantine), `verify`, Laravel, Paratest** — phase 2. `--explain` as an option of `run` is already present.
+- **Remote cache, `push`/`pull`, `CoverageMerger`** — phase 3. `--no-remote` is accepted and does nothing.
+- **`generator` in graph.json** — not written yet (`Version::ID` is added in phase 2).
+- **Package CI (matrix 8.2/8.3/8.4 × 11.5/12 × pcov/xdebug)** — phase 3 (`.github/workflows/ci.yml`). Locally only 8.4 + 12.5; 11.5 verified at the API level (signatures) and in the spike, not with the full suite.
+- **System Xdebug** — the pacman `xdebug` package is for PHP 8.5; 3.5.3 was compiled for 8.4 in the scratchpad. `/etc/php84` has not been touched.
 
-## Cómo probarlo en un proyecto real
+## Trying it on a real project
 
-Pasos exactos en `README.md` → "Trying it on your project". Resumen:
+Exact steps in `README.md` → "Trying it on your project". Summary:
 
 1. `composer config repositories.replay path ../phpunit-replay && composer require --dev manuglopez/phpunit-replay:@dev`
-2. `vendor/bin/phpunit-replay status` → `no baseline yet`, driver, root git, rama por defecto, framework.
-3. `vendor/bin/phpunit-replay record` → suite completa + línea `Replay  ● recorded …`.
-4. `vendor/bin/phpunit-replay` sin cambios → `0 executed … N replayed`, < 2 s + bootstrap.
-5. Tocar una clase → `vendor/bin/phpunit-replay --explain` (añade `--dry-run` para no ejecutar).
-6. `verify` → fase 2 (no existe aún).
-7. Si algo no cuadra: `--fresh`, `status`, `PHPUNIT_REPLAY_DEBUG=1` (decisiones a stderr), `PHPUNIT_REPLAY_KEEP_RUN=1` conserva `runs/<id>/` y `.phpunit-replay.xml`.
+2. `vendor/bin/phpunit-replay status` → `no baseline yet`, driver, git root, default branch, framework.
+3. `vendor/bin/phpunit-replay record` → full suite + `Replay  ● recorded …` line.
+4. `vendor/bin/phpunit-replay` with no changes → `0 executed … N replayed`, < 2 s + bootstrap.
+5. Touch a class → `vendor/bin/phpunit-replay --explain` (add `--dry-run` to avoid executing).
+6. `verify` → phase 2 (does not exist yet).
+7. If something doesn't add up: `--fresh`, `status`, `PHPUNIT_REPLAY_DEBUG=1` (decisions to stderr), `PHPUNIT_REPLAY_KEEP_RUN=1` keeps `runs/<id>/` and `.phpunit-replay.xml`.
 
-Nota pcov: en el proyecto real basta con tener `ext-pcov` cargada; el wrapper lanza PHPUnit con `-d pcov.enabled=1 -d pcov.directory=<root>`. Con Xdebug, el wrapper añade `-d xdebug.mode=coverage`; la extensión debe estar cargada por ini para que el proceso hijo la vea.
+pcov note: on the real project it's enough to have `ext-pcov` loaded; the wrapper launches PHPUnit with `-d pcov.enabled=1 -d pcov.directory=<root>`. With Xdebug, the wrapper adds `-d xdebug.mode=coverage`; the extension must be loaded via ini so the child process sees it.
