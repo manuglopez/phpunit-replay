@@ -435,7 +435,7 @@ final class RunPipeline
         $this->remote = $remote;
         $this->remoteOpen = true;
         $this->warnRemote();
-        $this->objects = new ObjectStore($remote, $this->stateDir, ProjectKey::for($root));
+        $this->objects = new ObjectStore($remote, $this->stateDir, ProjectKey::shared($root));
 
         Warnings::debug('remote: ' . $remote->name() . ' opened (push: ' . $config->remotePush . ')');
     }

@@ -62,7 +62,7 @@ final class PullCommand extends Command
         $remote->begin();
 
         try {
-            $objects = new ObjectStore($remote, $stateDir, ProjectKey::for($root));
+            $objects = new ObjectStore($remote, $stateDir, ProjectKey::shared($root));
 
             foreach ($candidates as $branch) {
                 $graph = $objects->graphOf($branch, $root);

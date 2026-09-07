@@ -33,10 +33,13 @@ final class FixtureProject
      * A second checkout of THIS project, git history and all, under `$root` — a second
      * machine for tests that need two of them sharing a remote cache (SPEC.md §9). The
      * copy keeps the same commits (so a baseline sha recorded on one is an ancestor of the
-     * other's HEAD) and, when `$root`'s basename and the `origin` remote match, resolves
-     * to the same `Cache\ProjectKey`, which is what makes `graph/<key>/<branch>.json`
-     * shared rather than per-checkout. Its `$HOME` — and therefore its state directory —
-     * is its own.
+     * other's HEAD) and, as long as the `origin` remote is unchanged, resolves to the same
+     * `Cache\ProjectKey::shared()` regardless of `$root`'s basename — which is what makes
+     * `graph/<key>/<branch>.json` shared rather than per-checkout, exactly like two
+     * developers cloning the same repository into differently named directories.
+     * `Cache\ProjectKey::for()` (the LOCAL state directory key) stays basename-sensitive by
+     * design, so it differs when `$root`'s basename differs from the original. Its `$HOME`
+     * — and therefore its state directory — is its own.
      */
     public function copyTo(string $root): self
     {

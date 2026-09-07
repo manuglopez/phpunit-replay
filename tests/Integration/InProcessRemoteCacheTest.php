@@ -41,12 +41,24 @@ final class InProcessRemoteCacheTest extends TestCase
         $this->machine1 = FixtureProject::inprocess($this->tempDir('machine1') . '/project');
         $this->machine1->repo->git('remote', 'add', 'origin', self::ORIGIN);
 
-        $this->machine2 = $this->machine1->copyTo($this->tempDir('machine2') . '/project');
+        // Different basename on purpose (SPEC.md §9): the remote graph key must not depend
+        // on the checkout directory name.
+        $this->machine2 = $this->machine1->copyTo($this->tempDir('machine2') . '/checkout');
 
-        self::assertSame(
+        self::assertNotSame(
+            basename($this->machine1->root()),
+            basename($this->machine2->root()),
+            'this test is only meaningful when the two checkouts have different basenames',
+        );
+        self::assertNotSame(
             ProjectKey::for($this->machine1->root()),
             ProjectKey::for($this->machine2->root()),
-            'two clones of the same repository must resolve to the same project key',
+            'for() is basename-sensitive: the two checkouts must NOT share a local project key',
+        );
+        self::assertSame(
+            ProjectKey::shared($this->machine1->root()),
+            ProjectKey::shared($this->machine2->root()),
+            'shared() must resolve identically for two clones of the same origin, regardless of basename',
         );
     }
 
@@ -72,7 +84,7 @@ final class InProcessRemoteCacheTest extends TestCase
         self::assertStringContainsString('Replay  ● recorded', $recorded['stdout']);
 
         // The whole baseline plus one object per test file is now on the shared cache.
-        $projectKey = ProjectKey::for($this->machine1->root());
+        $projectKey = ProjectKey::shared($this->machine1->root());
         self::assertFileExists($this->sharedCache . '/graph/' . $projectKey . '/main.json');
         self::assertNotSame([], $this->remoteObjects());
 

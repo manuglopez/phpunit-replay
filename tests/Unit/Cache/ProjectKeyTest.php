@@ -98,6 +98,42 @@ final class ProjectKeyTest extends TestCase
         }
     }
 
+    public function testSharedIsIndependentOfBasenameWhenAnOriginExists(): void
+    {
+        $repoA = GitRepo::init(null, 'main');
+        $repoA->git('remote', 'add', 'origin', 'git@github.com:Org/Repo.git');
+
+        $container = TempDir::make('projectkey-shared-b');
+        $repoB = GitRepo::init($container . '/a-totally-different-name', 'main');
+        $repoB->git('remote', 'add', 'origin', 'git@github.com:Org/Repo.git');
+
+        try {
+            self::assertNotSame(basename($repoA->root), basename($repoB->root));
+            self::assertNotSame(ProjectKey::for($repoA->root), ProjectKey::for($repoB->root), 'for() is basename-sensitive');
+
+            $expected = 'p-' . substr(hash('sha256', 'github.com/org/repo'), 0, 16);
+
+            self::assertSame($expected, ProjectKey::shared($repoA->root));
+            self::assertSame($expected, ProjectKey::shared($repoB->root));
+            self::assertSame(ProjectKey::shared($repoA->root), ProjectKey::shared($repoB->root));
+        } finally {
+            $repoA->destroy();
+            $repoB->destroy();
+            TempDir::remove($container);
+        }
+    }
+
+    public function testSharedFallsBackToForWhenThereIsNoOrigin(): void
+    {
+        $dir = TempDir::make('projectkey-shared-no-origin');
+
+        try {
+            self::assertSame(ProjectKey::for($dir), ProjectKey::shared($dir));
+        } finally {
+            TempDir::remove($dir);
+        }
+    }
+
     public function testWorktreeSharesOriginIdentityWithMainCheckout(): void
     {
         $main = GitRepo::init();

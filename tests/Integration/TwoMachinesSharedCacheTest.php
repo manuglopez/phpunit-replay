@@ -16,10 +16,13 @@ use PHPUnit\Framework\TestCase;
  * directory), sharing one `file://` remote cache. What one machine runs, the other replays
  * — by content key, without needing the same baseline sha to have been recorded locally.
  *
- * Both checkouts carry the same commits and the same `origin`, and their roots share a
- * basename, so `Cache\ProjectKey` resolves identically on both: that is what makes
- * `graph/<key>/<branch>.json` a shared key rather than a per-checkout one, exactly as two
- * clones of one repository behave.
+ * Both checkouts carry the same commits and the same `origin`, but their roots deliberately
+ * have DIFFERENT basenames (`shop` vs. `warehouse`) — exactly like two developers cloning
+ * the same repository into differently named directories. `Cache\ProjectKey::shared()`
+ * resolves identically on both regardless (it is keyed off the origin identity alone, never
+ * the checkout directory name), which is what makes `graph/<key>/<branch>.json` a shared
+ * remote key rather than a per-checkout one; `Cache\ProjectKey::for()` — used only for the
+ * LOCAL state directory name — is intentionally basename-sensitive and therefore differs.
  */
 final class TwoMachinesSharedCacheTest extends TestCase
 {
@@ -41,12 +44,24 @@ final class TwoMachinesSharedCacheTest extends TestCase
         $this->machine1 = FixtureProject::plain($this->tempDir('machine1') . '/shop');
         $this->machine1->repo->git('remote', 'add', 'origin', self::ORIGIN);
 
-        $this->machine2 = $this->machine1->copyTo($this->tempDir('machine2') . '/shop');
+        // Different basename on purpose (SPEC.md §9): the remote graph key must not depend
+        // on the checkout directory name.
+        $this->machine2 = $this->machine1->copyTo($this->tempDir('machine2') . '/warehouse');
 
-        self::assertSame(
+        self::assertNotSame(
+            basename($this->machine1->root()),
+            basename($this->machine2->root()),
+            'this test is only meaningful when the two checkouts have different basenames',
+        );
+        self::assertNotSame(
             ProjectKey::for($this->machine1->root()),
             ProjectKey::for($this->machine2->root()),
-            'two clones of the same repository must resolve to the same project key',
+            'for() is basename-sensitive: the two checkouts must NOT share a local project key',
+        );
+        self::assertSame(
+            ProjectKey::shared($this->machine1->root()),
+            ProjectKey::shared($this->machine2->root()),
+            'shared() must resolve identically for two clones of the same origin, regardless of basename',
         );
     }
 
@@ -69,7 +84,7 @@ final class TwoMachinesSharedCacheTest extends TestCase
         self::assertStringContainsString('recorded 35 tests', $recorded['stdout']);
 
         // The whole baseline plus one object per test file is now on the shared cache.
-        self::assertFileExists($this->sharedCache . '/graph/' . ProjectKey::for($this->machine1->root()) . '/main.json');
+        self::assertFileExists($this->sharedCache . '/graph/' . ProjectKey::shared($this->machine1->root()) . '/main.json');
         self::assertCount(7, $this->remoteObjects());
 
         // Machine 2 has never run anything: no local graph, no local objects. It pulls the

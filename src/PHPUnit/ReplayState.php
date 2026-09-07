@@ -915,7 +915,7 @@ final class ReplayState
 
         $remote->begin();
         self::$remoteOpen = true;
-        self::$objects = new ObjectStore($remote, $stateDir, ProjectKey::for($root));
+        self::$objects = new ObjectStore($remote, $stateDir, ProjectKey::shared($root));
 
         Warnings::debug('remote: ' . $remote->name() . ' opened (push: ' . $config->remotePush . ')');
     }

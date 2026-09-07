@@ -72,7 +72,7 @@ final class PushCommand extends Command
         $remote->begin();
 
         try {
-            $objects = new ObjectStore($remote, $stateDir, ProjectKey::for($root));
+            $objects = new ObjectStore($remote, $stateDir, ProjectKey::shared($root));
             $pushed = self::pushObjects($objects, $graph, $root, $branch);
 
             $output->writeln(sprintf('pushed %d object(s) to the %s remote', $pushed, $remote->name()));
@@ -86,7 +86,7 @@ final class PushCommand extends Command
                     return Command::FAILURE;
                 }
 
-                $output->writeln('pushed the ' . $branch . ' baseline (' . ObjectStore::graphKey(ProjectKey::for($root), $branch) . ')');
+                $output->writeln('pushed the ' . $branch . ' baseline (' . ObjectStore::graphKey(ProjectKey::shared($root), $branch) . ')');
             }
         } finally {
             $remote->end();

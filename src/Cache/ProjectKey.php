@@ -29,10 +29,31 @@ final class ProjectKey
         $realpath = @realpath($projectRoot);
         $input = $origin ?? ($realpath === false ? $projectRoot : $realpath);
 
-        $hash = substr(hash('sha256', $input), 0, 16);
         $slug = self::slug(basename($projectRoot));
 
-        return $slug . '-' . $hash;
+        return $slug . '-' . self::hash16($input);
+    }
+
+    /**
+     * A key for REMOTE paths (`graph/<key>/<branch>.json`, `objects/**`), deliberately
+     * independent of the checkout directory name: `self::for()` folds in `basename($projectRoot)`,
+     * so two developers cloning the very same `origin` into differently named directories
+     * (`m1/`, `m2/`) would otherwise resolve to two different remote keys and a fresh
+     * checkout would never find the team's shared baseline — only its own, empty one.
+     *
+     * `'p-' . hash16(originIdentity)` when an origin remote exists; falls back to
+     * {@see self::for()} (basename included) when there is none to key off of at all.
+     */
+    public static function shared(string $projectRoot): string
+    {
+        $origin = self::originIdentity($projectRoot);
+
+        return $origin === null ? self::for($projectRoot) : 'p-' . self::hash16($origin);
+    }
+
+    private static function hash16(string $input): string
+    {
+        return substr(hash('sha256', $input), 0, 16);
     }
 
     /** "github.com/org/repo" lowercased, no scheme/user/.git. Null when there is no origin remote. */
