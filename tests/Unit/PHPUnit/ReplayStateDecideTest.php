@@ -190,7 +190,9 @@ final class ReplayStateDecideTest extends TestCase
 
         self::assertInstanceOf(Run::class, $decision);
         self::assertSame('not-cacheable', $decision->reason);
-        self::assertSame(1, ReplayState::counters()['quarantined']);
+        // Counted separately from automatic quarantine (a flip) since the split.
+        self::assertSame(1, ReplayState::counters()['notCacheable']);
+        self::assertSame(0, ReplayState::counters()['quarantined']);
     }
 
     public function test_a_failed_result_is_never_replayed(): void

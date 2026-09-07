@@ -113,8 +113,8 @@ final class ReplayState
     /** @var array<string, TestResultArray> */
     private static array $replayed = [];
 
-    /** @var array{affected: int, uncached: int, replayed: int, quarantined: int} */
-    private static array $counters = ['affected' => 0, 'uncached' => 0, 'replayed' => 0, 'quarantined' => 0];
+    /** @var array{affected: int, uncached: int, replayed: int, quarantined: int, notCacheable: int} */
+    private static array $counters = ['affected' => 0, 'uncached' => 0, 'replayed' => 0, 'quarantined' => 0, 'notCacheable' => 0];
 
     private static float $savedSeconds = 0.0;
 
@@ -346,7 +346,8 @@ final class ReplayState
         if ($decision instanceof Run) {
             match ($decision->reason) {
                 'affected' => self::$counters['affected']++,
-                'quarantined', 'not-cacheable' => self::$counters['quarantined']++,
+                'quarantined' => self::$counters['quarantined']++,
+                'not-cacheable' => self::$counters['notCacheable']++,
                 default => self::$counters['uncached']++,
             };
         }
@@ -385,14 +386,18 @@ final class ReplayState
      * (and therefore always run for real) are counted correctly.
      *
      * Every field here counts individual tests, not test files: `decide()` increments
-     * `affected`/`uncached`/`quarantined` once per `Run` decision (one per test id) and
-     * `markReplayed()` increments `replayed` once per replayed test id, so
-     * `executed === affected + uncached + quarantined` holds the same way it does for
-     * the wrapper's own Summary (docs/INTERNALS.md "Summary counters",
+     * `affected`/`uncached`/`quarantined`/`notCacheable` once per `Run` decision (one per
+     * test id) and `markReplayed()` increments `replayed` once per replayed test id, so
+     * `executed === affected + uncached + quarantined + notCacheable` holds the same way
+     * it does for the wrapper's own Summary (docs/INTERNALS.md "Summary counters",
      * Console\Runner\RunPipeline::classifyExecuted()) — this is the one path that
-     * already got it right, the wrapper had to be brought in line with it.
+     * already got it right, the wrapper had to be brought in line with it. `quarantined`
+     * and `notCacheable` are counted separately here (a `Run` decision's reason is either
+     * `'quarantined'` or `'not-cacheable'`, never both), unlike the wrapper's own
+     * `RunList::primaryReasonFor()`, which still folds `notCacheable` files into
+     * `'quarantined'` until `RunPipeline::classifyExecuted()` is wired to split them too.
      *
-     * @return array{affected: int, uncached: int, replayed: int, quarantined: int, executed: int}
+     * @return array{affected: int, uncached: int, replayed: int, quarantined: int, notCacheable: int, executed: int}
      */
     public static function counters(): array
     {
@@ -513,6 +518,7 @@ final class ReplayState
             self::$persist ? self::$head : null,
             self::$savedSeconds,
             $success,
+            $counters['notCacheable'],
         ))->format();
     }
 
@@ -543,7 +549,7 @@ final class ReplayState
         self::$config = null;
         self::$decisions = [];
         self::$replayed = [];
-        self::$counters = ['affected' => 0, 'uncached' => 0, 'replayed' => 0, 'quarantined' => 0];
+        self::$counters = ['affected' => 0, 'uncached' => 0, 'replayed' => 0, 'quarantined' => 0, 'notCacheable' => 0];
         self::$savedSeconds = 0.0;
         self::$dependedUpon = [];
         self::$scannedForDepends = [];

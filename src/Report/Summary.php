@@ -18,6 +18,12 @@ namespace Manuglopez\Replay\Report;
  * counted tests this way; `Console\Runner\RunPipeline::classifyExecuted()` is what makes
  * the wrapper agree with it. `--dry-run`, which has nothing executed yet to classify,
  * prints {@see DryRunSummary} instead — a deliberately different shape, over test files.
+ *
+ * `notCacheable` is a distinct counter for tests made non-cacheable by a `#[NotCacheable]`
+ * attribute or a `never_cache` glob (as opposed to automatic quarantine after a flip):
+ * today's callers still fold both into `quarantined` (see the TODO on
+ * `Select\RunList::primaryReasonFor()`), so it defaults to 0 and is only printed — `· N not
+ * cacheable` — once something actually passes a positive count.
  */
 final readonly class Summary
 {
@@ -32,6 +38,7 @@ final readonly class Summary
         public ?string $baselineSha,
         public float $savedSeconds,
         public bool $success,
+        public int $notCacheable = 0,
     ) {
     }
 
@@ -63,6 +70,10 @@ final readonly class Summary
             $this->replayedSegment(),
             sprintf('%d quarantined', $this->quarantined),
         ];
+
+        if ($this->notCacheable > 0) {
+            $segments[] = sprintf('%d not cacheable', $this->notCacheable);
+        }
 
         $baseline = $this->baselineSegment($this->baselineBranch, $this->baselineSha);
 

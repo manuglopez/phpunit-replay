@@ -37,9 +37,14 @@ final class RunList
     /**
      * @param list<string> $unknown test files on disk the graph does not know
      * @param list<string> $rerun test files with at least one result that must be re-run
-     * @param list<string> $quarantined test files with at least one non-cacheable test
+     * @param list<string> $quarantined test files with at least one test automatically
+     *   quarantined by {@see \Manuglopez\Replay\Hermeticity\Quarantine} (a flip)
      * @param array<string, int> $rerunStatuses test file => the status that forced the re-run
-     * @param array<string, Reason> $quarantineReasons test file => why it is not cacheable
+     * @param array<string, Reason> $quarantineReasons test file => why it is quarantined
+     * @param list<string> $notCacheable test files with at least one test made non-cacheable
+     *   by a `#[NotCacheable]` attribute or a `never_cache` glob — distinct from automatic
+     *   quarantine (docs/INTERNALS.md "Hermeticity", SPEC.md §8)
+     * @param array<string, Reason> $notCacheableReasons test file => why it is not cacheable
      */
     public function __construct(
         public readonly Selection $selection,
@@ -48,6 +53,8 @@ final class RunList
         public readonly array $quarantined = [],
         private readonly array $rerunStatuses = [],
         private readonly array $quarantineReasons = [],
+        public readonly array $notCacheable = [],
+        private readonly array $notCacheableReasons = [],
     ) {
     }
 
@@ -63,6 +70,7 @@ final class RunList
             ...$this->unknown,
             ...$this->rerun,
             ...$this->quarantined,
+            ...$this->notCacheable,
         ]));
 
         sort($files);
@@ -79,7 +87,7 @@ final class RunList
 
     /**
      * Every reason this file is in the run list: the rule-chain reasons first, then the
-     * synthetic ones (`Uncached`, `Rerun`, `Quarantine`).
+     * synthetic ones (`Uncached`, `Rerun`, `Quarantine`, `NotCacheable`).
      *
      * @return list<Reason>
      */
@@ -99,6 +107,10 @@ final class RunList
             $reasons[] = $this->quarantineReasons[$testFileRel] ?? new Reason('Quarantine', 'not cacheable');
         }
 
+        if (in_array($testFileRel, $this->notCacheable, true)) {
+            $reasons[] = $this->notCacheableReasons[$testFileRel] ?? new Reason('NotCacheable', 'not cacheable');
+        }
+
         return $reasons;
     }
 
@@ -115,6 +127,12 @@ final class RunList
      * (`'uncached'`), then quarantine (`'quarantined'`) — the same precedence
      * {@see self::reasonsFor()} lists reasons in. Every file actually in {@see self::files()}
      * matches at least one of the three, so this always returns one of them.
+     *
+     * TODO(wiring): `$notCacheable` files (distinct from `$quarantined` since the split in
+     * docs/INTERNALS.md "Hermeticity") still fall through to the `'quarantined'` default
+     * below, matching current behaviour (`Report\Summary` has no `notCacheable` segment of
+     * its own yet). Classify `notCacheable` in `Console\Runner\RunPipeline::classifyExecuted()`
+     * once the wrapper's Summary construction is updated to pass it through.
      */
     public function primaryReasonFor(string $testFileRel): string
     {

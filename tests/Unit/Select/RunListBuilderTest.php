@@ -160,19 +160,42 @@ final class RunListBuilderTest extends TestCase
         self::assertSame([], $this->builder($graph)->build([], 'main')->rerun);
     }
 
-    public function test_a_file_marked_not_cacheable_lands_in_the_quarantined_bucket(): void
+    public function test_a_file_marked_not_cacheable_lands_in_the_not_cacheable_bucket(): void
     {
         $graph = $this->graph(['App\Tests\FooTest::testOne' => 0]);
         $graph->setNotCacheable(['tests/FooTest.php']);
 
         $list = $this->builder($graph)->build([], 'main');
 
-        self::assertSame(['tests/FooTest.php'], $list->quarantined);
+        // The `#[NotCacheable]` attribute and automatic quarantine are distinct run-list
+        // buckets (SPEC.md §8, docs/INTERNALS.md "Hermeticity"): only the latter is
+        // `$quarantined`.
+        self::assertSame(['tests/FooTest.php'], $list->notCacheable);
+        self::assertSame([], $list->quarantined);
         self::assertSame(['tests/FooTest.php'], $list->files());
-        // The `#[NotCacheable]` attribute and the automatic quarantine are reported
-        // under distinct rule names (SPEC.md §8, docs/INTERNALS.md "Hermeticity").
         self::assertSame('NotCacheable', $list->reasonsFor('tests/FooTest.php')[0]->rule);
         self::assertSame('attribute', $list->reasonsFor('tests/FooTest.php')[0]->trigger);
+    }
+
+    public function test_a_flipped_test_lands_in_the_quarantined_bucket_not_not_cacheable(): void
+    {
+        $graph = $this->graph(['App\Tests\FooTest::testOne' => 0]);
+        $quarantine = Quarantine::load($this->root . '/state');
+        $quarantine->recordFlip('App\Tests\FooTest::testOne', 'k1');
+
+        $list = (new RunListBuilder(
+            $graph,
+            new TestPaths(['tests'], [], ['Test.php']),
+            new WatchPatterns(),
+            ConfigurationReader::fromXmlFile($this->root . '/phpunit.xml'),
+            new Policy($graph, Config::defaults(), $quarantine, $this->root),
+            $this->root,
+        ))->build([], 'main');
+
+        self::assertSame(['tests/FooTest.php'], $list->quarantined);
+        self::assertSame([], $list->notCacheable);
+        self::assertSame(['tests/FooTest.php'], $list->files());
+        self::assertSame('Quarantine', $list->reasonsFor('tests/FooTest.php')[0]->rule);
     }
 
     public function test_all_test_files_on_disk_lists_every_test_file_regardless_of_the_graph(): void

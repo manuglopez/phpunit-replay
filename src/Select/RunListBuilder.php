@@ -80,11 +80,25 @@ final class RunListBuilder
             }
         }
 
-        $quarantined = $this->policy->nonCacheableFiles($allTestFiles, $idsByFile);
+        // Split every non-cacheable file (docs/INTERNALS.md "Hermeticity") into two run-list
+        // buckets by its most relevant Reason: automatic quarantine (a flip,
+        // Hermeticity\Quarantine) versus an explicit `#[NotCacheable]`/`never_cache` — the
+        // wrapper counts these separately (Report\Summary's `notCacheable` segment).
+        $quarantined = [];
         $quarantineReasons = [];
+        $notCacheable = [];
+        $notCacheableReasons = [];
 
-        foreach ($quarantined as $file) {
-            $quarantineReasons[$file] = $this->reasonFor($file, $idsByFile[$file] ?? []);
+        foreach ($this->policy->nonCacheableFiles($allTestFiles, $idsByFile) as $file) {
+            $reason = $this->reasonFor($file, $idsByFile[$file] ?? []);
+
+            if ($reason->rule === 'Quarantine') {
+                $quarantined[] = $file;
+                $quarantineReasons[$file] = $reason;
+            } else {
+                $notCacheable[] = $file;
+                $notCacheableReasons[$file] = $reason;
+            }
         }
 
         return new RunList(
@@ -94,6 +108,8 @@ final class RunListBuilder
             $quarantined,
             $rerun,
             $quarantineReasons,
+            $notCacheable,
+            $notCacheableReasons,
         );
     }
 

@@ -70,6 +70,28 @@ final class SummaryTest extends TestCase
         self::assertStringContainsString('0 executed (0 affected, 0 uncached)', $summary->format());
     }
 
+    public function testFormatOmitsNotCacheableWhenZero(): void
+    {
+        self::assertStringNotContainsString('not cacheable', $this->summary()->format());
+        self::assertStringNotContainsString('not cacheable', $this->summary(notCacheable: 0)->format());
+    }
+
+    /** A caller built before `notCacheable` existed (e.g. a positional constructor call omitting it entirely) still compiles and formats the same way: BC via the trailing default. */
+    public function testConstructorOmittingNotCacheableDefaultsToZeroAndIsBackwardCompatible(): void
+    {
+        $summary = new Summary(38, 31, 7, 1202, 14, 2, 'main', 'a1b2c3d4e5f6', 252.0, true);
+
+        self::assertSame(0, $summary->notCacheable);
+        self::assertStringNotContainsString('not cacheable', $summary->format());
+    }
+
+    public function testFormatShowsNotCacheableOnlyWhenPositive(): void
+    {
+        $summary = $this->summary(notCacheable: 3);
+
+        self::assertStringContainsString('2 quarantined · 3 not cacheable · baseline', $summary->format());
+    }
+
     public function testFormatUsesSubMinuteSecondsBelowOneMinute(): void
     {
         $summary = $this->summary(savedSeconds: 12.0);
@@ -157,6 +179,7 @@ final class SummaryTest extends TestCase
         ?string $baselineSha = 'a1b2c3d4e5f6',
         float $savedSeconds = 252.0,
         bool $success = true,
+        int $notCacheable = 0,
     ): Summary {
         return new Summary(
             executed: $executed,
@@ -169,6 +192,7 @@ final class SummaryTest extends TestCase
             baselineSha: $baselineSha,
             savedSeconds: $savedSeconds,
             success: $success,
+            notCacheable: $notCacheable,
         );
     }
 }
