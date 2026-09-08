@@ -53,7 +53,7 @@ final class Application extends BaseApplication
         'status' => [],
         'baseline-path' => [],
         'explain' => [],
-        'prune' => ['flaky', 'branches', 'all', 'remote', 'squash'],
+        'prune' => ['flaky', 'branches', 'all', 'stale-edges', 'remote', 'squash'],
         'verify' => ['parallel'],
         'push' => ['graph'],
         'pull' => [],

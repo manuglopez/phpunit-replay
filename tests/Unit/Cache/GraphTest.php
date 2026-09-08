@@ -410,6 +410,85 @@ final class GraphTest extends TestCase
         self::assertSame(['tests/Feature/KeepTest.php'], $graph->notCacheable());
     }
 
+    public function test_prune_missing_dependencies_drops_only_the_edge_whose_file_is_gone(): void
+    {
+        $this->write('tests/Feature/FooTest.php');
+        $this->write('app/Kept.php');
+        $goneAbsolute = $this->write('app/Gone.php');
+
+        $graph = new Graph($this->root);
+        $graph->link('tests/Feature/FooTest.php', 'app/Kept.php');
+        $graph->link('tests/Feature/FooTest.php', 'app/Gone.php');
+
+        unlink($goneAbsolute);
+
+        $removed = $graph->pruneMissingDependencies();
+
+        self::assertSame(1, $removed);
+        self::assertSame(['app/Kept.php'], $graph->dependenciesOf('tests/Feature/FooTest.php'));
+        self::assertTrue($graph->knowsTest('tests/Feature/FooTest.php'));
+    }
+
+    public function test_prune_missing_dependencies_keeps_the_test_entry_when_every_dependency_is_gone(): void
+    {
+        $this->write('tests/Feature/FooTest.php');
+        $goneAbsolute = $this->write('app/Gone.php');
+
+        $graph = new Graph($this->root);
+        $graph->link('tests/Feature/FooTest.php', 'app/Gone.php');
+
+        unlink($goneAbsolute);
+
+        $removed = $graph->pruneMissingDependencies();
+
+        self::assertSame(1, $removed);
+        self::assertSame([], $graph->dependenciesOf('tests/Feature/FooTest.php'));
+        self::assertTrue($graph->knowsTest('tests/Feature/FooTest.php'));
+    }
+
+    /**
+     * The safety invariant the whole feature rests on: a dependency is only ever dropped
+     * because its file is confirmed gone from disk, never because a pass simply didn't
+     * re-observe it (coverage attribution is first-loader-wins and varies run to run —
+     * see Graph::unionEdges()'s docblock — so "not seen this run" is never evidence a
+     * dependency is gone).
+     */
+    public function test_prune_missing_dependencies_keeps_edges_whose_files_still_exist(): void
+    {
+        $this->write('tests/Feature/FooTest.php');
+        $this->write('app/Foo.php');
+        $this->write('app/Bar.php');
+
+        $graph = new Graph($this->root);
+        $graph->link('tests/Feature/FooTest.php', 'app/Foo.php');
+        $graph->link('tests/Feature/FooTest.php', 'app/Bar.php');
+
+        $removed = $graph->pruneMissingDependencies();
+
+        self::assertSame(0, $removed);
+        self::assertEqualsCanonicalizing(
+            ['app/Foo.php', 'app/Bar.php'],
+            $graph->dependenciesOf('tests/Feature/FooTest.php'),
+        );
+    }
+
+    public function test_prune_missing_dependencies_invalidates_the_memoised_reverse_index(): void
+    {
+        $this->write('tests/Feature/FooTest.php');
+        $goneAbsolute = $this->write('app/Gone.php');
+
+        $graph = new Graph($this->root);
+        $graph->link('tests/Feature/FooTest.php', 'app/Gone.php');
+
+        // Force the reverse index to memoise before pruning.
+        self::assertSame(['tests/Feature/FooTest.php'], $graph->testFilesDependingOn('app/Gone.php'));
+
+        unlink($goneAbsolute);
+        $graph->pruneMissingDependencies();
+
+        self::assertSame([], $graph->testFilesDependingOn('app/Gone.php'));
+    }
+
     public function test_prune_results_for_missing_files(): void
     {
         $this->write('tests/Feature/KeepTest.php');

@@ -113,6 +113,13 @@ final class ReplayState
 
     private static bool $persist = false;
 
+    /**
+     * True when {@see self::decideMode()} downgraded a standing `mode: record` config to
+     * `Mode::ResultsOnly` because this pass carried a partial CLI selection — surfaced by
+     * {@see self::summaryLine()} via `Report\Summary::$recordModeDowngraded`.
+     */
+    private static bool $recordModeDowngraded = false;
+
     private static ?Config $config = null;
 
     private static ?ObjectStore $objects = null;
@@ -615,6 +622,7 @@ final class ReplayState
             self::$savedSeconds,
             $success,
             $counters['notCacheable'],
+            self::$recordModeDowngraded,
         ))->format();
     }
 
@@ -643,6 +651,7 @@ final class ReplayState
         self::$head = null;
         self::$defaultBranch = 'main';
         self::$persist = false;
+        self::$recordModeDowngraded = false;
         self::$config = null;
         self::$objects = null;
         self::$remoteOpen = false;
@@ -875,6 +884,20 @@ final class ReplayState
         }
 
         if ($reader->hasPartialSelection()) {
+            // Bug fix: `mode: record` is a standing "always record" configuration — unlike
+            // the default `auto`, which only lands on Record because there is no baseline
+            // yet (an ordinary, silent first-run bootstrap, the same one `run --filter`
+            // already shares through the wrapper and must stay silent). A partial CLI
+            // selection correctly downgrades either case to ResultsOnly — a subset run
+            // cannot produce a valid baseline (SPEC.md §3.3, now enforced for the wrapper's
+            // own `record` command too) — but for an explicit `mode: record` project this
+            // silently defeats what the user told the tool to always do, with nothing
+            // written and nothing said. Recorded here so `summaryLine()` can say so on the
+            // summary line that already prints unconditionally once per run, rather than
+            // opening a new, separate warning channel for something that, during normal
+            // development, could fire on most runs.
+            self::$recordModeDowngraded = $config->mode === 'record';
+
             return Mode::ResultsOnly;
         }
 

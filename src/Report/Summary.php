@@ -24,6 +24,19 @@ namespace Manuglopez\Replay\Report;
  * today's callers still fold both into `quarantined` (see the TODO on
  * `Select\RunList::primaryReasonFor()`), so it defaults to 0 and is only printed — `· N not
  * cacheable` — once something actually passes a positive count.
+ *
+ * `recordModeDowngraded` (in-process mode only, {@see \Manuglopez\Replay\PHPUnit\ReplayState::summaryLine()};
+ * the wrapper's own `Console\Runner\RunPipeline` never sets it — a `record` command
+ * carrying a partial selection refuses before ever reaching a `Summary`, SPEC.md §3.3) is
+ * true when the project's `phpunit.xml`/config declares the standing `mode: record` but
+ * *this* pass carried a partial CLI selection (`--filter`/`--group`/`--testsuite`/an
+ * explicit path) and downgraded to results-only instead — a subset run cannot produce a
+ * valid baseline, so nothing was refreshed. This piggybacks on the summary line that
+ * already prints unconditionally once per in-process run rather than opening a new,
+ * separate warning channel: a `mode: auto` project whose *only* reason to have recorded is
+ * "no baseline yet" (the ordinary, silent first-run bootstrap `run --filter` already
+ * shares) does not set this — only an explicit, standing `mode: record` that a selection
+ * just defeated does.
  */
 final readonly class Summary
 {
@@ -39,6 +52,7 @@ final readonly class Summary
         public float $savedSeconds,
         public bool $success,
         public int $notCacheable = 0,
+        public bool $recordModeDowngraded = false,
     ) {
     }
 
@@ -73,6 +87,10 @@ final readonly class Summary
 
         if ($this->notCacheable > 0) {
             $segments[] = sprintf('%d not cacheable', $this->notCacheable);
+        }
+
+        if ($this->recordModeDowngraded) {
+            $segments[] = 'record mode: baseline NOT refreshed (partial selection)';
         }
 
         $baseline = $this->baselineSegment($this->baselineBranch, $this->baselineSha);

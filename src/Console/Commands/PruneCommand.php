@@ -32,10 +32,11 @@ final class PruneCommand extends Command
     {
         $this
             ->setName('prune')
-            ->setDescription('Prunes stale graph state: quarantine, deleted branches, deleted test files, or everything.')
+            ->setDescription('Prunes stale graph state: quarantine, deleted branches, deleted test files, stale dependency edges, or everything.')
             ->addOption('flaky', null, InputOption::VALUE_NONE, 'Clears the quarantine (flaky.json).')
             ->addOption('branches', null, InputOption::VALUE_NONE, 'Removes baselines of branches git no longer knows.')
             ->addOption('all', null, InputOption::VALUE_NONE, 'Deletes the whole state directory contents.')
+            ->addOption('stale-edges', null, InputOption::VALUE_NONE, 'Drops a dependency edge whose file no longer exists, for a test file that still exists.')
             ->addOption('remote', null, InputOption::VALUE_NONE, 'Garbage-collects the configured remote cache instead of the local graph.')
             ->addOption('keep-months', null, InputOption::VALUE_REQUIRED, 'Months of object shards to keep with --remote.', '3')
             ->addOption('squash', null, InputOption::VALUE_NONE, 'With --remote (git backend only): rewrite the remote branch as one orphan commit.')
@@ -59,6 +60,7 @@ final class PruneCommand extends Command
         $flaky = $input->getOption('flaky') === true;
         $branches = $input->getOption('branches') === true;
         $all = $input->getOption('all') === true;
+        $staleEdges = $input->getOption('stale-edges') === true;
 
         if ($all) {
             foreach (['graph.json', 'flaky.json', 'last-run.json', 'divergence.json'] as $file) {
@@ -79,7 +81,7 @@ final class PruneCommand extends Command
             return Command::SUCCESS;
         }
 
-        $noFlag = ! $flaky && ! $branches;
+        $noFlag = ! $flaky && ! $branches && ! $staleEdges;
         $messages = [];
 
         if ($flaky) {
@@ -104,6 +106,19 @@ final class PruneCommand extends Command
 
                 $after = count($graph->allTestFiles());
                 $messages[] = sprintf('pruned %d deleted test file(s)', max(0, $before - $after));
+            }
+
+            // Deliberately its own flag, never folded into $noFlag's bundle (SPEC.md §11,
+            // docs/INTERNALS.md "Commands"): a dependency edge is what a changed file is
+            // matched against to decide whether a cached result can still be trusted
+            // (Select\Rules\PhpEdgeRule / Graph::testFilesDependingOn()), unlike a deleted
+            // test file or an unreachable branch, which carry no such risk. Only a
+            // dependency confirmed gone from disk is ever removed here — never one merely
+            // unobserved by a recording pass, which Graph::unionEdges()'s docblock explains
+            // is not evidence of staleness.
+            if ($staleEdges) {
+                $removed = $graph->pruneMissingDependencies();
+                $messages[] = sprintf('pruned %d stale dependency edge(s)', $removed);
             }
 
             if ($branches || $noFlag) {

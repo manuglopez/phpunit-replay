@@ -272,6 +272,34 @@ final class RunPipeline
             return '--repeat/--retry requested: the test id it changes results on is not stable across runs, degrading to a plain PHPUnit run';
         }
 
+        // Bug fix: `record` shares this same `run()` entry point with `run` itself
+        // (RecordCommand just sets RunRequest::$record = true), and `run()` used to check
+        // `hasPartialSelection()` before ever looking at `$request->record` — so
+        // `record -- --filter=X` (or --group/--testsuite/an explicit path) silently took
+        // the results-only branch (SPEC.md §3.1's "disable selection" paragraph, meant for
+        // `run`), which merges a few already-known tests' results at most and returns,
+        // without ever recording an edge or publishing a baseline. That is exactly the
+        // "record produced nothing" case {@see self::DEGRADED_RECORD_EXIT_CODE} exists to
+        // flag — only unreachable through this path, because results-only mode is a
+        // deliberate destination for `run`, not a degrade, so nothing there turned the exit
+        // code red. RecordCommand's own docblock already claims `record` runs "the full
+        // suite ... unconditionally (no selection)" (SPEC.md §3.3); a partial run cannot
+        // produce the one thing `record` exists to produce (a complete, trustworthy
+        // baseline — pruning and the published sha both assume the whole suite ran), so
+        // there is nothing worth salvaging from it under record's name. Checked here, before
+        // `loadGraph()` ever runs, so an existing graph is never even touched. Routed
+        // through `degrade()` like every other reason on this list: the user's own
+        // selection still runs, for real, via the plain unwrapped `PhpunitProcess` fallback
+        // (never breaking the run), the graph is left completely alone, and the
+        // `$request->record` rule already in `degrade()` turns a passing fallback into exit
+        // 2 instead of a false "0". `run` and `verify` are unaffected: only
+        // `$request->record` reaches this branch, so they keep handling a partial selection
+        // the way they always have ({@see self::runResultsOnly()}, `verify()`'s own
+        // `hasPartialSelection()` gate).
+        if ($request->record && $this->reader->hasPartialSelection()) {
+            return 'record does not accept a partial PHPUnit selection (--filter/--exclude-filter/--group/--exclude-group/--testsuite/--exclude-testsuite/an explicit path): it always records the complete suite, unconditionally (SPEC.md §3.3) — use `run` or `verify` instead';
+        }
+
         $this->testPaths = TestPaths::fromConfiguration($configuration, $root);
 
         $this->watch = new WatchPatterns();
@@ -502,7 +530,29 @@ final class RunPipeline
         }
     }
 
-    /** Step 7: partial CLI selection (--filter, --group, --testsuite, an explicit path, ...). */
+    /**
+     * Step 7: partial CLI selection (--filter, --group, --testsuite, an explicit path, ...).
+     * By this point `$request->record` is always false: a `record` carrying a partial
+     * selection already degraded in {@see self::resolveEnvironment()}, before `run()`
+     * even reached the `hasPartialSelection()` check that routes here.
+     *
+     * Unlike {@see self::runRecord()} and {@see self::verify()}, this method never checks
+     * `$this->driverName` for a missing coverage driver, deliberately: it always calls
+     * {@see self::runPhpunit()} with `$iniFlags = []` — no `pcov.enabled=1`/
+     * `xdebug.mode=coverage`, regardless of whether a driver is actually loaded — and
+     * always calls `GraphUpdater::apply(..., recordsEdges: false, ...)` below, so no
+     * coverage data is ever collected or required; the extension itself skips its own
+     * driver-detection block entirely for `Mode::ResultsOnly`
+     * ({@see \Manuglopez\Replay\PHPUnit\ReplayExtension::bootstrap()}). Results-only mode
+     * only merges pass/fail/time/assertions for test files the graph already knows about,
+     * sourced from PHPUnit's own event subscribers, never from coverage. That is precisely
+     * what makes `run --filter` (and `--group`/`--testsuite`/an explicit path) keep working
+     * driver-agnostically, per SPEC.md §16 acceptance criterion 7 ("Without pcov or Xdebug
+     * the package disables itself with a warning and PHPUnit works normally") — degrading
+     * here for a missing driver would instead break acceptance criterion 6 for every
+     * `run --filter` on a machine with no driver at all, for no correctness gain: there is
+     * no edge or baseline this path could have recorded either way.
+     */
     private function runResultsOnly(RunRequest $request): int
     {
         // Bug fix: this branch is reached before the record/replay decision (`run()`
