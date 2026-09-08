@@ -15,6 +15,18 @@ All notable changes to this project will be documented in this file.
 - The PHPUnit 13.3 `--repeat`/`--retry` test-id hazard (`#[Repeat]`/`#[Retry]` making `PHPUnit\Event\Code\TestMethod::id()` non-stable — repetition/attempt-suffixed — across runs that differ) is now reachable, since 13.1+ is supported, and is now covered both ways it arises: a `--repeat`/`--retry` **CLI flag** degrades the *whole run* to a plain, unreplayed, unrecorded PHPUnit invocation (`ConfigurationReader::repeatOrRetryRequested()`, checked by `RunPipeline` and `ReplayExtension::bootstrapInProcess()`), since that hazard is global to the run it appears on; a `#[Repeat]`/`#[Retry]` **attribute** — which PHPUnit's own `TestBuilder` honours on every run regardless of any CLI flag, so a decorated method would otherwise be silently replayed wholesale from a prior recording — is instead excluded **per test**: `RecordRepeatOrRetryNotCacheableOnPreparationStarted` marks exactly the decorated method's current id (whatever repetition/attempt suffix it carries, including the bare, unsuffixed one a first repetition/attempt always gets) not-cacheable, the same way a `#[NotCacheable]` entry is, so the rest of the suite still replays normally.
 - Package CI: the `test` job's matrix moves to PHP 8.2/8.3/8.4 × PHPUnit `^11.5`/`^12.0`/`^13.0` × pcov/xdebug (12 of 18 cells, same exclusions as before, now against `^13.0` instead of `~13.0.0`). A new `coverage-format` job additionally pins PHPUnit at 13.1.14 and forces `composer update --with phpunit/php-code-coverage:<minor>.*` for 14.0, 14.1 and 14.2 in turn (3 more cells) — `^13.0` alone resolves straight to cc 14.3 and would leave the other three file formats untested. 15 cells total.
 - Docs: README, `docs/SPEC.md`, `docs/INTERNALS.md` and `docs/README.md` updated to state full PHPUnit 11.5/12/13 support; the stale "13.1+ not supported" claim and its php-code-coverage `^14` reasoning are removed.
+- `--parallel`/`-p` on a Laravel project invoked `vendor/bin/paratest` directly, without Laravel's
+  own `--runner=\Illuminate\Testing\ParallelRunner` or `LARAVEL_PARALLEL_TESTING=1`: every worker
+  migrated the SAME database instead of a per-worker one, surfacing as
+  `ERROR 1213 (40001) Deadlock found when trying to get lock` on `DROP TABLE` rather than a clean
+  test failure. Both are now wired up automatically whenever Laravel, Paratest, and a resolvable
+  `Illuminate\Testing\ParallelRunner` are all present (`Laravel\ParallelIsolation`); opt out with
+  `laravel_parallel_isolation: false`. Degrades with a warning — never a crash — when the project's
+  Laravel application can't be resolved, or when Paratest is present but `ParallelRunner` isn't.
+- The `laravel-lite` fixture's `sqlite :memory:` configuration is why the package's own suite never
+  caught this (every worker already gets its own isolated database by construction); a second,
+  file-based-sqlite testsuite (`tests/ParallelFileDb`) now proves real per-worker database
+  separation end to end.
 
 ## [0.1.0] — 2026-09-07
 

@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    A narrow, second PHPUnit configuration used only by
+    tests/Integration/LaravelLiteParallelDatabaseTest.php (in the package itself): the default
+    phpunit.xml uses sqlite ":memory:", where per-process isolation is automatic and Laravel's
+    own database name suffixing (Illuminate\Testing\Concerns\TestDatabases) never engages
+    (see tests/ParallelFileDb/WorkerOneDatabaseTest.php). This one points at a FILE based
+    sqlite database instead, purely so a parallel run can prove real per-worker database
+    separation. Deliberately a separate file/testsuite rather than changing phpunit.xml
+    itself: every other fixture test keeps running against ":memory:", unaffected.
+-->
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="vendor/phpunit/phpunit/phpunit.xsd"
+         bootstrap="vendor/autoload.php"
+         colors="true"
+>
+    <testsuites>
+        <testsuite name="ParallelFileDb">
+            <directory>tests/ParallelFileDb</directory>
+        </testsuite>
+    </testsuites>
+    <source>
+        <include>
+            <directory>app</directory>
+        </include>
+    </source>
+    <php>
+        <env name="APP_ENV" value="testing"/>
+        <env name="APP_KEY" value="base64:98efEiSEB2S5QVEvsmMo9ys9zawgJC351b/8PzhSZOg="/>
+        <env name="APP_MAINTENANCE_DRIVER" value="file"/>
+        <env name="BCRYPT_ROUNDS" value="4"/>
+        <env name="CACHE_STORE" value="array"/>
+        <env name="DB_CONNECTION" value="sqlite"/>
+        <env name="DB_DATABASE" value="database/parallel-isolation.sqlite"/>
+        <env name="MAIL_MAILER" value="array"/>
+        <env name="QUEUE_CONNECTION" value="sync"/>
+        <env name="SESSION_DRIVER" value="array"/>
+    </php>
+</phpunit>

@@ -53,6 +53,7 @@ final readonly class Config
         public int $remoteRefreshSeconds = 300,
         public int $remoteTimeout = 60,
         public array $baselineBranches = [],
+        public bool $laravelParallelIsolation = true,
     ) {
     }
 
@@ -75,6 +76,7 @@ final readonly class Config
             remoteRefreshSeconds: 300,
             remoteTimeout: 60,
             baselineBranches: [],
+            laravelParallelIsolation: true,
         );
     }
 
@@ -106,6 +108,7 @@ final readonly class Config
             remoteRefreshSeconds: self::intOrDefault($values['remote_refresh_seconds'] ?? null, $defaults->remoteRefreshSeconds),
             remoteTimeout: self::intOrDefault($values['remote_timeout'] ?? null, $defaults->remoteTimeout),
             baselineBranches: self::stringListOrDefault($values['baseline_branches'] ?? null),
+            laravelParallelIsolation: self::boolOrDefault($values['laravel_parallel_isolation'] ?? null, $defaults->laravelParallelIsolation),
         );
     }
 
@@ -150,6 +153,7 @@ final readonly class Config
             remoteRefreshSeconds: $defaults->remoteRefreshSeconds,
             remoteTimeout: $defaults->remoteTimeout,
             baselineBranches: $defaults->baselineBranches,
+            laravelParallelIsolation: $defaults->laravelParallelIsolation,
         );
     }
 
@@ -203,6 +207,7 @@ final readonly class Config
      *     remoteRefreshSeconds?: int,
      *     remoteTimeout?: int,
      *     baselineBranches?: list<string>,
+     *     laravelParallelIsolation?: bool,
      * } $overrides
      */
     public function with(array $overrides): self
@@ -224,6 +229,7 @@ final readonly class Config
             remoteRefreshSeconds: array_key_exists('remoteRefreshSeconds', $overrides) ? $overrides['remoteRefreshSeconds'] : $this->remoteRefreshSeconds,
             remoteTimeout: array_key_exists('remoteTimeout', $overrides) ? $overrides['remoteTimeout'] : $this->remoteTimeout,
             baselineBranches: array_key_exists('baselineBranches', $overrides) ? $overrides['baselineBranches'] : $this->baselineBranches,
+            laravelParallelIsolation: array_key_exists('laravelParallelIsolation', $overrides) ? $overrides['laravelParallelIsolation'] : $this->laravelParallelIsolation,
         );
     }
 

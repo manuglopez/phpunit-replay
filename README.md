@@ -344,6 +344,7 @@ return [
     'never_cache' => [],                  // globs of test files that always run for real (see Keeping the cache honest)
     'quarantine_release_after' => 20,     // stable passes needed to leave automatic quarantine
     'laravel' => 'auto',                  // 'auto' | 'on' | 'off'
+    'laravel_parallel_isolation' => true, // false to run --parallel on Laravel without per-worker database isolation
     'junit_merge' => true,                // merge cached results into --log-junit output
     'mode' => 'auto',                     // extension mode override; leave at 'auto' unless you know why not
     'hermeticity_heuristics' => false,    // reserved for a future heuristic (flagging suspicious tests in `status`); not implemented — leave false
@@ -480,6 +481,16 @@ sequential PHPUnit run rather than failing. Each worker writes its own partial r
 merged back together before updating the graph (edges by union, results last-write-wins), so the
 summary line is the same regardless of process count. The coverage driver's ini flags travel to
 Paratest's workers via `--passthru-php`.
+
+On a Laravel project, `--parallel` also wires up Laravel's own per-worker database isolation
+(`--runner=\Illuminate\Testing\ParallelRunner` plus `LARAVEL_PARALLEL_TESTING=1`) automatically,
+whenever Laravel, Paratest, and a resolvable `Illuminate\Testing\ParallelRunner` are all present.
+Without it, every worker migrates the same database instead of a per-worker one, which on a real
+database engine surfaces as deadlocks or duplicate-key errors rather than a clean test failure — set
+`laravel_parallel_isolation` to `false` if your project deliberately runs `--parallel` without
+per-worker isolation. If the project's own Laravel application can't be resolved (no
+`bootstrap/app.php` and no `Tests\CreatesApplication`), phpunit-replay warns and runs `--parallel`
+without isolation instead of failing outright.
 
 ## Coverage reports with replay
 

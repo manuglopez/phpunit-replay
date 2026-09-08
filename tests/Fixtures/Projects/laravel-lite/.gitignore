@@ -3,6 +3,7 @@
 /storage/framework/**
 /.phpunit.cache/
 /.phpunit-replay.xml
+/database/*.sqlite*
 !/storage/logs/.gitignore
 !/storage/framework/cache/
 !/storage/framework/cache/.gitignore
