@@ -109,6 +109,44 @@ final class Graph
         $this->reverseIndex = null;
     }
 
+    /**
+     * Merges recorded edges into what the graph already has for each test file, instead
+     * of replacing them outright. The correctness-critical counterpart to
+     * {@see self::replaceEdges()}: PHP executes a file's top level exactly once per
+     * process, so a coverage driver only ever credits its declaration footprint
+     * (class/enum/const, or any other top-level statement — Record\Recorder's own
+     * docblock) to whichever test in that worker happened to load it first. A *partial*
+     * re-record (some subset of tests re-executed, e.g. because something else they
+     * depend on changed, or a different paratest worker distribution) reflects only
+     * *this* run's attribution, which can differ from a previous, complete one — so it
+     * must never be allowed to shrink a test's edges, only grow them. A dependency that
+     * genuinely disappears is dropped by the next full, fresh `record` instead (which
+     * always starts from an empty graph, so there is nothing to unify with — SPEC.md
+     * §4.3, §7.3).
+     *
+     * @param array<string, list<string>> $testToFiles
+     */
+    public function unionEdges(array $testToFiles): void
+    {
+        foreach ($testToFiles as $testFile => $sources) {
+            $testRel = $this->relative($testFile);
+
+            if ($testRel === null) {
+                continue;
+            }
+
+            $this->edges[$testRel] ??= [];
+
+            foreach ($sources as $source) {
+                $this->link($testFile, $source);
+            }
+
+            $this->edges[$testRel] = array_values(array_unique($this->edges[$testRel]));
+        }
+
+        $this->reverseIndex = null;
+    }
+
     /** @param list<string> $testFiles */
     public function markKnownTestFiles(array $testFiles): void
     {

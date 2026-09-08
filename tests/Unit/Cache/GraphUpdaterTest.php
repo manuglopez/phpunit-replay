@@ -426,4 +426,197 @@ final class GraphUpdaterTest extends TestCase
 
         self::assertTrue($graph->isNotCacheable('Foo::test_it'));
     }
+
+    // -- monotonic edges: a re-record must union, never replace (fix/monotonic-edges) ---
+    //
+    // PHP executes a file's top level exactly once per process, so a coverage driver
+    // credits its declaration footprint (class/enum/const, or any top-level statement —
+    // Record\Recorder's own docblock) to whichever test happened to load it first. A
+    // *partial* re-record whose worker/order attribution differs from a previous,
+    // complete one must not let that incidental difference silently drop an edge a test
+    // genuinely still has.
+
+    public function test_a_partial_re_record_unions_edges_instead_of_dropping_ones_a_previous_pass_proved(): void
+    {
+        $this->write('tests/ATest.php');
+        $this->write('tests/BTest.php');
+        $this->write('src/Shared.php');
+
+        $graph = new Graph($this->root);
+
+        // Pass 1 (e.g. a full record): in this process/order, A happens to load
+        // Shared.php first, so its one-time declaration footprint is attributed to A.
+        $pass1 = new RunPartial(
+            edges: [
+                'tests/ATest.php' => ['src/Shared.php'],
+                'tests/BTest.php' => [],
+            ],
+            results: [
+                'A::test_it' => $this->makeResult(file: 'tests/ATest.php'),
+                'B::test_it' => $this->makeResult(file: 'tests/BTest.php'),
+            ],
+            tables: [],
+            meta: [],
+        );
+        $this->updater($graph)->apply($pass1, 'main', recordsEdges: true, complete: true);
+
+        self::assertContains('src/Shared.php', $graph->dependenciesOf('tests/ATest.php'));
+
+        // Pass 2: a re-record of the SAME two tests (a different paratest worker
+        // distribution, or simply a different run order) — this time B loads Shared.php
+        // first, so THIS run's own partial credits B instead and says nothing about A
+        // depending on it at all. A's own source code never changed.
+        $pass2 = new RunPartial(
+            edges: [
+                'tests/ATest.php' => [],
+                'tests/BTest.php' => ['src/Shared.php'],
+            ],
+            results: [
+                'A::test_it' => $this->makeResult(file: 'tests/ATest.php'),
+                'B::test_it' => $this->makeResult(file: 'tests/BTest.php'),
+            ],
+            tables: [],
+            meta: [],
+        );
+        $this->updater($graph)->apply($pass2, 'main', recordsEdges: true, complete: true);
+
+        self::assertContains(
+            'src/Shared.php',
+            $graph->dependenciesOf('tests/ATest.php'),
+            'a re-record must union edges, not replace them, or a real dependency can silently disappear',
+        );
+        self::assertContains('src/Shared.php', $graph->dependenciesOf('tests/BTest.php'));
+    }
+
+    public function test_without_the_union_a_dropped_edge_would_hide_a_real_change_from_the_content_key(): void
+    {
+        $this->write('tests/ATest.php');
+        $this->write('tests/BTest.php');
+        $this->write('src/Shared.php');
+
+        $graph = new Graph($this->root);
+        $contentKey = new ContentKey($this->root);
+
+        $pass1 = new RunPartial(
+            edges: ['tests/ATest.php' => ['src/Shared.php'], 'tests/BTest.php' => []],
+            results: [
+                'A::test_it' => $this->makeResult(file: 'tests/ATest.php'),
+                'B::test_it' => $this->makeResult(file: 'tests/BTest.php'),
+            ],
+            tables: [],
+            meta: [],
+        );
+        $this->updater($graph)->apply($pass1, 'main', recordsEdges: true, complete: true);
+
+        // Pass 2 re-records both tests; this run's attribution credits B instead of A.
+        $pass2 = new RunPartial(
+            edges: ['tests/ATest.php' => [], 'tests/BTest.php' => ['src/Shared.php']],
+            results: [
+                'A::test_it' => $this->makeResult(file: 'tests/ATest.php'),
+                'B::test_it' => $this->makeResult(file: 'tests/BTest.php'),
+            ],
+            tables: [],
+            meta: [],
+        );
+        $this->updater($graph)->apply($pass2, 'main', recordsEdges: true, complete: true);
+
+        $keyBefore = $contentKey->forTestFile($graph, 'tests/ATest.php');
+        self::assertNotNull($keyBefore);
+
+        // Step 3 of the false-green chain: src/Shared.php has a genuine (non-cosmetic)
+        // content change — ContentHash deliberately ignores comment/whitespace-only
+        // edits, so this must be a real token change, not just a trailing comment.
+        $this->write('src/Shared.php', "<?php\n\$x = 1;\n");
+
+        $keyAfter = $contentKey->forTestFile($graph, 'tests/ATest.php');
+
+        self::assertNotSame(
+            $keyBefore,
+            $keyAfter,
+            'A still depends on src/Shared.php: its content key must change when that file changes '
+            . '(the false green this fix closes is exactly this assertion failing)',
+        );
+    }
+
+    public function test_union_still_lets_a_deleted_dependency_change_the_content_key(): void
+    {
+        $this->write('tests/ATest.php');
+        $this->write('src/Shared.php');
+
+        $graph = new Graph($this->root);
+        $contentKey = new ContentKey($this->root);
+
+        $pass1 = new RunPartial(
+            edges: ['tests/ATest.php' => ['src/Shared.php']],
+            results: ['A::test_it' => $this->makeResult(file: 'tests/ATest.php')],
+            tables: [],
+            meta: [],
+        );
+        $this->updater($graph)->apply($pass1, 'main', recordsEdges: true, complete: true);
+
+        $keyBefore = $contentKey->forTestFile($graph, 'tests/ATest.php');
+
+        // Pass 2 re-records A without src/Shared.php in ITS OWN partial (as in the
+        // false-green scenario above); union must still keep the edge...
+        $pass2 = new RunPartial(
+            edges: ['tests/ATest.php' => []],
+            results: ['A::test_it' => $this->makeResult(file: 'tests/ATest.php')],
+            tables: [],
+            meta: [],
+        );
+        $this->updater($graph)->apply($pass2, 'main', recordsEdges: true, complete: true);
+
+        self::assertContains('src/Shared.php', $graph->dependenciesOf('tests/ATest.php'));
+
+        // ...and a REAL deletion of that dependency must still change the key: ContentKey
+        // contributes "rel:" with an empty hash for a dependency missing on disk instead
+        // of skipping it (src/Cache/ContentKey.php's own contract).
+        unlink($this->root . '/src/Shared.php');
+
+        $keyAfterDeletion = $contentKey->forTestFile($graph, 'tests/ATest.php');
+
+        self::assertNotNull($keyBefore);
+        self::assertNotNull($keyAfterDeletion);
+        self::assertNotSame($keyBefore, $keyAfterDeletion);
+    }
+
+    public function test_a_fresh_graph_never_carries_edges_across_a_full_record(): void
+    {
+        $this->write('tests/ATest.php');
+        $this->write('src/Old.php');
+        $this->write('src/New.php');
+
+        $old = new Graph($this->root);
+        $this->updater($old)->apply(
+            new RunPartial(
+                edges: ['tests/ATest.php' => ['src/Old.php']],
+                results: ['A::test_it' => $this->makeResult(file: 'tests/ATest.php')],
+                tables: [],
+                meta: [],
+            ),
+            'main',
+            recordsEdges: true,
+            complete: true,
+        );
+        self::assertContains('src/Old.php', $old->dependenciesOf('tests/ATest.php'));
+
+        // `record` (Console\Runner\RunPipeline::runRecord()) always starts from a brand
+        // new Graph regardless of what any previous graph held — union has nothing to
+        // unify with, so nothing can leak across.
+        $fresh = new Graph($this->root);
+        $this->updater($fresh)->apply(
+            new RunPartial(
+                edges: ['tests/ATest.php' => ['src/New.php']],
+                results: ['A::test_it' => $this->makeResult(file: 'tests/ATest.php')],
+                tables: [],
+                meta: [],
+            ),
+            'main',
+            recordsEdges: true,
+            complete: true,
+        );
+
+        self::assertSame(['src/New.php'], $fresh->dependenciesOf('tests/ATest.php'));
+        self::assertNotContains('src/Old.php', $fresh->dependenciesOf('tests/ATest.php'));
+    }
 }

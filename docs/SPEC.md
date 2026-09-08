@@ -170,7 +170,7 @@ vendor/bin/phpunit-replay [phpunit-replay options] [-- phpunit options]
 11. If the user passed `--log-junit=X` (to phpunit-replay, not to phpunit), the wrapper generates a **complete** JUnit merging the real JUnit from the run with the cached results (`JUnitMerger`), marking cached ones with `<property name="replayed" value="true"/>`.
 12. Exit code: PHPUnit's.
 
-Partial PHPUnit options (`--filter`, `--group`, `--exclude-group`, `--testsuite`, an explicit path, `--covers`, `--uses`) **disable selection**: whatever the user asked for runs, with the extension in `results-only` mode (updates results, not edges or sha). `--random-order` with a different seed doesn't matter (edges are file-level), but `--order-by=random` with no seed is accepted as-is.
+Partial PHPUnit options (`--filter`, `--group`, `--exclude-group`, `--testsuite`, an explicit path, `--covers`, `--uses`) **disable selection**: whatever the user asked for runs, with the extension in `results-only` mode (updates results, not edges or sha). `--random-order` with a different seed changes which test is the first in its process to load a given class, enum or const file, and therefore which test the file's load-time execution is attributed to — the top level of a file runs once per process, so only that first test sees it. Edges being file-level does not make this harmless on its own; what does is that a re-record **unions** edges instead of replacing them (SPEC §7.2), so a different order can only add an attribution, never take one away. `--order-by=random` with no seed is accepted as-is.
 
 ### 3.2 `in-process` mode (the `Replayable` trait)
 
@@ -477,7 +477,7 @@ Post-processing: if any source `.php` file changed and **no driver is available*
 
 ### 7.3 Writing after the run
 
-- Full run (record or replay without truncation): `setRecordedSha(branch, HEAD)`, `replaceEdges` for the test files executed (a full replacement of the set per file), merge of results, `pruneStaleResults` (ids from executed files that no longer appeared: renamed/deleted tests), `pruneMissingTestFiles`, `pruneMissingBranches` (`git for-each-ref`), `complete = true`, `last-run.tree` snapshot of the dirty files.
+- Full run (record or replay without truncation): `setRecordedSha(branch, HEAD)`, `unionEdges` for the test files executed (merged into whatever the graph already had per file, never replaced — a coverage driver only credits a file's declaration footprint to whichever test loaded it first in that process, so a partial re-record must not let that attribution silently drop a real dependency; a stale edge is only ever shed by a fresh `record`, which always starts from an empty graph), merge of results, `pruneStaleResults` (ids from executed files that no longer appeared: renamed/deleted tests), `pruneMissingTestFiles`, `pruneMissingBranches` (`git for-each-ref`), `complete = true`, `last-run.tree` snapshot of the dirty files.
 - Partial / truncated / results-only run: only merges results for already-known test files; no sha, no pruning, no edges.
 - Always: recompute `k` for each touched test file and, if there's a remote, `put(objects/<k>.json)`.
 
