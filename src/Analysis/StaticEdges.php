@@ -168,8 +168,12 @@ final class StaticEdges
      *
      * @param array<string, list<string>> $behaviouralEdges test file (relative) => the source
      *        files (relative) whose bodies ran under it in this run
+     * @param array<string, true> $ignored declaring files (relative) to refuse linking —
+     *        `Cache\GraphUpdater`'s batched `git check-ignore` result (no edge to a file git
+     *        ignores). Empty by default, which is exactly the behaviour before this
+     *        parameter existed: every existing caller is unaffected.
      */
-    public function expand(Graph $graph, array $behaviouralEdges): int
+    public function expand(Graph $graph, array $behaviouralEdges, array $ignored = []): int
     {
         $index = $this->index();
 
@@ -193,6 +197,10 @@ final class StaticEdges
             }
 
             foreach (array_keys($targets) as $declaringFile) {
+                if (isset($ignored[$declaringFile])) {
+                    continue;
+                }
+
                 $graph->link($testRelative, $declaringFile);
                 $added++;
             }

@@ -105,6 +105,9 @@ final class ReplayState
 
     private static ?Git $git = null;
 
+    /** No-edges-to-ignored-files fix: set by persistInProcess(), read by recordSummaryLine(). */
+    private static int $excludedEdges = 0;
+
     private static string $branch = 'HEAD';
 
     private static ?string $head = null;
@@ -494,10 +497,10 @@ final class ReplayState
             $partial = LaravelIntegration::augment($partial, $root);
         }
 
-        $updater = new GraphUpdater($graph, $root, new ContentKey($root), self::$quarantine, self::$staticEdges);
-        $applied = $updater->apply($partial, self::$branch, recordsEdges: $recordsEdges, complete: $complete);
-
         $git = self::$git ?? new Git($root);
+        $updater = new GraphUpdater($graph, $root, new ContentKey($root), self::$quarantine, self::$staticEdges, $git);
+        $applied = $updater->apply($partial, self::$branch, recordsEdges: $recordsEdges, complete: $complete);
+        self::$excludedEdges = $applied['excludedEdges'];
 
         $context = new RunContext(
             $root,
@@ -652,6 +655,7 @@ final class ReplayState
         self::$quarantine = null;
         self::$staticEdges = null;
         self::$git = null;
+        self::$excludedEdges = 0;
         self::$branch = 'HEAD';
         self::$head = null;
         self::$defaultBranch = 'main';
@@ -1053,6 +1057,7 @@ final class ReplayState
             $stats['test_files'],
             $stats['files'],
             $stats['edges'],
+            self::$excludedEdges,
             $bytes !== false ? $bytes : 0,
             microtime(true) - self::startedAt(),
             self::$persist ? self::$branch : null,

@@ -200,4 +200,77 @@ final class GitTest extends TestCase
         self::assertSame(127, $result['exitCode']);
         self::assertSame('', $result['output']);
     }
+
+    // -- ignored() — the shared check-ignore helper (Change\ChangedFiles and
+    // Cache\GraphUpdater's edge filter both call this rather than shelling out themselves) --
+
+    public function test_ignored_returns_an_empty_array_without_running_git_for_an_empty_list(): void
+    {
+        // A non-existent directory would make any real git invocation fail (exit 127); an
+        // empty result here instead proves the empty-input short circuit never shells out.
+        $git = new Git('/definitely/does/not/exist/'.bin2hex(random_bytes(4)));
+
+        self::assertSame([], $git->ignored([]));
+    }
+
+    public function test_ignored_reports_a_path_matched_by_gitignore(): void
+    {
+        $repo = GitRepo::init();
+        $repo->write('.gitignore', "/bootstrap/cache/\n");
+        $repo->write('bootstrap/cache/views/x.php', '<?php');
+        $repo->write('src/Kept.php', '<?php');
+        $repo->commitAll('initial');
+
+        $ignored = (new Git($repo->root))->ignored(['bootstrap/cache/views/x.php', 'src/Kept.php']);
+
+        self::assertSame(['bootstrap/cache/views/x.php' => true], $ignored);
+
+        $repo->destroy();
+    }
+
+    public function test_ignored_reports_nothing_when_no_path_matches(): void
+    {
+        $repo = GitRepo::init();
+        $repo->write('src/Kept.php', '<?php');
+        $repo->commitAll('initial');
+
+        self::assertSame([], (new Git($repo->root))->ignored(['src/Kept.php']));
+
+        $repo->destroy();
+    }
+
+    /**
+     * `--no-index` means a path already tracked in the index is still reported as ignored
+     * when it also matches a `.gitignore` pattern (the default `check-ignore` behaviour
+     * suppresses a tracked file; `--no-index` is specifically what turns that off) — the
+     * batched helper does not accidentally lose this by adding its own tracked-ness check.
+     */
+    public function test_ignored_reports_a_tracked_file_that_also_matches_gitignore(): void
+    {
+        $repo = GitRepo::init();
+        $repo->write('debug.log', 'noise');
+        $repo->commitAll('initial (before the ignore rule existed)');
+        $repo->write('.gitignore', "debug.log\n");
+        $repo->commitAll('add gitignore');
+
+        self::assertSame(['debug.log' => true], (new Git($repo->root))->ignored(['debug.log']));
+
+        $repo->destroy();
+    }
+
+    public function test_ignored_is_null_outside_any_repository(): void
+    {
+        $dir = TempDir::make('non-repo-ignored');
+
+        self::assertNull((new Git($dir))->ignored(['whatever.php']));
+
+        TempDir::remove($dir);
+    }
+
+    public function test_ignored_is_null_when_the_process_cannot_be_started(): void
+    {
+        $broken = new Git('/definitely/does/not/exist/'.bin2hex(random_bytes(4)));
+
+        self::assertNull($broken->ignored(['whatever.php']));
+    }
 }

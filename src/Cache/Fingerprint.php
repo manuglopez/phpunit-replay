@@ -61,6 +61,22 @@ use Symfony\Component\Process\Process;
  * a cache detail, it is a change of meaning, and it costs a fresh record — which is why it is
  * a separate key rather than folded into the flag's value: `structuralDrift()` then names
  * `analysis_rules` when only the rules moved, and a user who changed nothing gets told why.
+ *
+ * ## `edges_exclude_ignored`
+ *
+ * Unlike `static_declaration_edges` above, this key is present UNCONDITIONALLY — always
+ * `true`, never absent — because it does not describe an opt-in a project can leave alone; it
+ * describes this package's own edge-recording behaviour (`Cache\GraphUpdater::apply()` no
+ * longer records an edge to a file `git check-ignore` matches — a compiled Laravel Blade view
+ * under `bootstrap/cache/`, most commonly). Every graph recorded before this key existed is
+ * missing it, so `structuralDrift()` reports it for every such graph the first time this
+ * version runs, forcing exactly the one fresh record that behaviour change requires. A bare
+ * `SCHEMA_VERSION` bump would force the same fresh record but could never be *named* in the
+ * drift report — `structuralDrift()` always skips `'schema'` — so the user would see the
+ * whole graph discarded with nothing to explain why. It rides in the same structural bucket
+ * `static_declaration_edges` does, for the same reason: this changes what an edge means, and
+ * a content key computed from an old edge set and one computed from a new one are not
+ * comparable.
  */
 final readonly class Fingerprint
 {
@@ -86,7 +102,16 @@ final readonly class Fingerprint
      */
     public static function compute(string $projectRoot, string $driver, bool $staticDeclarationEdges): array
     {
-        $structural = ['schema' => self::SCHEMA_VERSION];
+        // Named, unconditional (Fingerprint's own class docblock, "$staticDeclarationEdges"
+        // section, explains why the flag above is added only when it is on — this key is
+        // the deliberate opposite: it changes what an edge means for every project, on
+        // every machine, the moment this ships, so it is always present rather than gated
+        // on an opt-in. A bare SCHEMA_VERSION bump would invalidate the same graphs but
+        // could never be NAMED in a drift report: structuralDrift()'s detectDrift() always
+        // skips the 'schema' key, so the user would see every graph discarded with nothing
+        // saying why. This key gets the same one-time invalidation and `status` can name
+        // it (`edges_exclude_ignored (drift)`).
+        $structural = ['schema' => self::SCHEMA_VERSION, 'edges_exclude_ignored' => true];
 
         foreach (self::STRUCTURAL_FILES as $key => $relative) {
             $structural[$key] = self::trackedHash($projectRoot, $relative);

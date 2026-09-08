@@ -58,10 +58,43 @@ final class FingerprintTest extends TestCase
         $fingerprint = Fingerprint::compute($this->repo->root, 'pcov', false);
 
         self::assertSame(
-            ['schema', 'composer_lock', 'phpunit_xml', 'phpunit_xml_dist', 'replay_config'],
+            ['schema', 'edges_exclude_ignored', 'composer_lock', 'phpunit_xml', 'phpunit_xml_dist', 'replay_config'],
             array_keys($fingerprint['structural']),
         );
         self::assertSame(Fingerprint::SCHEMA_VERSION, $fingerprint['structural']['schema']);
+    }
+
+    /**
+     * Unlike `static_declaration_edges` (present only while that flag is on),
+     * `edges_exclude_ignored` is unconditional: it is not an opt-in, it describes this
+     * package's own (now fixed) edge-recording behaviour, so it must be `true` regardless
+     * of the flag or the driver.
+     */
+    public function testEdgesExcludeIgnoredIsAlwaysPresentAndTrue(): void
+    {
+        self::assertTrue(Fingerprint::compute($this->repo->root, 'pcov', false)['structural']['edges_exclude_ignored']);
+        self::assertTrue(Fingerprint::compute($this->repo->root, 'xdebug', true)['structural']['edges_exclude_ignored']);
+        self::assertTrue(Fingerprint::compute($this->repo->root, 'none', false)['structural']['edges_exclude_ignored']);
+    }
+
+    /**
+     * The whole reason this is a NAMED key rather than a bare SCHEMA_VERSION bump:
+     * structuralDrift() always skips 'schema' (its $skipKey), so a schema-only bump can
+     * never be named in a drift report. A graph recorded before this key existed has no
+     * 'edges_exclude_ignored' entry at all — exactly what an on-disk graph.json recorded by
+     * an older release of this package looks like the moment this version runs — and that
+     * absence must be reported, by name, as structural drift, forcing the one-time fresh
+     * record this behaviour change requires.
+     */
+    public function testAnOldFingerprintMissingTheKeyIsNamedStructuralDrift(): void
+    {
+        $stored = Fingerprint::compute($this->repo->root, 'pcov', false);
+        unset($stored['structural']['edges_exclude_ignored']);
+
+        $current = Fingerprint::compute($this->repo->root, 'pcov', false);
+
+        self::assertSame(['edges_exclude_ignored'], Fingerprint::structuralDrift($stored, $current));
+        self::assertFalse(Fingerprint::structuralMatches($stored, $current));
     }
 
     public function testEnvironmentalKeysReflectRuntime(): void

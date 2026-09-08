@@ -130,6 +130,13 @@ final class StatusCommand extends Command
 
         $graphBytes = @filesize($store->path());
 
+        // Live check, not a stored counter (StatusReport::$excludedEdges docblock): how many
+        // of the currently-recorded dependency edges point at a file `git check-ignore`
+        // matches right now. Nonzero only for a graph recorded before this existed — the
+        // structural fingerprint change forces exactly one fresh record, and nothing adds
+        // such an edge afterwards.
+        $excludedEdges = count($git->ignored($graph->files()) ?? []);
+
         $notCacheableFiles = 0;
         $notCacheableIds = 0;
 
@@ -154,6 +161,7 @@ final class StatusCommand extends Command
             files: $stats['files'],
             testFiles: $stats['test_files'],
             edges: $stats['edges'],
+            excludedEdges: $excludedEdges,
             tables: $stats['tables'],
             graphBytes: $graphBytes !== false ? $graphBytes : 0,
             graphFingerprint: $graph->fingerprint(),
