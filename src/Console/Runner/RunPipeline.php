@@ -43,6 +43,7 @@ use Manuglopez\Replay\Report\DryRunSummary;
 use Manuglopez\Replay\Report\JUnitMerger;
 use Manuglopez\Replay\Report\Summary;
 use Manuglopez\Replay\Report\VerifySummary;
+use Manuglopez\Replay\Select\ReplaySet;
 use Manuglopez\Replay\Select\RunList;
 use Manuglopez\Replay\Select\RunListBuilder;
 use Manuglopez\Replay\Select\TestPaths;
@@ -683,9 +684,10 @@ final class RunPipeline
 
     /**
      * SPEC.md §12.2: full suite, `record` mode, graph kept (unlike {@see self::runRecord()},
-     * which always starts from an empty one). Compares each new result against the one the
-     * graph already had for the same content key, so a normal replay pass would have served
-     * the cached result unchanged — any difference in result *class* is a divergence.
+     * which always starts from an empty one), so this pass has both a real result for every
+     * test and the cached result a fast `run` lane would have served instead. Reports how
+     * much of the suite that lane would have covered ({@see self::replaySetBeforeVerify()})
+     * and how many of the cached results turn out to be wrong (a divergence).
      */
     private function verify(RunRequest $request): int
     {
@@ -704,6 +706,14 @@ final class RunPipeline
 
         $this->graph = $graph;
         $oldResults = $graph->results($this->branch);
+
+        // Decided here, at the one point in this method where "before this pass touched
+        // anything" is literally true: before the generated `.phpunit-replay.xml` exists in
+        // the working tree, before PHPUnit has run a line of the suite (and with it whatever
+        // files the suite writes), and before `apply()` below rewrites the graph's edges,
+        // content keys and results. It is also the same point in the pipeline `run` decides
+        // at ({@see self::runReplay()}), which is what makes the two answers comparable.
+        $replaySet = $this->replaySetBeforeVerify($root, $graph);
 
         $xml = (new ConfigurationWriter())->withExtensionOnly($this->configFile);
         $this->generatedXml = $xml;
@@ -765,46 +775,67 @@ final class RunPipeline
             return $exitCode;
         }
 
-        $policy = new Policy($graph, $this->config, $this->quarantine, $root);
-
         $newResults = $graph->results($this->branch);
 
         $wouldReplay = 0;
+        $unverified = 0;
         $divergenceEntries = [];
 
-        // Bug fix: this used to iterate `$graph->results($this->branch)` — the whole cached
-        // corpus, every baseline layer merged — instead of the tests this run actually
-        // executed. A test the run never touched has the same entry before and after
-        // `apply()`, so it trivially matched itself and was counted, which made "would
-        // replay" a figure about the cache rather than about the verification: it could
-        // exceed the "N tests" printed beside it (`5 tests · 35 would replay`), and two
-        // identical `verify` runs disagreed whenever the executed file's content key moved,
-        // because the untouched majority — not the verified minority — dominated the count.
-        // Counting over `$partial->results` is what makes it mean "of the N tests I just ran
-        // for real, M would have been served from cache instead", the number the README asks
-        // people to watch before trusting the fast lane as a merge gate. Divergence detection
-        // is unaffected: an untouched entry cannot differ from itself, so it never produced
-        // one — it only fed `recordStable()` a release-streak tick for a test that never ran.
+        // Bug fix (the measurement design, not another off-by-one in it): `$wouldReplay`
+        // used to be decided right here, by comparing the STORED content key against the one
+        // `apply()` had just recomputed from freshly re-observed coverage — `$oldKey !==
+        // $newKey` skipped the test. But `verify` re-records edges on this very pass and
+        // `Graph::unionEdges()` only ever grows a test file's dependency set, so any test
+        // that gained an edge got a new key and dropped out of the count. The figure
+        // therefore answered "is this test's dependency set byte-identical to the last
+        // recording?" rather than "would the fast lane have served this test from cache?" —
+        // the question the README tells people to act on before making `run` a per-PR merge
+        // gate. It shrank monotonically with how many passes had run instead of describing
+        // the tree: on a real 9056-test suite `9056 − would replay` went 2001 → 1941 → 1502 →
+        // → 1253 across four identical passes, never converging, while `run` on the same
+        // unchanged tree replayed 9056 of 9056 — because `run` never re-observes anything.
+        //
+        // It is now decided by `Select\ReplaySet`, off the run list `run` itself builds,
+        // against the pre-pass state (see `self::replaySetBeforeVerify()`). That also
+        // retires the `$excluded` test that used to sit here — a second, hand-rolled
+        // rendering of `shouldRerun`/`Policy::cacheable` that could disagree with the run
+        // list on exactly the cases it existed to catch. It disagreed on one for real: a
+        // per-test-id `Policy::cacheable()` check excluded only the `#[NotCacheable]` method
+        // itself, where `run` puts that method's whole FILE in the run list and re-executes
+        // every test in it. `Policy` has no other use in this method, so it is gone.
+        //
+        // Divergence detection is deliberately left exactly as it was, including its
+        // key-equality gate. It is the trustworthy half of the line (0 across six passes on
+        // that same real suite) and it errs the safe way: gating on equal keys makes it
+        // broader than `$wouldReplay` in one direction (it checks tests `run` would have
+        // re-executed anyway) and narrower in the other (it skips tests whose key moved).
+        // That second half is no longer silent — those tests are counted as `$unverified`
+        // instead of quietly vanishing from the count the way they used to, which is how the
+        // old figure hid its own drift. Note `run`'s local replay path never compares content
+        // keys at all (`ReplayState::decideFresh()` reads the cached result straight out of
+        // the graph; the key only addresses the REMOTE object store), so the tests this gate
+        // exempts are precisely the ones whose cached results `run` would still serve and
+        // this pass has fresh evidence about — see the CHANGELOG entry.
         foreach (array_keys($partial->results) as $testId) {
-            $new = $newResults[$testId] ?? null;
-            $old = $oldResults[$testId] ?? null;
+            $replayable = $replaySet->has($testId);
 
-            if ($new === null || $old === null) {
-                continue;
+            if ($replayable) {
+                $wouldReplay++;
             }
 
+            $new = $newResults[$testId] ?? null;
+            $old = $oldResults[$testId] ?? null;
             $oldKey = $old['key'] ?? null;
             $newKey = $new['key'] ?? null;
 
-            if ($oldKey === null || $newKey === null || $oldKey !== $newKey) {
+            if ($new === null || $old === null || $oldKey === null || $newKey === null || $oldKey !== $newKey) {
+                // The comparison below cannot run for this test. Only worth reporting when
+                // the fast lane would have served its cached result regardless.
+                if ($replayable) {
+                    $unverified++;
+                }
+
                 continue;
-            }
-
-            $file = $new['file'] ?? '';
-            $excluded = $this->reader->shouldRerun($old['status']) || $file === '' || ! $policy->cacheable($file, $testId);
-
-            if (! $excluded) {
-                $wouldReplay++;
             }
 
             $oldClass = GraphUpdater::statusClass($old['status']);
@@ -813,7 +844,9 @@ final class RunPipeline
                 // A cached failure/error always reruns unconditionally regardless of the
                 // cache (SPEC §6.2), so it was never really "replayed" in the first
                 // place: recovering from one is not a divergence (GraphUpdater::detectFlip()
-                // excludes the same transition for the same reason).
+                // excludes the same transition for the same reason). It is not `$unverified`
+                // either: `RunListBuilder`'s `rerun` bucket puts the whole file in the run
+                // list, so such a test is never in `$replaySet` to begin with.
                 continue;
             }
 
@@ -844,6 +877,7 @@ final class RunPipeline
             count($partial->results),
             $wouldReplay,
             count($divergenceEntries),
+            $unverified,
             $lifetime['divergences'],
             $lifetime['runs'],
             $exitCode === 0 && $divergenceEntries === [],
@@ -852,6 +886,90 @@ final class RunPipeline
         fwrite(STDOUT, $summary->format() . PHP_EOL);
 
         return $exitCode;
+    }
+
+    /**
+     * What a `run` on this same tree would have served from cache instead of executing —
+     * `verify`'s `would replay` figure (SPEC.md §12.2), decided by asking the very code
+     * `run` asks: the git diff against the recorded baseline, through
+     * {@see self::computeRunList()}'s `Select\RunListBuilder`, into
+     * {@see \Manuglopez\Replay\Select\ReplaySet}. `verify` builds no run list of its own
+     * otherwise (it always runs everything), so this is the whole of it.
+     *
+     * Two decisions worth stating, because both are load-bearing:
+     *
+     * 1. **Computed up front, not reconstructed afterwards.** The alternative was to snapshot
+     *    enough of the "before" state to answer the question after PHPUnit had run. That
+     *    means a deep copy of the graph's edges, reverse index, content keys, fingerprint and
+     *    results — `GraphUpdater::apply()` mutates all of them in place — plus the quarantine
+     *    table, which the divergence loop mutates too; a second serialization surface owing
+     *    the graph's schema forever. And it would still be wrong: `RunListBuilder` walks the
+     *    test directories and `ChangedFiles` shells out to git, so run after the suite it
+     *    would read a working tree the suite (and the generated `.phpunit-replay.xml`) had
+     *    already changed. Here the "before" state needs no copy — it is simply now.
+     * 2. **The caller's own CLI selection is ignored.** A `verify -- --filter X` still gets
+     *    the full-suite run list, so the figure keeps meaning "would a `run` on this tree
+     *    have replayed these tests" rather than collapsing to 0 (a partial selection sends
+     *    `run` into results-only mode, which replays nothing — a true but useless answer to
+     *    a question nobody asked). The filter still narrows which tests the figure is
+     *    reported over, through `$partial->results`. This is free rather than deliberate
+     *    plumbing: `RunListBuilder` never consults the selection; only `Mode` does.
+     *
+     * `run` prunes test files missing from disk before building its list and this does not,
+     * deliberately: pruning deletes graph state, which a measurement must not do. It cannot
+     * change the answer — a pruned file's results are dropped, and an unpruned file's results
+     * are excluded anyway (nothing depending on it can put a deleted file anywhere but the
+     * selection, i.e. the run list), and either way its tests cannot be in `$partial->results`
+     * because they did not run.
+     *
+     * Known, deliberate under-report: the remote object store is not consulted. `run` can serve
+     * an *affected* test file from the remote when another machine already ran exactly that
+     * content ({@see self::replayFromRemote()}, SPEC.md §9), and this counts those tests as
+     * executing. Consulting the remote would mean fetching objects and merging them into the
+     * graph — a side effect a measurement must not have — and would make the answer depend on
+     * remote state at this instant rather than on the tree. Erring low is the safe direction
+     * for a figure whose whole purpose is to justify trusting the fast lane.
+     */
+    private function replaySetBeforeVerify(string $root, Graph $graph): ReplaySet
+    {
+        $sha = $this->baseline['sha'] ?? $graph->recordedSha($this->branch);
+
+        if ($sha === null) {
+            // No baseline to replay from: `run` would record the whole suite instead
+            // ({@see self::runRecord()}), replaying nothing.
+            Warnings::debug('would replay: no baseline sha for ' . $this->branch . '; a run here would record instead');
+
+            return ReplaySet::none();
+        }
+
+        $changedFiles = new ChangedFiles($root, $this->git);
+        $changed = $changedFiles->since($sha);
+
+        if ($changed === null) {
+            // The baseline is not an ancestor of HEAD: `run` would record a fresh baseline
+            // and replay nothing ({@see self::runReplay()}'s own `$changed === null` branch).
+            // Said out loud rather than left silent, for the reason that branch warns too:
+            // `verify` proceeds normally either way (it is a recording pass regardless), so a
+            // figure collapsing to 0 with no trace would read as a broken cache rather than
+            // as an unreachable baseline.
+            Warnings::warn(sprintf(
+                'would replay: baseline %s is not an ancestor of HEAD; a run here would record a fresh baseline and replay nothing',
+                substr($sha, 0, 7),
+            ));
+
+            return ReplaySet::none();
+        }
+
+        $lastRun = LastRunTree::load($this->stateDir);
+
+        if ($lastRun !== null && $lastRun->branch === $this->branch) {
+            $changed = $lastRun->filterUnchanged($changed, $changedFiles);
+        }
+
+        /** @var list<string> $runList */
+        $runList = $this->computeRunList($graph, $changed, $this->branch, $root)['runList'];
+
+        return ReplaySet::against($graph, $this->branch, $runList);
     }
 
     /** Step 9: replay — compute what changed, select the run list, run it (or skip it). */
@@ -1135,30 +1253,25 @@ final class RunPipeline
     }
 
     /**
+     * What this pass will replay rather than execute, off the same {@see ReplaySet} that
+     * decides `verify`'s `would replay` figure — the two numbers describe the same thing and
+     * must not be able to disagree ({@see self::replaySetBeforeVerify()}, SPEC.md §12.2).
+     *
      * @param list<string> $runList
      * @return array{0: int, 1: float, 2: int} replayed tests, seconds saved, of which remote
      */
     private function replayedAgainst(Graph $graph, string $branch, array $runList): array
     {
-        $inRunList = array_fill_keys($runList, true);
-        $count = 0;
-        $saved = 0.0;
+        $set = ReplaySet::against($graph, $branch, $runList);
         $remote = 0;
 
-        foreach ($graph->results($branch) as $testId => $result) {
-            $file = $result['file'] ?? null;
-
-            if (is_string($file) && $file !== '' && ! isset($inRunList[$file])) {
-                $count++;
-                $saved += $result['time'];
-
-                if (isset($this->remoteTestIds[$testId])) {
-                    $remote++;
-                }
+        foreach ($set->testIds() as $testId) {
+            if (isset($this->remoteTestIds[$testId])) {
+                $remote++;
             }
         }
 
-        return [$count, $saved, $remote];
+        return [$set->count(), $set->savedSeconds(), $remote];
     }
 
     /**
