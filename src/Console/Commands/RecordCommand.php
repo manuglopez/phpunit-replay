@@ -15,6 +15,13 @@ use Symfony\Component\Console\Output\OutputInterface;
 /**
  * `phpunit-replay record` (SPEC.md §3.3): runs the full suite with recording, unconditionally
  * (no selection). What CI runs on `main` to publish a fresh baseline.
+ *
+ * A PHPUnit selection forwarded after `--` (`--filter`, `--group`, `--testsuite`, an
+ * explicit path, ...) is refused, not silently honoured: {@see \Manuglopez\Replay\Console\Runner\RunPipeline::resolveEnvironment()}
+ * degrades before touching the graph, since a partial run cannot produce the complete
+ * baseline this command exists to publish. The user's selection still runs for real via
+ * plain PHPUnit; only the graph write is skipped, and the exit code is `2` when that
+ * fallback run itself passes.
  */
 final class RecordCommand extends Command
 {
