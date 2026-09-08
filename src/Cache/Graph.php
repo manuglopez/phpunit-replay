@@ -576,6 +576,59 @@ final class Graph
         }
     }
 
+    /**
+     * Drops a single dependency edge — leaving the rest of the test file's edges, and its
+     * whole entry, untouched — when the dependency's own file no longer exists on disk.
+     * Unlike {@see self::pruneMissingTestFiles()} (which drops a whole test's edge set
+     * once ITS OWN file is gone), this targets one stale dependency at a time inside a
+     * test file that still exists, e.g. after a real code change stopped a test from
+     * needing something it used to.
+     *
+     * Deliberately narrow: an edge is dropped ONLY when its target is confirmed absent
+     * from disk (`is_file()`), never merely because some recording pass did not
+     * re-observe it. {@see self::unionEdges()}'s docblock explains why the latter would be
+     * unsound: a coverage driver credits a file's declaration footprint to whichever test
+     * happens to load it first in its worker, so which test "gets" a shared edge can vary
+     * from one complete, full-suite pass to the next even when nothing about either test
+     * changed — "not seen this run" is never evidence a dependency is gone, no matter how
+     * many runs in a row it holds, so it is never used as a staleness signal here. "The
+     * file itself does not exist" is a plain filesystem fact, independent of coverage
+     * attribution or run order, and is the only signal this method trusts (SPEC.md §7.3,
+     * docs/INTERNALS.md "pruning").
+     *
+     * @return int number of dependency edges removed
+     */
+    public function pruneMissingDependencies(): int
+    {
+        $removed = 0;
+
+        foreach ($this->edges as $testRel => $ids) {
+            $kept = [];
+
+            foreach ($ids as $id) {
+                $path = $this->files[$id] ?? null;
+
+                if ($path !== null && ! is_file($this->absolute($path))) {
+                    $removed++;
+
+                    continue;
+                }
+
+                $kept[] = $id;
+            }
+
+            if (count($kept) !== count($ids)) {
+                $this->edges[$testRel] = $kept;
+            }
+        }
+
+        if ($removed > 0) {
+            $this->reverseIndex = null;
+        }
+
+        return $removed;
+    }
+
     public function pruneResultsForMissingFiles(string $branch): void
     {
         if (! isset($this->baselines[$branch]['results'])) {

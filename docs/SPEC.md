@@ -477,7 +477,7 @@ Post-processing: if any source `.php` file changed and **no driver is available*
 
 ### 7.3 Writing after the run
 
-- Full run (record or replay without truncation): `setRecordedSha(branch, HEAD)`, `unionEdges` for the test files executed (merged into whatever the graph already had per file, never replaced — a coverage driver only credits a file's declaration footprint to whichever test loaded it first in that process, so a partial re-record must not let that attribution silently drop a real dependency; a stale edge is only ever shed by a fresh `record`, which always starts from an empty graph), merge of results, `pruneStaleResults` (ids from executed files that no longer appeared: renamed/deleted tests), `pruneMissingTestFiles`, `pruneMissingBranches` (`git for-each-ref`), `complete = true`, `last-run.tree` snapshot of the dirty files.
+- Full run (record or replay without truncation): `setRecordedSha(branch, HEAD)`, `unionEdges` for the test files executed (merged into whatever the graph already had per file, never replaced — a coverage driver only credits a file's declaration footprint to whichever test loaded it first in that process, so a partial re-record must not let that attribution silently drop a real dependency; an edge whose file still exists is only ever shed by a fresh `record`, which always starts from an empty graph — an edge whose file is confirmed *deleted* can instead be dropped explicitly, one at a time, via `prune --stale-edges`, §11, since "gone from disk" is a plain fact rather than a coverage-attribution artifact), merge of results, `pruneStaleResults` (ids from executed files that no longer appeared: renamed/deleted tests), `pruneMissingTestFiles`, `pruneMissingBranches` (`git for-each-ref`), `complete = true`, `last-run.tree` snapshot of the dirty files.
 - Partial / truncated / results-only run: only merges results for already-known test files; no sha, no pruning, no edges.
 - Always: recompute `k` for each touched test file and, if there's a remote, `put(objects/<k>.json)`.
 
@@ -549,7 +549,7 @@ phpunit-replay record [--fresh]
 phpunit-replay verify [--parallel=N|-p] [-- <phpunit args>]   # full suite + comparison against cache (§12.2)
 phpunit-replay status            # graph: files, edges, branches, size, quarantine, fingerprint
 phpunit-replay explain <path>    # which tests changing that file would affect, and by which rule
-phpunit-replay prune [--flaky] [--branches] [--all]
+phpunit-replay prune [--flaky] [--branches] [--all] [--stale-edges]
 phpunit-replay baseline-path     # prints the state directory (for uploading artifacts in CI)
 phpunit-replay push / pull       # manual sync with the remote
 ```
