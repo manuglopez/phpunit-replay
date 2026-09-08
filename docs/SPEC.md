@@ -170,7 +170,7 @@ vendor/bin/phpunit-replay [phpunit-replay options] [-- phpunit options]
 11. If the user passed `--log-junit=X` (to phpunit-replay, not to phpunit), the wrapper generates a **complete** JUnit merging the real JUnit from the run with the cached results (`JUnitMerger`), marking cached ones with `<property name="replayed" value="true"/>`.
 12. Exit code: PHPUnit's.
 
-Partial PHPUnit options (`--filter`, `--group`, `--exclude-group`, `--testsuite`, an explicit path, `--covers`, `--uses`) **disable selection**: whatever the user asked for runs, with the extension in `results-only` mode (updates results, not edges or sha). `--random-order` with a different seed changes which test is the first in its process to load a given class, enum or const file, and therefore which test the file's load-time execution is attributed to — the top level of a file runs once per process, so only that first test sees it. Edges being file-level does not make this harmless on its own; what does is that a re-record **unions** edges instead of replacing them (SPEC §7.2), so a different order can only add an attribution, never take one away. `--order-by=random` with no seed is accepted as-is.
+Partial PHPUnit options (`--filter`, `--group`, `--exclude-group`, `--testsuite`, an explicit path, `--covers`, `--uses`) **disable selection**: whatever the user asked for runs, with the extension in `results-only` mode (updates results, not edges or sha). `--random-order` with a different seed changes which test is the first in its process to load a given class, enum or const file, and therefore which test the file's load-time execution is attributed to — the top level of a file runs once per process, so only that first test sees it. Edges being file-level does not make this harmless on its own; what does is that a re-record **unions** edges instead of replacing them (SPEC §7.2), so a different order can only add an attribution, never take one away. `--order-by=random` with no seed is accepted as-is. This whole paragraph is specific to `run`; `record` (§3.3) refuses a partial selection instead of degrading to `results-only`, since a partial run cannot produce record's one product, a complete baseline.
 
 ### 3.2 `in-process` mode (the `Replayable` trait)
 
@@ -207,6 +207,17 @@ This mode also allows `phpunit --coverage-html` with TIA: the extension cannot m
 ### 3.3 Explicit `record` mode
 
 `vendor/bin/phpunit-replay record [--fresh]` → full suite with recording. This is what runs in CI after a merge to `main` to publish the baseline.
+
+`record` runs the full suite unconditionally: it never takes a selection. A PHPUnit
+selection forwarded after `--` (`--filter`, `--exclude-filter`, `--group`, `--exclude-group`,
+`--testsuite`, `--exclude-testsuite`, an explicit path) is refused rather than silently
+honoured in `results-only` mode the way §3.1 describes for `run` — a partial run cannot
+produce the one thing `record` exists to produce: a complete, prunable, publishable
+baseline. The wrapper degrades instead (as it does for every other reason it cannot proceed
+as asked): the user's selection still runs, for real, via plain, unwrapped PHPUnit, so
+`record` never silently does nothing observable; the graph is left completely untouched;
+and — like every other degraded `record` — the exit code is `2`, not a false `0`, whenever
+that fallback run itself passes, precisely because nothing was published.
 
 ---
 
@@ -370,7 +381,7 @@ Mode decision inside the extension (when the wrapper isn't orchestrating it):
 
 - The `PHPUNIT_REPLAY_MODE` env var (set by the wrapper) wins.
 - Without the env var, with parameter `mode=auto`: if there's a valid graph and the fingerprint matches → `replay` (recording edges for whatever runs, if a driver is present); if there's no graph and a driver is available → `record`; without a driver → `off` with a warning.
-- If partial selection is detected in `$configuration` (`hasFilter()`, `hasGroups()`, `hasExcludeGroups()`, `includeTestSuite()`, `cliArguments()` with a path) → `results-only`.
+- If partial selection is detected in `$configuration` (`hasFilter()`, `hasGroups()`, `hasExcludeGroups()`, `includeTestSuite()`, `cliArguments()` with a path) → `results-only`. When `mode=record` specifically (a standing "always record" configuration, unlike `auto` landing on `record` only for lack of a baseline yet) is what the selection defeated, the summary line notes it (`record mode: baseline NOT refreshed (partial selection)`) instead of staying silent — the same guarantee record's own CLI command (§3.3) enforces by refusing outright, applied here as visibility instead, since a standing config is not a one-shot command and downgrading to `results-only` is still the correct behaviour for an ordinary filtered run.
 
 ### 6.2 ReplayState
 
