@@ -32,7 +32,18 @@ use Manuglopez\Replay\Cache\Graph;
  *
  * The `fileId() !== null` exclusion here and {@see Rules\PhpEdgeRule}'s `fileId() === null`
  * skip are exact complements, so the two mechanisms partition the changed set rather than
- * race for it.
+ * race for it. That exclusion is only trustworthy because `Analysis\StaticEdges` indexes
+ * every file that *declares* a name rather than only the ones with no method body: a changed
+ * file with a `fileId` is then one some test either called into or named, and handing it to
+ * `PhpEdgeRule` is exact. The one shape still outside both is a file php-parser cannot read,
+ * whose edges fall back to the pre-existing first-loader heuristic
+ * (`Record\Recorder::filesWithExecutedLines()`) — the same answer the flag off gives, so not a
+ * regression, and not worth running the whole suite for every file with a syntax error in it.
+ *
+ * The pattern key is the changed file's own literal path, which is why
+ * {@see WatchPatterns::matches()} compares a key to the path for equality before parsing it as
+ * a glob: `WatchPatterns::parse()` splits a key on whitespace and reads a leading `!` as an
+ * exclude token, so `lang/es MX/messages.php` would otherwise never match its own file.
  *
  * `.blade.php` is excluded: {@see Rules\BladeRule} and the Laravel `resources/views/**`
  * default already own that path, and its own unmatched files already fall through to
@@ -51,14 +62,35 @@ final readonly class ResiduePatterns
     }
 
     /**
+     * The `<testsuites>` targets every residue pattern points at: the declared directories
+     * *and* the declared `<file>` entries.
+     *
+     * Both, not just the directories. A testsuite built entirely from `<file>` entries has an
+     * empty {@see TestPaths::directories()}, and mapping residue onto that alone returned no
+     * pattern at all — so such a project got no safety net whatsoever while `Record\Recorder`
+     * was still dropping its load-time-only edges: strictly worse than the flag off, and
+     * silent. {@see WatchPatterns::testsUnderDirectories()} already matches an exact file as
+     * happily as a directory prefix, so a file entry works as a target with no further work.
+     *
+     * @return list<string>
+     */
+    private function targets(): array
+    {
+        return array_values(array_unique([
+            ...$this->testPaths->directories(),
+            ...$this->testPaths->files(),
+        ]));
+    }
+
+    /**
      * @param list<string> $changed project-relative
-     * @return array<string, list<string>> pattern (a literal path) => test directories
+     * @return array<string, list<string>> pattern (a literal path) => test directories/files
      */
     public function for(array $changed): array
     {
-        $directories = $this->testPaths->directories();
+        $targets = $this->targets();
 
-        if ($directories === []) {
+        if ($targets === []) {
             return [];
         }
 
@@ -66,7 +98,7 @@ final readonly class ResiduePatterns
 
         foreach ($changed as $rel) {
             if ($this->isResidue($rel)) {
-                $patterns[$rel] = $directories;
+                $patterns[$rel] = $targets;
             }
         }
 

@@ -82,12 +82,12 @@ final class GraphUpdater
                 $edgesCount += count($sources);
             }
 
-            // One hop of name-resolution edges for the declaration-only files this run's
-            // tests can never get from coverage (Analysis\StaticEdges). Must happen here,
-            // before mergeResults() below, because that is where each touched file's
-            // content key is computed from its (by then final) dependency list.
+            // One hop of name-resolution edges for what this run's tests can never get from
+            // coverage (Analysis\StaticEdges). Must happen here, before mergeResults() below,
+            // because that is where each touched file's content key is computed from its (by
+            // then final) dependency list.
             if ($this->staticEdges !== null) {
-                $edgesCount += $this->staticEdges->expand($this->graph, array_keys($partial->edges));
+                $edgesCount += $this->staticEdges->expand($this->graph, self::behaviouralEdges($partial, $executed));
             }
         }
 
@@ -245,6 +245,33 @@ final class GraphUpdater
         }
 
         $this->graph->setNotCacheable(array_values(array_unique([...$kept, ...$partial->notCacheable])));
+    }
+
+    /**
+     * This run's coverage-derived edges, with an entry for every test that executed —
+     * `[]` for one whose coverage reported no source file at all.
+     *
+     * `Analysis\StaticEdges::expand()` needs both halves of that. It must not read the hop
+     * sources off the graph (it would follow static edges from earlier passes and grow the
+     * graph pass after pass), and it must still be handed the tests with no behavioural edge:
+     * `Record\Recorder::endTest()` only creates `perTestFiles[$test]` inside its loop over the
+     * files coverage reported, so a test whose coverage saw nothing has no key in `edges.json`
+     * — which is precisely the case static edges exist for (a `<source><exclude>` over the
+     * test directory, or any `--coverage-*` report, produces it). Passing
+     * `array_keys($partial->edges)` skipped exactly those tests.
+     *
+     * @param list<string> $executed project-relative test files
+     * @return array<string, list<string>>
+     */
+    private static function behaviouralEdges(RunPartial $partial, array $executed): array
+    {
+        $out = array_fill_keys($executed, []);
+
+        foreach ($partial->edges as $testFile => $sources) {
+            $out[$testFile] = $sources;
+        }
+
+        return $out;
     }
 
     /** @return list<string> */

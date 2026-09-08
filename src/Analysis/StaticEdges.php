@@ -16,38 +16,56 @@ use RecursiveIteratorIterator;
 use SplFileInfo;
 
 /**
- * The static half of the `static_declaration_edges` feature: gives a declaration-only file
- * the dependency edges coverage can never produce for it.
+ * The static half of the `static_declaration_edges` feature: the edges a *name* justifies,
+ * as opposed to the edges a *call* justifies.
+ *
+ * ## What partitions the two halves
+ *
+ * Not the shape of the file — the kind of signal. `Record\Recorder` keeps the edges coverage
+ * can attribute order-independently: a test executed a line inside a function/method/closure
+ * body, which only happens when something calls into it. This class adds the edges nothing
+ * ever executes: a test names a symbol, and the name is written in source, so it reads the
+ * same in every process and every worker distribution.
+ *
+ * An earlier version of this class split the work by file shape instead — the static index
+ * held only files with no function body at all ({@see FileFacts::declarationOnly()}) — and
+ * the two halves then failed to cover the middle. A file with even one method body whose
+ * bodies a given test never entered got no behavioural edge (nothing called it) and no static
+ * edge (the index declined it), while `Select\ResiduePatterns` also declined it because some
+ * *other* test's coverage had given it a `fileId`. Adding one method to an enum was enough to
+ * drop it out of the graph for every test that merely reads its cases. Indexing by
+ * declaration removes the middle: every file that declares a name is reachable by name, and
+ * every file whose body ran is reachable by coverage.
  *
  * ## The rule
  *
- * A declaration-only file `D` becomes a dependency of test `T` when some file `F` that is
- * *already a behavioural dependency of `T`* refers to a name `D` declares. One hop, no
- * transitivity.
+ * A file `D` that declares a name becomes a dependency of test `T` when `T`'s own source
+ * names something `D` declares — or, when `D` has no function body at all, when any file that
+ * is a *behavioural* dependency of `T` names it. One hop, no transitivity, and asymmetric on
+ * purpose: {@see self::collect()} has the measurement that forced the asymmetry.
  *
- * `T`'s own file counts as one of those `F`s. That is not a widening of the rule but the
- * rule applied honestly — `T`'s method bodies are the very lines that ran — and it is the
- * only thing that reaches the hardest position: a test that reads a declaration-only file
- * *directly* and touches nothing else with a method body has no other hop source at all.
- * Stating it explicitly also makes the result independent of whether the coverage scope
- * happens to include the test directory.
+ * `T`'s own file being a hop source is not a widening of the rule but the rule applied
+ * honestly — `T`'s method bodies are the very lines that ran — and it is the only thing that
+ * reaches the hardest position: a test that reads a declaration-only file *directly* and
+ * touches nothing else with a method body has no other hop source at all. Stating it
+ * explicitly also makes the result independent of whether the coverage scope happens to
+ * include the test directory.
  *
- * That is order-independent by construction: `F`'s body lines ran under `T` (that is what
- * made it a behavioural dependency — `Record\Recorder`), and the reference to `D` is written
- * in `F`'s source, so it holds for every test that reaches `F`, in every process, in every
- * worker distribution. Contrast the load-time coverage this replaces, which PHP credits to
- * whichever test in the process happened to `require` `D` first.
+ * ## Why only one hop, and why provenance decides it
  *
- * ## Why only one hop
+ * The hop sources are the dependencies *this run's coverage* reported, never the graph's
+ * dependency list ({@see self::expand()}). That distinction is the whole determinism
+ * guarantee. Edges accumulate across passes ({@see Graph::unionEdges()}), so a static edge
+ * added on one pass sits in the graph on the next; following the graph would reach `D2` from
+ * `D1` on pass two and `D3` on pass three, and the graph would then depend on how many
+ * partial re-records had happened rather than on the source tree — exactly the kind of
+ * non-determinism that makes two machines compute different content keys for identical code.
+ * A behavioural edge, by contrast, is re-derived from coverage on every pass, so the hop
+ * source set is a function of the source tree alone.
  *
- * A second hop would have to start from a declaration-only file, and a declaration-only file
- * is never a behavioural dependency of anything — so the only thing it could add is
- * `D2` referenced from `D1` referenced from `F`. Measured against the target project that is
- * two files out of 2,195 (named only from inside a declaration-only file), and missing it is
- * not a false green: a declaration-only file that receives no static edge at all is unknown
- * to the graph, and a change to it is therefore covered conservatively by the watch fallback
- * ({@see \Manuglopez\Replay\Select\ResiduePatterns}). The second hop would buy precision,
- * not safety, for 2 files out of 2,195.
+ * Stopping at one hop costs precision, never safety: a file that receives no static edge at
+ * all is unknown to the graph, and a change to it is therefore covered conservatively by the
+ * watch fallback ({@see \Manuglopez\Replay\Select\ResiduePatterns}).
  *
  * ## Cost
  *
@@ -55,8 +73,13 @@ use SplFileInfo;
  * content hash ({@see FactsCache}), so only files that actually changed are re-parsed on
  * later passes. Measured cold on a 2,195-file Laravel project: 3.6s; warm: 0.5s, for an
  * 8.6 MB cache. Both the walk and the parsing stop at {@see self::MAX_FILES}; overrunning it
- * disables the index rather than the safety net, since an unindexed declaration-only file
- * simply stays unknown to the graph and falls through to the conservative watch fallback.
+ * disables the index rather than the safety net, since an unindexed file simply stays unknown
+ * to the graph and falls through to the conservative watch fallback.
+ *
+ * Indexing by declaration rather than by absence of bodies widens the index from the
+ * declaration-only files to every declaring file — on the same project, from 42 indexed names
+ * over 147 files to 1,821 names over 1,926 files. What that costs in *edges* is governed by
+ * the asymmetry in {@see self::collect()}, which is where the numbers live.
  */
 final class StaticEdges
 {
@@ -83,7 +106,7 @@ final class StaticEdges
      */
     private const SKIP_DIRS = ['node_modules', '.git', '.svn', '.hg'];
 
-    /** @var array<string, list<string>>|null fully-qualified name => declaration-only files (relative) */
+    /** @var array<string, list<string>>|null fully-qualified name => the files declaring it (relative) */
     private ?array $index = null;
 
     public function __construct(
@@ -94,13 +117,33 @@ final class StaticEdges
     }
 
     /**
-     * Adds one hop of static edges for each of `$testFilesRelative`, reading each test's
-     * behavioural dependencies straight off `$graph` (so edges union'd in from earlier
-     * passes count too — {@see Graph::unionEdges()}). Returns how many edges were added.
+     * Adds one hop of static edges for every test in `$behaviouralEdges`. Returns how many
+     * edges were added.
      *
-     * @param list<string> $testFilesRelative
+     * `$behaviouralEdges` is this run's coverage-derived edge map (`Record\RunPartial::$edges`
+     * widened to carry an entry for every executed test), and it is both the list of tests to
+     * expand and the hop sources to expand them from:
+     *
+     *  - **Every executed test needs an entry, including one with an empty list.** A test with
+     *    no behavioural edge at all is the case this class exists for — the docblock calls it
+     *    the hardest position — and it is reachable with no configuration at all: a
+     *    `<source><exclude>` covering the test directory, or any `--coverage-*` report
+     *    (`Record\PiggybackCoverageDriver` reads PHPUnit's own coverage, already narrowed to
+     *    `<source><include>`, so no test file appears in its own coverage). Keying the loop on
+     *    `RunPartial::$edges` alone silently skipped exactly those tests, because
+     *    `Record\Recorder::endTest()` only creates `perTestFiles[$test]` inside its loop over
+     *    the files coverage reported.
+     *  - **The hop sources must come from here, not from `$graph`.** See the class docblock:
+     *    reading the graph would follow static edges added by earlier passes and grow the
+     *    graph pass after pass.
+     *
+     * `$graph` is still what answers "does this test already have this edge", so a second pass
+     * over an unchanged tree adds nothing.
+     *
+     * @param array<string, list<string>> $behaviouralEdges test file (relative) => the source
+     *        files (relative) whose bodies ran under it in this run
      */
-    public function expand(Graph $graph, array $testFilesRelative): int
+    public function expand(Graph $graph, array $behaviouralEdges): int
     {
         $index = $this->index();
 
@@ -110,26 +153,21 @@ final class StaticEdges
 
         $added = 0;
 
-        foreach ($testFilesRelative as $testRelative) {
-            $dependencies = $graph->dependenciesOf($testRelative);
-            $known = array_fill_keys($dependencies, true);
+        foreach ($behaviouralEdges as $testRelative => $behavioural) {
+            $known = array_fill_keys($graph->dependenciesOf($testRelative), true);
             $targets = [];
 
-            // The test file itself, then its behavioural dependencies. `$known` deliberately
-            // does not contain the test file: a test whose own source names a declaration-only
-            // file must end up with an edge to it.
-            foreach ($this->hopSources($testRelative, $dependencies) as $dependency) {
-                foreach ($this->facts->forRelative($dependency)->references as $name) {
-                    foreach ($index[$name] ?? [] as $declarationFile) {
-                        if (! isset($known[$declarationFile])) {
-                            $targets[$declarationFile] = true;
-                        }
-                    }
-                }
+            // The test's own source reaches anything it names. `$known` deliberately does not
+            // contain the test file, so a test whose own source names a declaring file ends
+            // up with an edge to it even with no behavioural dependency at all.
+            $this->collect($index, $testRelative, $known, $targets, true);
+
+            foreach ($behavioural as $hopSource) {
+                $this->collect($index, $hopSource, $known, $targets, false);
             }
 
-            foreach (array_keys($targets) as $declarationFile) {
-                $graph->link($testRelative, $declarationFile);
+            foreach (array_keys($targets) as $declaringFile) {
+                $graph->link($testRelative, $declaringFile);
                 $added++;
             }
         }
@@ -138,41 +176,68 @@ final class StaticEdges
     }
 
     /**
-     * The files whose references may be followed for `$testRelative`: the test's own file,
-     * always, plus every dependency that is NOT itself declaration-only.
+     * Adds every file `$hopSource` names to `$targets`, subject to the asymmetry that keeps
+     * this affordable.
      *
-     * Filtering the declaration-only ones out is what keeps "one hop" true *across runs*, and
-     * it is not cosmetic. Edges accumulate ({@see Graph::unionEdges()}), so on the pass after
-     * a declaration-only file `D1` was linked, `D1` would be sitting in the dependency list
-     * and would be followed like any other dependency — quietly reaching `D2` on the second
-     * pass and `D3` on the third. The graph would then depend on how many partial re-records
-     * had happened rather than on the source tree, which is exactly the kind of
-     * non-determinism that makes two machines compute different content keys for identical
-     * code. The test file is exempt because it is the test: it must stay a hop source even
-     * when it happens to be declaration-only itself (a stub test whose only method has an
-     * empty body — a real shape, found in the project this was measured against).
+     * `$anyShape` is true only for the test's own file. From there, naming a symbol is the
+     * signal, whatever the shape of the file declaring it: the test's source is the test, and
+     * a name it writes is a dependency it has.
      *
-     * @param list<string> $dependencies
-     * @return list<string>
+     * From a behavioural dependency, only a file with **no function body at all** may be
+     * reached. That is not shyness, it is where the hop stops paying for itself:
+     *
+     *  - A file with no body can never be attributed by coverage at all, in any process, for
+     *    any test. The transitive hop is the only mechanism it will ever have, and its reach
+     *    is small — measured on a 2,195-file Laravel project of 726 tests and 62,743 recorded
+     *    edges, 730 edges (median 1 per test).
+     *  - A file *with* bodies already gets a behavioural edge from every test that calls into
+     *    it. The only edge it can be missing is the one from a test that names it without
+     *    calling it, and for that the test's own source is the whole signal. Letting a
+     *    behavioural dependency reach it as well adds 66,219 edges on that same project —
+     *    +105.5%, median dependencies per test 82 → 173 — and 60% of them come from five
+     *    files that name classes they merely *register*: `routes/web.php`, `routes/api.php`,
+     *    `routes/breadcrumbs.php`, `routes/console.php` and one kitchen-sink model, each a
+     *    behavioural dependency of 700 of the 726 tests and each naming dozens of unrelated
+     *    controllers. Every test that hit any route would inherit an edge to every controller
+     *    in the application. That is over-attribution with no safety to show for it: those
+     *    controllers are reachable by coverage from the tests that exercise them, and by name
+     *    from the tests that mention them.
+     *
+     * With the asymmetry the same project gains 1,781 edges instead of 66,219 — +2.84%,
+     * median dependencies per test 82 → 84 — of which 730 are the declaration-only reach
+     * above and 1,051 are the new "the test names it" edges. The five registration files
+     * contribute exactly zero. The widest single gain from the new half is 190 tests, for a
+     * backed enum with one method that 190 test files name directly, which is the earned case.
+     *
+     * @param array<string, list<string>> $index
+     * @param array<string, true> $known
+     * @param array<string, true> $targets
      */
-    private function hopSources(string $testRelative, array $dependencies): array
+    private function collect(array $index, string $hopSource, array $known, array &$targets, bool $anyShape): void
     {
-        $sources = [$testRelative];
+        foreach ($this->facts->forRelative($hopSource)->references as $name) {
+            foreach ($index[$name] ?? [] as $declaringFile) {
+                if (isset($known[$declaringFile]) || isset($targets[$declaringFile])) {
+                    continue;
+                }
 
-        foreach ($dependencies as $dependency) {
-            if (! $this->facts->forRelative($dependency)->declarationOnly()) {
-                $sources[] = $dependency;
+                if ($anyShape || $this->facts->forRelative($declaringFile)->declarationOnly()) {
+                    $targets[$declaringFile] = true;
+                }
             }
         }
-
-        return $sources;
     }
 
     /**
-     * The declaration-only files in scope, indexed by every fully-qualified class-like name
-     * they declare. A `return [...]` config or language file declares no name at all, so it
-     * never appears here — nothing can reference it lexically, and it is left to the
-     * conservative watch fallback on purpose.
+     * Every file in scope that declares a class-like name, indexed by every fully-qualified
+     * name it declares — whether or not it also has method bodies. A file with bodies is
+     * already reachable by coverage *when something calls into it*; being in this index is
+     * what makes it reachable by the tests that only ever name it.
+     *
+     * A `return [...]` config or language file declares no name at all, so it never appears
+     * here — nothing can reference it lexically, and it is left to the conservative watch
+     * fallback on purpose ({@see \Manuglopez\Replay\Select\ResiduePatterns}). An unparseable
+     * file is absent for the same reason: {@see FileFacts::unparseable()} declares nothing.
      *
      * @return array<string, list<string>>
      */
@@ -188,7 +253,7 @@ final class StaticEdges
         foreach ($this->candidateFiles() as $relative) {
             if (++$scanned > self::MAX_FILES) {
                 Warnings::warn(sprintf(
-                    'static_declaration_edges: more than %d source files in scope; static edges disabled for this pass (changes to declaration-only files still force a conservative selection)',
+                    'static_declaration_edges: more than %d source files in scope; static edges disabled for this pass (changes to files the graph has no edge for still force a conservative selection)',
                     self::MAX_FILES,
                 ));
 
@@ -196,10 +261,6 @@ final class StaticEdges
             }
 
             $facts = $this->facts->forRelative($relative);
-
-            if (! $facts->declarationOnly()) {
-                continue;
-            }
 
             foreach ($facts->declares as $name) {
                 $index[$name][] = $relative;

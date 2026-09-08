@@ -32,6 +32,8 @@ final class StaticDeclarationEdgesTest extends TestCase
 
     private const LIMITS = 'src/Limits.php';
 
+    private const REGISTRY = 'src/Registry.php';
+
     private FixtureProject $fixture;
 
     /** @var list<FixtureProject> */
@@ -444,6 +446,250 @@ final class StaticDeclarationEdgesTest extends TestCase
         $graph = ReplayAssert::loadGraph($this->fixture);
         self::assertNotNull($graph);
         self::assertContains(self::ENUM, $graph->dependenciesOf('tests/BetaRejectedTest.php'));
+    }
+
+    // -- the middle the two halves used to miss -------------------------------
+
+    #[Test]
+    public function a_file_with_a_body_reaches_the_tests_that_only_name_it(): void
+    {
+        // The design flaw the shape-based index had: `src/Registry.php` has a method body,
+        // so the static index declined it, and `tests/AaaRegistryConstTest.php` never enters
+        // that body, so the Recorder declined it too. `Select\ResiduePatterns` then declined
+        // the file as well, because the OTHER test's coverage had given it a `fileId`. The
+        // edge existed with the flag off (the top-level `class_alias()` call gives the file a
+        // load-time footprint the Pest heuristic keeps) and vanished with it on.
+        $this->extend();
+        $this->record(self::FLAG_ON);
+
+        $graph = ReplayAssert::loadGraph($this->fixture);
+        self::assertNotNull($graph);
+
+        self::assertSame(
+            ['tests/AaaRegistryConstTest.php', 'tests/ZzzRegistryCallTest.php'],
+            $graph->testFilesDependingOn(self::REGISTRY),
+        );
+    }
+
+    #[Test]
+    public function changing_a_constant_reruns_the_test_that_only_reads_it(): void
+    {
+        // Same thing at the level that matters. Before the fix this printed
+        // "✓ 1 executed · 5 replayed" — a green run over a broken assertion — where the flag
+        // off printed "✗ 2 executed".
+        $this->extend();
+        $this->record(self::FLAG_ON);
+
+        $this->fixture->repo->write(
+            self::REGISTRY,
+            str_replace("'alpha', 'beta'", "'alpha', 'BETA'", $this->fixture->repo->read(self::REGISTRY)),
+        );
+
+        $result = $this->fixture->replay([], self::FLAG_ON);
+
+        self::assertSame(1, $result['exitCode'], 'the const-only test must fail, not be replayed');
+        self::assertSame(2, ReplayAssert::executedCount($result['stdout']));
+    }
+
+    #[Test]
+    public function an_enum_that_gains_one_method_still_reaches_every_test_that_reads_its_cases(): void
+    {
+        // The cliff: adding a single method to a declaration-only file used to take it out of
+        // the static index entirely, so every test that merely reads its cases lost the edge
+        // and only the method's caller kept one.
+        $this->extend();
+        $this->addEnumMethod();
+        $this->record(self::FLAG_ON);
+
+        $graph = ReplayAssert::loadGraph($this->fixture);
+        self::assertNotNull($graph);
+
+        foreach (['tests/AlphaApprovedTest.php', 'tests/BetaRejectedTest.php', 'tests/GammaPendingTest.php'] as $file) {
+            self::assertContains(self::ENUM, $graph->dependenciesOf($file), $file . ' should depend on the enum');
+        }
+    }
+
+    // -- the invariant ---------------------------------------------------------
+
+    #[Test]
+    public function no_test_loses_an_edge_the_flag_off_pass_gave_it(): void
+    {
+        // The promise that makes the flag safe to ship, over the fixture extended with every
+        // shape that used to fall through the middle: a class with both a method body and a
+        // top-level statement, a test that only reads its constant, a test that calls it, and
+        // an enum with a method. An edge coverage found may only be dropped when it was
+        // first-loader noise AND something else now covers the file — so at the edge level
+        // the flag-on set must be a superset, with no exceptions to audit.
+        $this->extend();
+        $this->addEnumMethod();
+        $this->fixture->repo->commitAll('every shape the two halves used to miss');
+
+        $this->record();
+        $off = $this->edgeSet();
+
+        $this->fixture->destroy();
+        $this->fixture = FixtureProject::declarations();
+        $this->extend();
+        $this->addEnumMethod();
+        $this->fixture->repo->commitAll('every shape the two halves used to miss');
+
+        $this->record(self::FLAG_ON);
+        $on = $this->edgeSet();
+
+        self::assertSame([], array_values(array_diff($off, $on)), 'no edge coverage found may be dropped');
+        self::assertNotSame([], array_values(array_diff($on, $off)), 'and the flag must add some');
+    }
+
+    // -- a test whose coverage reports nothing at all --------------------------
+
+    #[Test]
+    public function a_test_whose_coverage_reports_nothing_still_gets_its_static_edges(): void
+    {
+        // `Record\Recorder::endTest()` only creates `perTestFiles[$test]` inside its loop over
+        // the files coverage reported, so a test whose coverage saw nothing has no key in
+        // `edges.json` at all — and `Cache\GraphUpdater` used to hand `StaticEdges` exactly
+        // those keys, so the test never reached it. `tests/DeltaLimitsTest.php` is the
+        // position `Analysis\StaticEdges` calls the hardest one, and it recorded zero edges.
+        $this->excludeTestsFromTheCoverageScope();
+        $this->record(self::FLAG_ON);
+
+        $graph = ReplayAssert::loadGraph($this->fixture);
+        self::assertNotNull($graph);
+
+        self::assertNotSame(
+            [],
+            $graph->dependenciesOf('tests/AlphaApprovedTest.php'),
+            'the coverage scope should still report src/ for the tests that do call into it',
+        );
+        self::assertContains(self::LIMITS, $graph->dependenciesOf('tests/DeltaLimitsTest.php'));
+        self::assertCount(4, $graph->testFilesDependingOn(self::LIMITS));
+    }
+
+    #[Test]
+    public function the_same_holds_when_a_coverage_report_is_requested(): void
+    {
+        // Reachable with no configuration change at all: `Record\PiggybackCoverageDriver`
+        // reads PHPUnit's own coverage, already narrowed to `<source><include>`, so no test
+        // file ever appears in its own coverage.
+        $recorded = $this->fixture->replay(['record', '--coverage-text=/dev/null'], self::FLAG_ON);
+        self::assertSame(0, $recorded['exitCode'], $recorded['stdout'] . $recorded['stderr']);
+
+        $graph = ReplayAssert::loadGraph($this->fixture);
+        self::assertNotNull($graph);
+
+        self::assertNotSame(
+            [],
+            $graph->dependenciesOf('tests/DeltaLimitsTest.php'),
+            'tests/DeltaLimitsTest.php recorded no edge at all',
+        );
+        self::assertContains(self::LIMITS, $graph->dependenciesOf('tests/DeltaLimitsTest.php'));
+        self::assertCount(4, $graph->testFilesDependingOn(self::LIMITS));
+    }
+
+    /**
+     * Adds the shapes the `declarations` fixture deliberately does not have: a class with
+     * BOTH a method body and a top-level statement (so the flag-off pass keeps a load-time
+     * edge to it rather than dropping it as the highest-numbered line), a test that only
+     * reads its constant, and a test that calls its method.
+     */
+    private function extend(): void
+    {
+        $this->fixture->repo->write(self::REGISTRY, <<<'PHP'
+            <?php
+
+            declare(strict_types=1);
+
+            namespace App;
+
+            final class Registry
+            {
+                public const NAMES = ['alpha', 'beta'];
+
+                public static function first(): string
+                {
+                    return self::NAMES[0];
+                }
+            }
+
+            class_alias(Registry::class, 'App\LegacyRegistry');
+
+            PHP);
+
+        $this->fixture->repo->write('tests/AaaRegistryConstTest.php', <<<'PHP'
+            <?php
+
+            declare(strict_types=1);
+
+            namespace App\Tests;
+
+            use App\Registry;
+            use PHPUnit\Framework\TestCase;
+
+            /** Reads a constant only: no body of Registry is ever entered. Sorts first, so it is the first loader. */
+            final class AaaRegistryConstTest extends TestCase
+            {
+                public function test_names_are_what_we_expect(): void
+                {
+                    self::assertSame(['alpha', 'beta'], Registry::NAMES);
+                }
+            }
+
+            PHP);
+
+        $this->fixture->repo->write('tests/ZzzRegistryCallTest.php', <<<'PHP'
+            <?php
+
+            declare(strict_types=1);
+
+            namespace App\Tests;
+
+            use App\Registry;
+            use PHPUnit\Framework\TestCase;
+
+            /** Calls a real method, so this one has a behavioural edge either way. */
+            final class ZzzRegistryCallTest extends TestCase
+            {
+                public function test_first_name(): void
+                {
+                    self::assertSame('alpha', Registry::first());
+                }
+            }
+
+            PHP);
+
+        $this->fixture->repo->commitAll('a class with a body and a top-level statement');
+    }
+
+    /** Turns the enum into a mixed file: cases plus one real method body. */
+    private function addEnumMethod(): void
+    {
+        $source = $this->fixture->repo->read(self::ENUM);
+        $patched = str_replace(
+            "    case Rejected = 'rejected';\n}",
+            "    case Rejected = 'rejected';\n\n    public function label(): string\n    {\n        return ucfirst(\$this->value);\n    }\n}",
+            $source,
+        );
+
+        self::assertNotSame($source, $patched, 'the enum anchor should still be there');
+
+        $this->fixture->repo->write(self::ENUM, $patched);
+        $this->fixture->repo->commitAll('give the enum a method body');
+    }
+
+    /** Drops the test directory out of the coverage scope, so no test file appears in its own coverage. */
+    private function excludeTestsFromTheCoverageScope(): void
+    {
+        $xml = $this->fixture->repo->read('phpunit.xml');
+        $patched = str_replace(
+            "        </include>\n",
+            "        </include>\n        <exclude>\n            <directory>tests</directory>\n        </exclude>\n",
+            $xml,
+        );
+
+        self::assertNotSame($xml, $patched, 'the <include> anchor should still be there');
+
+        $this->fixture->repo->write('phpunit.xml', $patched);
+        $this->fixture->repo->commitAll('exclude tests from the coverage scope');
     }
 
     /** @param array<string, string> $env */

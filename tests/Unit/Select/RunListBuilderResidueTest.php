@@ -134,15 +134,61 @@ final class RunListBuilderResidueTest extends TestCase
         self::assertSame(['tests/BarTest.php', 'tests/FooTest.php'], $list->files());
     }
 
-    private function builder(bool $staticDeclarationEdges, ?WatchPatterns $watch = null): RunListBuilder
+    #[Test]
+    public function a_testsuite_built_from_file_entries_gets_the_net_too(): void
     {
+        // `<testsuite><file>...</file></testsuite>` leaves TestPaths::directories() empty.
+        // Mapping residue onto the directories alone returned no pattern at all, so such a
+        // project got no safety net whatsoever while the Recorder was still dropping its
+        // load-time-only edges: strictly worse than the flag off, and silent.
+        $list = $this->builder(
+            staticDeclarationEdges: true,
+            testPaths: new TestPaths([], ['tests/FooTest.php', 'tests/BarTest.php'], ['Test.php']),
+        )->build(['lang/es/validation.php'], 'main');
+
+        self::assertSame(['tests/BarTest.php', 'tests/FooTest.php'], $list->files());
+    }
+
+    #[Test]
+    public function a_residue_path_containing_whitespace_matches_its_own_file(): void
+    {
+        // The pattern key is the changed path itself, and WatchPatterns::parse() splits a key
+        // on /\s+/ and reads a leading `!` as an exclude — so `lang/es MX/messages.php`
+        // tokenised into the include `lang/es`, which matches nothing at all. The residue
+        // pattern was registered and then quietly never fired.
+        $this->write('lang/es MX/messages.php');
+
+        $list = $this->builder(staticDeclarationEdges: true)->build(['lang/es MX/messages.php'], 'main');
+
+        self::assertSame(['tests/BarTest.php', 'tests/FooTest.php'], $list->files());
+    }
+
+    #[Test]
+    public function the_reason_for_a_whitespaced_residue_path_still_names_the_file(): void
+    {
+        $this->write('lang/es MX/messages.php');
+
+        $list = $this->builder(staticDeclarationEdges: true)->build(['lang/es MX/messages.php'], 'main');
+        $reasons = $list->reasonsFor('tests/BarTest.php');
+
+        self::assertNotSame([], $reasons);
+        self::assertSame('Watch', $reasons[0]->rule);
+        self::assertSame('lang/es MX/messages.php', $reasons[0]->trigger);
+        self::assertSame('lang/es MX/messages.php → tests', $reasons[0]->detail);
+    }
+
+    private function builder(
+        bool $staticDeclarationEdges,
+        ?WatchPatterns $watch = null,
+        ?TestPaths $testPaths = null,
+    ): RunListBuilder {
         $graph = new Graph($this->root);
         $graph->link($this->root . '/tests/FooTest.php', $this->root . '/src/Foo.php');
         $graph->markKnownTestFiles([$this->root . '/tests/BarTest.php']);
 
         return new RunListBuilder(
             $graph,
-            new TestPaths(['tests'], [], ['Test.php']),
+            $testPaths ?? new TestPaths(['tests'], [], ['Test.php']),
             $watch ?? new WatchPatterns(),
             ConfigurationReader::fromXmlFile($this->root . '/phpunit.xml'),
             new Policy($graph, Config::defaults(), Quarantine::load($this->root . '/state'), $this->root),

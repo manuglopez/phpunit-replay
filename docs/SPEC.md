@@ -312,19 +312,58 @@ is built from two order-independent sources instead:
    so the attribution is identical in every process and every Paratest distribution. A file
    php-parser cannot read keeps today's Pest heuristic — "cannot classify" must never turn
    into "no dependencies".
-2. **Static edges, one hop.** A declaration-only file becomes a dependency of a test when the
-   test's own source, or any file that is already a behavioural dependency of it, names
-   something that file declares (`Analysis\StaticEdges`, resolved names plus class-shaped
-   string literals). No second hop: the only thing it could add is a name reachable solely
-   from inside another declaration-only file.
+2. **Static edges, one hop.** Any file that declares a class-like name — with or without
+   method bodies — becomes a dependency of a test when the test's **own source** names
+   something it declares; and, when the file has **no function body at all**, also when any
+   file that is already a behavioural dependency of the test names it (`Analysis\StaticEdges`,
+   resolved names plus class-shaped string literals). No second hop, and hop sources are the
+   dependencies *this run's coverage* reported, never the graph's accumulated list — following
+   the graph would reach one file further on every re-record and make the graph a function of
+   how many partial passes had run rather than of the source tree.
 
-Everything neither source reaches — `lang/` and `config/` files (they declare no name), an
-unparseable file, a class whose bodies no test ever enters — is **residue**, and residue is
-covered conservatively rather than dropped: `Select\RunListBuilder` registers the changed
-path itself as a watch pattern onto every test directory (§7.2.6), so `WatchRule` selects
-everything the graph knows. That is deliberately wider than necessary (a brand-new `.php`
-file lands there too) and deliberately not `Fingerprint::structuralDrift`, which would
-discard every graph on every machine over a translation tweak.
+   The two halves partition by **kind of signal**, not by file shape: coverage owns "a test
+   executed this code", names own "a test mentions this symbol". An earlier design split them
+   by shape — static edges only for files with no body — and the two then failed to meet in
+   the middle: a file with even one method body whose bodies a given test never entered got no
+   behavioural edge and no static edge, while the residue net below also declined it because
+   another test's coverage had already given it a `fileId`. Adding one method to an enum was
+   enough to drop it out of the graph for every test that merely read its cases.
+
+   The asymmetry in the rule is what makes it affordable, and it is measured. A file with no
+   body can never be attributed by coverage at all, so the transitive hop is the only mechanism
+   it will ever have, and its reach is narrow: on a 2,195-file Laravel project with 726 tests
+   and 62,743 recorded edges, 730 added edges. A file that *has* bodies is already reachable by
+   coverage from every test that calls into it, so the only edge it can lack is the one from a
+   test that names it without calling it — and letting a behavioural dependency reach it too
+   costs 66,219 edges on the same project (+105.5%, median dependencies per test 82 → 173),
+   60% of them from five files that name classes they merely *register* (`routes/web.php`,
+   `routes/api.php`, `routes/breadcrumbs.php`, `routes/console.php` and one kitchen-sink
+   model), each a behavioural dependency of 700 of the 726 tests. Every test that hit any route
+   would inherit an edge to every controller in the application, with no safety gained. With
+   the asymmetry the same project gains **1,781 edges, +2.84%**, median dependencies per test
+   82 → 84, and those five files contribute exactly zero.
+
+Everything neither source reaches — `lang/` and `config/` files and Blade templates (they
+declare no name), a file php-parser cannot read (nothing about it is known, so its edges fall
+back to the Pest heuristic), a brand-new `.php` file — is **residue**, and residue is covered
+conservatively rather than dropped: `Select\RunListBuilder` registers the changed path itself
+as a watch pattern onto every test directory *and* every `<testsuite><file>` entry (§7.2.6),
+so `WatchRule` selects everything the graph knows. The pattern key is the changed path
+verbatim, so `WatchPatterns` compares a key to the path for equality before parsing it as a
+glob — otherwise a path containing whitespace, or starting with `!`, would never match its own
+file. That net is deliberately wider than necessary and deliberately not
+`Fingerprint::structuralDrift`, which would discard every graph on every machine over a
+translation tweak.
+
+The **invariant** the flag is held to: with it on, no test loses an edge the flag-off pass gave
+it, unless that edge was itself first-loader noise *and* something else now covers the file —
+either the tests that call into it or name it (it has a `fileId`, so §7.2.2 selects them), or
+the whole suite (it has none, so the residue net selects everything). A changed file is never
+silently attributed to nobody. `Select\Rules\SiblingRule` therefore only consumes a path once
+it has actually found a tested sibling to stand on, the way `BladeRule` does with its
+ancestors: consuming it unmatched hid it from `WatchRule`, which with the flag on is the only
+thing that would have covered it (the Laravel watch default for `app/` is `app/** !*.php` and
+excludes exactly those files, so with the flag off the guard changes no outcome).
 
 The classifier's cache lives at `<stateDir>/analysis/v<rules>/<xx>/<hash>.json`, one
 immutable entry per distinct file content (so Paratest workers can write it concurrently and
