@@ -73,6 +73,19 @@ final class FixtureProject
         return self::fromProject('inprocess', $root);
     }
 
+    /**
+     * Same, for tests/Fixtures/Projects/keydrift: four tests over two test files, one of
+     * which executes an extra source file when `FIXTURE_EXTRA_EDGE=1` is in the
+     * environment. That grows its observed dependency set — and with it its content key —
+     * across two passes over a tree in which not one byte changed, which is what `verify`'s
+     * old `would replay` measurement mistook for "this test would not have been replayed"
+     * (SPEC.md §12.2, `Console\Runner\RunPipeline::replaySetBeforeVerify()`).
+     */
+    public static function keyDrift(?string $root = null): self
+    {
+        return self::fromProject('keydrift', $root);
+    }
+
     private static function fromProject(string $name, ?string $root = null): self
     {
         $repo = GitRepo::init($root);

@@ -13,8 +13,11 @@ use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Output\OutputInterface;
 
 /**
- * `phpunit-replay verify` (SPEC.md §12.2): runs the full suite in record mode and
- * compares every result against what a normal replay pass would have served from cache.
+ * `phpunit-replay verify` (SPEC.md §12.2): runs the full suite in record mode and compares
+ * every result against the one the cache holds for it — reporting how much of the suite a
+ * fast `run` lane would have served from cache instead (`would replay`), how many of those
+ * cached results are wrong (`divergences`), and how many this pass could not check
+ * (`unverified`). {@see \Manuglopez\Replay\Report\VerifySummary} defines each figure.
  */
 final class VerifyCommand extends Command
 {
@@ -22,7 +25,7 @@ final class VerifyCommand extends Command
     {
         $this
             ->setName('verify')
-            ->setDescription('Runs the full suite and reports how many results diverge from what the cache would have replayed.')
+            ->setDescription('Runs the full suite and reports how much of it the cache would have replayed, and how many of those cached results are wrong.')
             ->addOption('parallel', 'p', InputOption::VALUE_OPTIONAL, 'Run through Paratest. N processes, or Paratest\'s own auto-detected count when omitted (SPEC §13).', false)
             ->addArgument('phpunit-args', InputArgument::IS_ARRAY | InputArgument::OPTIONAL, 'Everything forwarded to vendor/bin/phpunit.')
         ;

@@ -1,0 +1,19 @@
+{
+    "name": "fixture/keydrift",
+    "description": "Fixture for phpunit-replay: a test file whose observed dependency set grows between passes, so its stored content key drifts from the re-observed one.",
+    "type": "project",
+    "require": {
+        "php": "^8.2"
+    },
+    "autoload": {
+        "psr-4": {
+            "App\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "App\\Tests\\": "tests/"
+        }
+    },
+    "minimum-stability": "stable"
+}

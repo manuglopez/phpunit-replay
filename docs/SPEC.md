@@ -694,13 +694,26 @@ Documented recommendation in the README, same as Pest: **PR CI runs the full sui
 
 ### 12.2 `verify` mode and the divergence metric
 
-`phpunit-replay verify -- <args>` runs the **full** suite with the extension in `record` mode, and when done compares each real result against what the cache *would have* replayed for that `testId`/`k`. Any difference (a cached pass that now fails, or vice versa) is recorded in `divergence.json` (`{testId, k, cached, actual, sha, at}`), automatically quarantined, and printed as:
+`phpunit-replay verify -- <args>` runs the **full** suite with the extension in `record` mode, and when done compares each real result against the one the cache holds for the same `testId`/`k`. Any difference in result *class* (a cached pass that now fails, or vice versa) is recorded in `divergence.json` (`{testId, k, cached, actual, sha, at}`), automatically quarantined, and printed as:
 
 ```
-Verify  ✓ 1240 tests · 1198 would replay · 0 divergences (lifetime: 2 in 143 runs)
+Verify  ✓ 1240 tests · 1198 would replay · 0 divergences · 0 unverified (lifetime: 2 in 143 runs)
 ```
 
-This is the full-lane command on `main`/nightly. The `lifetime divergences` figure is the objective data point for deciding when the fast lane can become a PR gate. `status` shows the historical series.
+The four figures answer different questions and are measured over deliberately different populations:
+
+| Figure | Population | Meaning |
+|---|---|---|
+| `tests` | `partial->results` | Tests this pass executed for real. |
+| `would replay` | `partial->results` ∩ `Select\ReplaySet` | Of those, how many a `run` on this same tree would have served from cache instead of executing. Decided off the run list `run` itself builds (§7.2, `Select\RunListBuilder`) against the state as it was before this pass touched anything — **never** by comparing content keys. A property of the tree, so two `verify` passes over an unchanged tree report the same number. |
+| `divergences` | tests whose `old.k === new.k` | Results whose status class changed. Deliberately **broader** than `would replay`: it also checks tests `run` would have re-executed anyway, which can only over-report a divergence, never miss one. A cached `fail` recovering is excluded (§6.2 reruns those unconditionally, so it was never replayed). |
+| `unverified` | `would replay` minus those `divergences` could check | Of the tests that would have been replayed, how many this pass could not check, because it observed a different dependency set than the cached result was recorded against (`old.k !== new.k`). §6.2's local replay path never compares keys — `k` addresses the remote object store (§9) — so `run` would still serve those cached results: this is the part of `would replay` the pass is not vouching for. Settles to 0 once the graph's edges stop moving. |
+
+`would replay` counts only what the **local** cache would have served: the remote object store (§9) is not consulted, so a test file `run` would have replayed from another machine's object counts here as executing. Consulting it would mean fetching and merging objects — a side effect a measurement must not have — and would make the figure depend on remote state at that instant rather than on the tree; erring low is the safe direction.
+
+`would replay` is decided **before** the PHPUnit child is launched, not reconstructed afterwards: `apply()` (§7.3) rewrites the graph's edges, keys and results in place, and both `RunListBuilder`'s directory walk and `ChangedFiles`'s git diff would otherwise read a working tree the suite (and the generated `.phpunit-replay.xml`) had already changed. A partial CLI selection does not narrow the run list the decision is made against — the figure keeps meaning "would a `run` on this tree have replayed these tests" rather than collapsing to 0 for a `--filter` pass, which §6.1 sends into results-only mode; the selection only narrows which tests the figure is reported over.
+
+This is the full-lane command on `main`/nightly. `lifetime divergences` and `would replay` together are the objective data point for deciding when the fast lane can become a PR gate: the first says whether the cache is right, the second how much of the suite it would actually spare. `status` shows the historical series.
 
 `verify` also accepts `--parallel`/`-p[=N]` (§13): being a full-suite pass, it is the slowest command in the package and the one the README recommends as the actual PR merge gate, so running it through Paratest is what keeps that gate fast.
 

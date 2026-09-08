@@ -219,7 +219,7 @@ forwarded to `vendor/bin/phpunit` untouched.
 |---|---|---|
 | `run` (default) | `--fresh` `--no-remote` `--explain` `--dry-run` `--log-junit=FILE` `--allow-ci-baseline` `--parallel`/`-p[=N]` `[-- <phpunit args>]` | Runs only what's affected, replays the rest. See below for each option. |
 | `record` | `--fresh` `--parallel`/`-p[=N]` | Runs the full suite unconditionally and records a fresh baseline. What CI runs on the default branch after a merge. Exits `2` (PHPUnit's own tests may still all have passed) if it has to degrade to a plain PHPUnit run, since that means no baseline was actually written — unlike `run`, whose exit code always stays PHPUnit's own even when it degrades. |
-| `verify` | `--parallel`/`-p[=N]` `[-- <phpunit args>]` | Runs the full suite in record mode and compares every result against what a replay pass would have served — the divergence metric (see [Keeping the cache honest](#keeping-the-cache-honest)). |
+| `verify` | `--parallel`/`-p[=N]` `[-- <phpunit args>]` | Runs the full suite in record mode and compares every result against the one the cache holds for it: how much of the suite a fast `run` lane would cover, and how much of that would be wrong (see [Keeping the cache honest](#keeping-the-cache-honest)). |
 | `status` | — | Prints the cached graph: root, branch, state dir, coverage driver, framework, file/edge/table counts, `graph.json` size, per-branch results, fingerprint drift, quarantine, not-cacheable count, remote, lifetime divergences. |
 | `explain <path>` | — | Prints which recorded test files a change to `<path>` would affect, and by which rule — without running anything. |
 | `prune` | `--flaky` `--branches` `--all` `--remote --keep-months=N` `--squash` | Drops stale state without touching a live pass. See below. |
@@ -373,12 +373,29 @@ you three ways to keep a test from ever being served stale, plus one that happen
    automatically after `quarantine_release_after` (default 20) consecutive stable passes. A cached
    failure recovering to a pass is not a flip — that's the normal heal path.
 4. **`verify`** is the objective metric for all of this: it runs the full suite in record mode and
-   compares every result against what a normal replay pass would have served. A mismatch is a
-   **divergence** — logged, quarantined automatically, and reflected in the summary:
+   compares every result against the one the cache holds for it. A mismatch is a **divergence** —
+   logged, quarantined automatically, and reflected in the summary:
 
    ```
-   Verify  ✓ 1240 tests · 1198 would replay · 0 divergences (lifetime: 2 in 143 runs)
+   Verify  ✓ 1240 tests · 1198 would replay · 0 divergences · 0 unverified (lifetime: 2 in 143 runs)
    ```
+
+   Each figure, precisely:
+
+   - **`1240 tests`** — how many tests this pass executed for real.
+   - **`1198 would replay`** — how many of those a `run` on this same tree would have served from
+     cache instead of executing. It is decided by the same run-list code `run` itself decides
+     with, against the state as it was before the pass started, so it describes the tree rather
+     than the pass: two `verify` passes over an unchanged tree report the same number.
+   - **`0 divergences`** — results whose class (pass↔fail↔error↔skipped) differs from the cached
+     one recorded against the same content key. Deliberately broader than `would replay`: it
+     flags a mismatch even for a test `run` would have re-executed anyway. This is the figure
+     that has to stay at 0.
+   - **`0 unverified`** — how many of the `would replay` tests this pass could *not* check,
+     because it observed a different dependency set than the cached result was recorded against.
+     A `run` would still serve those cached results, so this is the part of `would replay` the
+     pass is not vouching for. It settles to 0 as the dependency graph stops moving; a
+     non-zero value is a reason to run `verify` again, not to distrust the lane outright.
 
 `status` shows the current quarantine list (with flip counts) and the lifetime divergence count —
 the number to watch when deciding whether a fast `run` lane is trustworthy enough to become a PR
@@ -606,8 +623,9 @@ not block-level — see [Known limitations](#known-limitations).
 5. Touch one class, then run `vendor/bin/phpunit-replay --explain`: it lists which test files are
    affected, and by which rule, without running anything.
 6. `vendor/bin/phpunit-replay verify` runs the whole suite again in record mode and reports how
-   many results diverge from what a normal replay pass would have served — `0 divergences` if
-   nothing has drifted.
+   much of it the fast lane would have covered (`would replay`) and how many of those cached
+   results are wrong — `0 divergences` if nothing has drifted. Run it twice: with nothing
+   changed in between, `would replay` is the same both times.
 7. If something looks wrong: `--fresh` forces a clean recording, `status` shows what state is
    currently stored, and `PHPUNIT_REPLAY_DEBUG=1 vendor/bin/phpunit-replay` prints every selection
    decision to stderr.
