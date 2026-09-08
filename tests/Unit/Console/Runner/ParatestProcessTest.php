@@ -153,6 +153,80 @@ final class ParatestProcessTest extends TestCase
     }
 
     #[Test]
+    public function adds_the_runner_flag_as_a_single_token_when_laravel_parallel_isolation_is_requested(): void
+    {
+        $command = (new ParatestProcess())->buildCommand(
+            null,
+            [],
+            [],
+            false,
+            $this->fakeBin('paratest.php'),
+            2,
+            true,
+        );
+
+        self::assertContains('--runner=\Illuminate\Testing\ParallelRunner', $command);
+    }
+
+    #[Test]
+    public function omits_the_runner_flag_when_laravel_parallel_isolation_is_not_requested(): void
+    {
+        $command = (new ParatestProcess())->buildCommand(
+            null,
+            [],
+            [],
+            false,
+            $this->fakeBin('paratest.php'),
+            2,
+        );
+
+        foreach ($command as $arg) {
+            self::assertStringNotContainsString('ParallelRunner', $arg);
+        }
+    }
+
+    #[Test]
+    public function sets_laravel_parallel_testing_in_the_environment_when_requested(): void
+    {
+        $capture = $this->dir . '/captured-env.json';
+
+        (new ParatestProcess())->run(
+            $this->fakeEnvCapturingBin('paratest-env-on.php', 'LARAVEL_PARALLEL_TESTING'),
+            $this->fakeBin('never-called.php'),
+            null,
+            [],
+            [],
+            false,
+            ['CAPTURE_FILE' => $capture],
+            $this->dir,
+            1,
+            true,
+        );
+
+        self::assertSame("'1'", (string) file_get_contents($capture));
+    }
+
+    #[Test]
+    public function does_not_set_laravel_parallel_testing_when_not_requested(): void
+    {
+        $capture = $this->dir . '/captured-env.json';
+
+        (new ParatestProcess())->run(
+            $this->fakeEnvCapturingBin('paratest-env-off.php', 'LARAVEL_PARALLEL_TESTING'),
+            $this->fakeBin('never-called.php'),
+            null,
+            [],
+            [],
+            false,
+            ['CAPTURE_FILE' => $capture],
+            $this->dir,
+            1,
+        );
+
+        self::assertSame('false', (string) file_get_contents($capture));
+    }
+
+    #[Test]
     public function falls_back_to_phpunit_process_and_forwards_its_exit_code_when_the_paratest_binary_is_missing(): void
     {
         $capture = $this->dir . '/captured.json';
@@ -199,6 +273,30 @@ final class ParatestProcessTest extends TestCase
         exit($exitCode === false ? 0 : (int) $exitCode);
 
         PHP);
+
+        return $path;
+    }
+
+    /**
+     * Path to a tiny PHP script that dumps `var_export(getenv($envKey), true)` to
+     * `getenv('CAPTURE_FILE')` — `"'1'"` when the env var is `'1'`, the literal string
+     * `'false'` when it is not set at all (`getenv()`'s own "unset" return value).
+     */
+    private function fakeEnvCapturingBin(string $name, string $envKey): string
+    {
+        $path = $this->dir . '/bin/' . $name;
+
+        TempDir::write($path, str_replace('__ENV_KEY__', $envKey, <<<'PHP'
+        <?php
+
+        declare(strict_types=1);
+
+        $capture = getenv('CAPTURE_FILE');
+        file_put_contents((string) $capture, var_export(getenv('__ENV_KEY__'), true));
+
+        exit(0);
+
+        PHP));
 
         return $path;
     }

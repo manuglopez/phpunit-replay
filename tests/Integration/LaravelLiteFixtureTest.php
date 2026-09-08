@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Manuglopez\Replay\Tests\Integration;
 
+use Manuglopez\Replay\Coverage\CoverageFormat;
 use Manuglopez\Replay\Laravel\LaravelIntegration;
 use Manuglopez\Replay\PHPUnit\ConfigurationWriter;
 use Manuglopez\Replay\Record\RunPartial;
@@ -152,6 +153,54 @@ final class LaravelLiteFixtureTest extends TestCase
         foreach ($partial->usesDatabase as $testFile) {
             self::assertContains('comments', $augmented->tables[$testFile], $testFile . ' should be widened to include every migration table');
         }
+    }
+
+    /**
+     * Neither of the two tests above ever asks PHPUnit for `--coverage-php`, so neither
+     * touches `Coverage\CoverageArchive` at all — the whole reason this package's PHPUnit 13
+     * port needed a Laravel-fixture proof that `SerializedArchive` (php-code-coverage 14+) and
+     * `LegacyArchive` (11-13) are each reached by a REAL Laravel test run, not just by
+     * `tests/Unit/Coverage/CoverageFormatTest.php` against a synthetic file. This one asks for
+     * it, and inspects the merged file `RunPipeline::finalizeCoveragePhp()` writes.
+     *
+     * `CoverageFormat::isForeign()` is false, and the marker matches exactly, on every cell
+     * `.github/workflows/ci.yml` actually runs — it pins the fixture's own
+     * phpunit/php-code-coverage to match THIS process's (either by leaving the fixture's
+     * realistic `^12.5.12` default alone on a cell whose own phpunit is also pre-14, or by
+     * tracking this cell's exact resolved pair when it is not, see the workflow's header
+     * comment). A plain, un-pinned `composer install` in the fixture directory (its own
+     * README.md) does not carry that guarantee — e.g. this process on php-code-coverage 14
+     * against the fixture's un-pinned 12.5.x default — so that case is skipped rather than
+     * failed: there is nothing meaningful to assert about a pairing CI never runs, and a
+     * developer's local checkout should not go red over it.
+     */
+    public function test_coverage_php_round_trips_through_the_installed_coverage_archive(): void
+    {
+        $fixture = $this->laravelLite();
+        $root = $fixture->root();
+
+        $result = $fixture->replay(['record', '--coverage-php=coverage.php']);
+        self::assertSame(0, $result['exitCode'], $result['stdout'] . $result['stderr']);
+
+        $path = $root . '/coverage.php';
+        self::assertFileExists($path, $result['stdout'] . $result['stderr']);
+
+        if (CoverageFormat::isForeign($path)) {
+            self::markTestSkipped(
+                'the laravel-lite fixture\'s own installed php-code-coverage is on the other '
+                . 'side of the cc-14 boundary from this process\'s — expected outside the cells '
+                . '.github/workflows/ci.yml pins to match (see its header comment).',
+            );
+        }
+
+        self::assertSame(
+            CoverageFormat::ownMarker(),
+            CoverageFormat::markerOf($path),
+            'coverage.php should carry this installation\'s own --coverage-php marker '
+            . '(a SerializedArchive format/version marker, or none at all for LegacyArchive); '
+            . 'a mismatch means CoverageMerger degraded to a foreign-format copy-through '
+            . 'instead of actually reading and re-writing through the installed CoverageArchive',
+        );
     }
 
     private function laravelLite(): FixtureProject

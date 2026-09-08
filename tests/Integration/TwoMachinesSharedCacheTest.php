@@ -98,7 +98,11 @@ final class TwoMachinesSharedCacheTest extends TestCase
             '0 executed (0 affected, 0 uncached) · 35 replayed (35 from remote)',
             ReplayAssert::lastLine($second['stdout']),
         );
-        self::assertStringNotContainsString('PHPUnit 12', $second['stdout'], 'PHPUnit must not have been launched at all');
+        // `PHPUnit\Runner\Version::getVersionString()` is 'PHPUnit <id> by Sebastian Bergmann
+        // and contributors.' on every supported major; asserting the stable, version-agnostic
+        // half proves no PHPUnit banner was printed at all (i.e. no PHPUnit process ran),
+        // without hard-coding a major that would go stale on the next supported release.
+        self::assertStringNotContainsString('by Sebastian Bergmann and contributors', $second['stdout'], 'PHPUnit must not have been launched at all');
         self::assertNotNull(ReplayAssert::loadGraph($this->machine2), 'the pulled baseline is now this machine\'s graph');
 
         // A real change on machine 2: the affected files have no published object for their
@@ -121,7 +125,8 @@ final class TwoMachinesSharedCacheTest extends TestCase
             '0 executed (0 affected, 0 uncached) · 35 replayed (31 from remote)',
             ReplayAssert::lastLine($inherited['stdout']),
         );
-        self::assertStringNotContainsString('PHPUnit 12', $inherited['stdout']);
+        // Same rationale as above: the version-stable half of PHPUnit's own banner.
+        self::assertStringNotContainsString('by Sebastian Bergmann and contributors', $inherited['stdout']);
     }
 
     public function test_status_reports_the_remote_and_its_push_policy(): void

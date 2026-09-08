@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Manuglopez\Replay\Tests\Unit\Cache;
 
 use Manuglopez\Replay\Cache\Fingerprint;
+use Manuglopez\Replay\Coverage\CoverageFormat;
 use Manuglopez\Replay\Tests\Support\GitRepo;
 use PHPUnit\Framework\TestCase;
 
@@ -67,9 +68,61 @@ final class FingerprintTest extends TestCase
     {
         $fingerprint = Fingerprint::compute($this->repo->root, 'pcov');
 
+        self::assertSame(['php', 'driver', 'os', 'coverage'], array_keys($fingerprint['environmental']));
         self::assertSame(PHP_MAJOR_VERSION . '.' . PHP_MINOR_VERSION, $fingerprint['environmental']['php']);
         self::assertSame('pcov', $fingerprint['environmental']['driver']);
         self::assertSame(PHP_OS_FAMILY, $fingerprint['environmental']['os']);
+        self::assertSame(CoverageFormat::id(), $fingerprint['environmental']['coverage']);
+    }
+
+    /**
+     * A cached result is only replayable while the coverage snapshot recorded next to it is
+     * still readable, and php-code-coverage changes both the `--coverage-php` serialization
+     * format and the shape of the coverage data between majors. Nothing used to notice: the
+     * `environmental` bucket recorded php/driver/os only, so a graph recorded under one
+     * php-code-coverage was replayed under another and its snapshots came back empty or
+     * unreadable — silently missing coverage rather than a re-run.
+     */
+    public function testEnvironmentalDriftReportsACoverageFormatChange(): void
+    {
+        $stored = Fingerprint::compute($this->repo->root, 'pcov');
+        $current = $stored;
+
+        $stored['environmental']['coverage'] = 'cc12/legacy/snap1';
+
+        self::assertSame(['coverage'], Fingerprint::environmentalDrift($stored, $current));
+        self::assertSame(['coverage'], Fingerprint::environmentalDrift($current, $stored));
+    }
+
+    /**
+     * The caches that already exist on disk: recorded by a release whose `environmental`
+     * bucket had no `coverage` key at all, and whose `.cov` snapshots were serialized
+     * php-code-coverage objects. Drift has to fire for those too, or the very cache this key
+     * was added for is the one it misses.
+     */
+    public function testEnvironmentalDriftReportsAFingerprintRecordedWithoutACoverageKey(): void
+    {
+        $current = Fingerprint::compute($this->repo->root, 'pcov');
+        $stored = $current;
+
+        unset($stored['environmental']['coverage']);
+
+        self::assertSame(['coverage'], Fingerprint::environmentalDrift($stored, $current));
+    }
+
+    /**
+     * The coverage format lives in the `environmental` bucket, not the `structural` one, on
+     * purpose: it must clear the cached RESULTS (whose snapshots are unreadable) without
+     * invalidating the dependency EDGES (which are this package's own line maps and are not
+     * affected), and `canonicalStructural()` feeds the structural bucket into every content
+     * key. Which is also why `SCHEMA_VERSION` was not bumped for it.
+     */
+    public function testTheCoverageFormatIsNotPartOfTheContentKeyInput(): void
+    {
+        $fingerprint = Fingerprint::compute($this->repo->root, 'pcov');
+
+        self::assertArrayNotHasKey('coverage', $fingerprint['structural']);
+        self::assertStringNotContainsString('coverage', Fingerprint::canonicalStructural($fingerprint));
     }
 
     public function testChangingTrackedPhpunitXmlChangesStructuralAndIsReportedByDrift(): void

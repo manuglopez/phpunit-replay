@@ -31,6 +31,7 @@ final class ConfigTest extends TestCase
         self::assertSame(300, $config->remoteRefreshSeconds);
         self::assertSame(60, $config->remoteTimeout);
         self::assertSame([], $config->baselineBranches);
+        self::assertTrue($config->laravelParallelIsolation);
     }
 
     public function testFromArrayReadsValidValues(): void
@@ -52,6 +53,7 @@ final class ConfigTest extends TestCase
             'remote_refresh_seconds' => 30,
             'remote_timeout' => 120,
             'baseline_branches' => ['develop', 'main'],
+            'laravel_parallel_isolation' => false,
         ]);
 
         self::assertSame('/mnt/cache', $config->stateDir);
@@ -73,6 +75,7 @@ final class ConfigTest extends TestCase
         self::assertSame(30, $config->remoteRefreshSeconds);
         self::assertSame(120, $config->remoteTimeout);
         self::assertSame(['develop', 'main'], $config->baselineBranches);
+        self::assertFalse($config->laravelParallelIsolation);
     }
 
     public function testFromArrayIgnoresUnknownKeys(): void
@@ -101,6 +104,7 @@ final class ConfigTest extends TestCase
             'remote_refresh_seconds' => '30',
             'remote_timeout' => 12.5,
             'baseline_branches' => 'develop',
+            'laravel_parallel_isolation' => 'nope',
         ]);
 
         self::assertEquals(Config::defaults(), $config);
@@ -315,6 +319,14 @@ final class ConfigTest extends TestCase
         self::assertSame(3, $config->quarantineReleaseAfter);
         self::assertSame('auto', $config->laravel);
         self::assertTrue($config->junitMerge);
+    }
+
+    public function testWithOverridesLaravelParallelIsolation(): void
+    {
+        $config = Config::defaults()->with(['laravelParallelIsolation' => false]);
+
+        self::assertFalse($config->laravelParallelIsolation);
+        self::assertSame('auto', $config->laravel);
     }
 
     public function testWithOverridesTheRemoteKeys(): void

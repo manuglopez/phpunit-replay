@@ -30,6 +30,7 @@ use Manuglopez\Replay\Hermeticity\Policy;
 use Manuglopez\Replay\Hermeticity\Quarantine;
 use Manuglopez\Replay\Laravel\LaravelDetector;
 use Manuglopez\Replay\Laravel\LaravelIntegration;
+use Manuglopez\Replay\Laravel\ParallelIsolation;
 use Manuglopez\Replay\PHPUnit\ConfigurationReader;
 use Manuglopez\Replay\PHPUnit\ConfigurationWriter;
 use Manuglopez\Replay\Record\DriverDetector;
@@ -53,10 +54,28 @@ use Throwable;
  * SPEC.md §3.1 and docs/INTERNALS.md "Wrapper pipeline — detailed algorithm (phase 1,
  * filtered mode)": everything the CLI commands delegate to. Never throws: any failure
  * — anticipated (no git, no phpunit.xml, no coverage driver, ...) or not — degrades to
- * running `vendor/bin/phpunit` exactly as the user would have, returning its exit code.
+ * running `vendor/bin/phpunit` exactly as the user would have, returning its exit code
+ * — except a degraded `record` (SPEC.md §3.3), whose exit code instead reports whether
+ * *it* did its own job (publishing a graph), since nothing gates merges on it the way
+ * `run`'s exit code gates on the tests actually passing (see {@see self::degrade()}).
  */
 final class RunPipeline
 {
+    /**
+     * Bug fix: `record` exists to publish a baseline graph, and a degraded run never
+     * writes one (no `MODE=record` env, no extension bootstrapped, no run partial) — so
+     * forwarding PHPUnit's own exit code straight through, the way {@see self::degrade()}
+     * does for every other caller, would report "0" for a `record` that recorded nothing,
+     * which is indistinguishable from success. `EXCEPTION_EXIT` mirrors PHPUnit's own
+     * `ShellExitCodeCalculator` convention (0 pass, 1 test failures, 2 "something outside
+     * the tests themselves went wrong") — a degraded `record` is squarely the third case.
+     * Used only when `RunRequest::$record` is true (the `record` command itself, not
+     * `run`'s own implicit first-baseline pass) and PHPUnit's own exit code was 0 — a
+     * nonzero PHPUnit exit code already turns the caller's attention to the run, so it is
+     * left untouched.
+     */
+    private const DEGRADED_RECORD_EXIT_CODE = 2;
+
     private RunRequest $request;
 
     private float $startedAt = 0.0;
@@ -239,6 +258,11 @@ final class RunPipeline
 
         $configuration = $locator->buildConfiguration($configFile, $request->phpunitArgs);
         $this->reader = new ConfigurationReader($configuration);
+
+        if ($this->reader->repeatOrRetryRequested()) {
+            return '--repeat/--retry requested: the test id it changes results on is not stable across runs, degrading to a plain PHPUnit run';
+        }
+
         $this->testPaths = TestPaths::fromConfiguration($configuration, $root);
 
         $this->watch = new WatchPatterns();
@@ -464,6 +488,19 @@ final class RunPipeline
     /** Step 7: partial CLI selection (--filter, --group, --testsuite, an explicit path, ...). */
     private function runResultsOnly(RunRequest $request): int
     {
+        // Bug fix: this branch is reached before the record/replay decision (`run()`
+        // checks `hasPartialSelection()` first), so it never reaches the dry-run block
+        // in `runReplay()` — a `--filter`/`--group`/`--testsuite`/explicit-path run had
+        // no dry-run check of its own at all, and executed for real regardless of the
+        // flag. There is no TIA plan to report here (no RunListBuilder involved: the
+        // user's own phpunit-args already narrowed the selection), so the honest thing
+        // to print is that PHPUnit would run exactly that selection, not a computed one.
+        if ($request->dryRun) {
+            fwrite(STDOUT, self::dryRunLine('would run only your own selection (--filter/--group/--testsuite/an explicit path); no plan to compute for a partial selection') . PHP_EOL);
+
+            return 0;
+        }
+
         $xml = (new ConfigurationWriter())->withExtensionOnly($this->configFile);
         $this->generatedXml = $xml;
 
@@ -504,6 +541,18 @@ final class RunPipeline
     {
         if ($this->driverName === 'none') {
             return $this->degrade($request, 'no coverage driver: install pcov or enable xdebug coverage');
+        }
+
+        // Bug fix: this is the path `run --dry-run` takes on a project with no cached
+        // baseline yet (SPEC.md §3.1 "Record" branch) — the driver check above already
+        // funnels a broken environment through degrade(), so anything reaching here has
+        // a real (if unfiltered) plan: the whole suite. Checked before anything below
+        // touches disk (no Graph, no run id, no PHPUnit process) so a dry run never
+        // writes state and never launches PHPUnit.
+        if ($request->dryRun) {
+            fwrite(STDOUT, self::dryRunLine('would record the full suite (no cached baseline)') . PHP_EOL);
+
+            return 0;
         }
 
         $root = $this->root ?? $request->cwd;
@@ -595,8 +644,13 @@ final class RunPipeline
         $runId = self::newRunId();
         $this->runDir = $this->stateDir . '/runs/' . $runId;
 
-        $exitCode = (new PhpunitProcess())->run(
-            $this->phpunitBin,
+        // Bug fix: this used to construct a PhpunitProcess directly, bypassing
+        // runPhpunit() — the one branch that chooses between PhpunitProcess and
+        // ParatestProcess (SPEC.md §13) — so `verify --parallel=N` silently ran
+        // sequentially regardless of the flag. Routing through runPhpunit(), exactly
+        // like runRecord() does, is what makes `RunRequest::$parallel` actually take
+        // effect here.
+        $exitCode = $this->runPhpunit(
             $xml,
             $this->iniFlags,
             $request->phpunitArgs,
@@ -617,12 +671,28 @@ final class RunPipeline
             $partial = LaravelIntegration::augment($partial, $root);
         }
 
-        $complete = ! (bool) ($partial->meta['truncated'] ?? false) && in_array($exitCode, [0, 1], true);
+        // Bug fix: this used to pass `recordsEdges: true` (and a `$complete` derived from
+        // the run alone) whatever the user asked PHPUnit to run, so a `verify` carrying a
+        // partial CLI selection — `--filter`, `--group`, `--testsuite`, an explicit path —
+        // rewrote the graph from a run that never covered the suite. SPEC.md §15 scenario 6
+        // forbids exactly that for `run` ({@see self::runResultsOnly()}, results-only mode);
+        // `verify` is the same full-suite recording pass and owes the graph the same
+        // guarantee. Three things went wrong without it: the executed test file's edges were
+        // replaced by whatever coverage the narrower selection attributed to it (a file
+        // autoloaded once per process is credited to whichever test loaded it first, so the
+        // dependency set — and therefore the file's content key — depends on the selection);
+        // `$complete` then pruned the sibling results the filter excluded, silently deleting
+        // cached results; and it published a baseline sha for a partial run.
+        $recordsEdges = ! $this->reader->hasPartialSelection();
+
+        $complete = $recordsEdges
+            && ! (bool) ($partial->meta['truncated'] ?? false)
+            && in_array($exitCode, [0, 1], true);
 
         // No quarantine passed here: divergences are detected explicitly below (reason
         // 'divergence', not the generic 'flip' GraphUpdater's own detection would use).
         $updater = new GraphUpdater($graph, $root, new ContentKey($root));
-        $updater->apply($partial, $this->branch, recordsEdges: true, complete: $complete);
+        $updater->apply($partial, $this->branch, recordsEdges: $recordsEdges, complete: $complete);
 
         if ($this->fingerprintDrifted($partial)) {
             return $exitCode;
@@ -630,13 +700,29 @@ final class RunPipeline
 
         $policy = new Policy($graph, $this->config, $this->quarantine, $root);
 
+        $newResults = $graph->results($this->branch);
+
         $wouldReplay = 0;
         $divergenceEntries = [];
 
-        foreach ($graph->results($this->branch) as $testId => $new) {
+        // Bug fix: this used to iterate `$graph->results($this->branch)` — the whole cached
+        // corpus, every baseline layer merged — instead of the tests this run actually
+        // executed. A test the run never touched has the same entry before and after
+        // `apply()`, so it trivially matched itself and was counted, which made "would
+        // replay" a figure about the cache rather than about the verification: it could
+        // exceed the "N tests" printed beside it (`5 tests · 35 would replay`), and two
+        // identical `verify` runs disagreed whenever the executed file's content key moved,
+        // because the untouched majority — not the verified minority — dominated the count.
+        // Counting over `$partial->results` is what makes it mean "of the N tests I just ran
+        // for real, M would have been served from cache instead", the number the README asks
+        // people to watch before trusting the fast lane as a merge gate. Divergence detection
+        // is unaffected: an untouched entry cannot differ from itself, so it never produced
+        // one — it only fed `recordStable()` a release-streak tick for a test that never ran.
+        foreach (array_keys($partial->results) as $testId) {
+            $new = $newResults[$testId] ?? null;
             $old = $oldResults[$testId] ?? null;
 
-            if ($old === null) {
+            if ($new === null || $old === null) {
                 continue;
             }
 
@@ -1209,6 +1295,20 @@ final class RunPipeline
         fwrite(STDOUT, $summary->format() . PHP_EOL);
     }
 
+    /**
+     * Bug fix (--dry-run must never launch PHPUnit): the "no baseline" and "degraded"
+     * cases have no {@see RunList} to classify, so {@see DryRunSummary}'s numeric
+     * affected/uncached/quarantined buckets don't apply — inventing fake counts for them
+     * would misrepresent the plan rather than describe it. {@see ExplainFormatter}
+     * doesn't fit either, for the same reason: it also renders a RunList. A plain
+     * sentence under the same "Replay" label keeps the tool's visual convention without
+     * bending either format to a shape it wasn't built for.
+     */
+    private static function dryRunLine(string $message): string
+    {
+        return Summary::label(false) . '  ' . $message;
+    }
+
     private function printRecordSummary(RunPartial $partial): void
     {
         $graph = $this->graph;
@@ -1382,8 +1482,34 @@ final class RunPipeline
 
     /**
      * The one branch that decides between {@see PhpunitProcess} and {@see ParatestProcess}
-     * (SPEC.md §13, `--parallel`/`-p`): every other call site in this class hands off here
+     * (SPEC.md §13, `--parallel`/`-p`): every call site that runs an instrumented pass —
+     * `runResultsOnly()`, `runRecord()`, `verify()`, `executeReplay()` — hands off here
      * instead of constructing a process runner directly.
+     *
+     * Also the one place that decides whether Paratest gets Laravel's per-worker database
+     * isolation wired up ({@see ParallelIsolation}). Three of the gate's four "no" answers
+     * are silent, because the feature simply does not apply: non-Laravel project, config
+     * opt-out, and Paratest missing (already warned about in {@see ParatestProcess::run()}).
+     * The fourth warns from inside {@see ParallelIsolation::enabled()}: Laravel and Paratest
+     * are both present, but `Illuminate\Testing\ParallelRunner` could not be resolved in the
+     * project, so the run would otherwise proceed with exactly the behaviour this isolation
+     * exists to prevent.
+     *
+     * A project that DOES pass the gate and still cannot resolve a Laravel application
+     * ({@see ParallelIsolation::applicationResolvable()}) gets a warning here instead:
+     * without that check, Paratest's own top-level process would crash outright
+     * (`RuntimeException('Parallel Runner unable to resolve application.')`, thrown before a
+     * single test runs) rather than degrading.
+     *
+     * Doc fix: this used to claim "every other call site in this class", which stopped
+     * being true once {@see self::verify()} started routing through here too (it used to
+     * construct a `PhpunitProcess` directly, silently ignoring `--parallel`) — but it was
+     * already inaccurate before that fix for a different reason: {@see self::degrade()}
+     * constructs a bare `PhpunitProcess` of its own, deliberately. Its fallback run is not
+     * an instrumented pass at all — no coverage extension, no `--parallel`/Paratest, no
+     * generated config — precisely because whatever made the wrapper degrade may be the
+     * reason an instrumented run cannot be trusted; going through this method would wire
+     * that fallback into the same machinery being degraded away from.
      *
      * @param list<string> $iniFlags
      * @param list<string> $phpunitArgs
@@ -1401,20 +1527,65 @@ final class RunPipeline
             return (new PhpunitProcess())->run($this->phpunitBin, $configFile, $iniFlags, $phpunitArgs, $appendNoCoverage, $env, $cwd);
         }
 
-        $paratestBin = ($this->root ?? $cwd) . '/vendor/bin/paratest';
+        $root = $this->root ?? $cwd;
+        $paratestBin = $root . '/vendor/bin/paratest';
 
-        return (new ParatestProcess())->run($paratestBin, $this->phpunitBin, $configFile, $iniFlags, $phpunitArgs, $appendNoCoverage, $env, $cwd, $this->request->parallel);
+        $laravelParallelIsolation = false;
+
+        if (ParallelIsolation::enabled($root, $this->config)) {
+            if (ParallelIsolation::applicationResolvable($root)) {
+                $laravelParallelIsolation = true;
+            } else {
+                Warnings::warn('Laravel detected but no bootstrap/app.php or Tests\\CreatesApplication was found; running --parallel without per-worker database isolation');
+            }
+        }
+
+        return (new ParatestProcess())->run($paratestBin, $this->phpunitBin, $configFile, $iniFlags, $phpunitArgs, $appendNoCoverage, $env, $cwd, $this->request->parallel, $laravelParallelIsolation);
     }
 
     private function degrade(RunRequest $request, string $reason): int
     {
         Warnings::warn($reason);
 
+        // Bug fix: degrade() is the single funnel every degrade case goes through
+        // (environment resolution failures, an unexpected exception, no coverage driver
+        // for `run`/`verify`) — one check here closes all of them at once instead of
+        // sprinkling a dryRun check at each of the six call sites. A dry run that
+        // degrades still owes the caller a plan, so it names both the reason and what
+        // running for real would have done, then returns without ever constructing a
+        // PhpunitProcess.
+        if ($request->dryRun) {
+            fwrite(STDOUT, self::dryRunLine('would run the full suite via plain phpunit (degraded: ' . $reason . ')') . PHP_EOL);
+
+            return 0;
+        }
+
         $base = $this->root ?? $request->cwd;
         $override = getenv('PHPUNIT_REPLAY_PHPUNIT_BIN');
         $bin = (is_string($override) && $override !== '') ? $override : $base . '/vendor/bin/phpunit';
 
-        return (new PhpunitProcess())->run($bin, null, [], $request->phpunitArgs, false, [], $request->cwd);
+        $exitCode = (new PhpunitProcess())->run($bin, null, [], $request->phpunitArgs, false, [], $request->cwd);
+
+        // Bug fix: a real 9056-test suite hit a removed PHPUnit method mid-`record`,
+        // degrade() caught it here, ran the full suite for real via the branch above,
+        // and returned PHPUnit's own exit code (0, every test passed) — a `record` that
+        // wrote no graph and no state directory at all, indistinguishable from a
+        // successful one until someone thought to `ls` the state dir. `record`'s whole
+        // job is the graph, not the tests' pass/fail (nothing gates merges on it the way
+        // `run`'s exit code does — RecordCommand's own docblock: "what CI runs on main to
+        // publish a fresh baseline"), so when it degrades with nothing to show for it,
+        // that is `record` failing at its one job and must not read as green. `run`
+        // degrading the same way is untouched: falling back to a plain suite is its
+        // documented, legitimate behaviour (README "it can never break a test run"), and
+        // its exit code is the actual pass/fail signal CI gates on — changing it would be
+        // exactly the harm that rule exists to prevent. See {@see self::DEGRADED_RECORD_EXIT_CODE}.
+        if ($request->record && $exitCode === 0) {
+            Warnings::warn('record degraded and wrote no graph or state directory — the baseline was NOT refreshed; fix "' . $reason . '" and rerun');
+
+            return self::DEGRADED_RECORD_EXIT_CODE;
+        }
+
+        return $exitCode;
     }
 
     /** @return array<string, string> */

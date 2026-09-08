@@ -6,7 +6,7 @@ When SPEC.md and this file disagree on a signature, this file wins (it reflects 
 API); when they disagree on behaviour, SPEC.md wins and the deviation is documented inline or in the phase reports.
 
 Conventions: `declare(strict_types=1)` everywhere, `final` by default, `readonly` where the
-object is immutable, PSR-12 via `vendor/bin/pint`, PHPStan level max. Target PHP 8.2: no typed class constants, no `#[\Override]`, readonly classes are fine. All paths handed between
+object is immutable, PSR-12 via `vendor/bin/pint`, PHPStan level max. Target PHP 8.2: no typed class constants, no `#[\Override]`, readonly classes are fine. This package's own PHP floor is unchanged by PHPUnit 12/13 support; only a *project* that runs its tests under PHPUnit 12 needs PHP >=8.3, or under PHPUnit 13 needs PHP >=8.4.1, per each PHPUnit release's own requirement. All paths handed between
 components are **project-relative with forward slashes** unless a parameter is named `$absolute`.
 Never throw out of a public method for an environmental problem (missing git, unreadable file,
 malformed JSON): return `null`/`[]`/`false` and let the caller warn.
@@ -67,7 +67,12 @@ final readonly class Cache\Fingerprint       // port, structural list per SPEC �
     /** @return array{structural: array<string, int|string|null>, environmental: array<string, string|null>} */
     public static function compute(string $projectRoot, string $driver): array;
     //   structural: schema, composer_lock, phpunit_xml, phpunit_xml_dist, replay_config (phpunit-replay.php); only git-tracked files hash, else null
-    //   environmental: php (MAJOR.MINOR), driver ('pcov'|'xdebug'|'none'), os (PHP_OS_FAMILY)
+    //   environmental: php (MAJOR.MINOR), driver ('pcov'|'xdebug'|'none'), os (PHP_OS_FAMILY),
+    //                  coverage (Coverage\CoverageFormat::id(), e.g. 'cc14/fmt3/snap2' — the
+    //                  installed php-code-coverage major, its --coverage-php marker, and this
+    //                  package's own snapshot format; a change clears cached RESULTS only,
+    //                  the graph's edges stand, since a stale coverage format cannot corrupt
+    //                  those — only a replayed result's merged coverage)
     public static function structuralMatches(array $a, array $b): bool;
     /** @return list<string> keys that differ */
     public static function structuralDrift(array $stored, array $current): array;
@@ -387,7 +392,7 @@ final class Select\Selector
 
 ```php
 enum PHPUnit\Mode: string { case Record = 'record'; case RecordSubset = 'record-subset'; case ResultsOnly = 'results-only'; case Replay = 'replay'; case Off = 'off'; }
-final class PHPUnit\ConfigurationReader       // thin, version-tolerant reads of PHPUnit Configuration (11.5 vs 12)
+final class PHPUnit\ConfigurationReader       // thin, version-tolerant reads of PHPUnit Configuration (11.5 vs 12 vs 13)
 {
     public function __construct(\PHPUnit\TextUI\Configuration\Configuration $configuration);
     public function hasPartialSelection(): bool;   // hasFilter || hasExcludeFilter || hasGroups || hasExcludeGroups || includeTestSuite !== '' || cliArguments with a path
@@ -483,7 +488,7 @@ Exit code of the wrapper is always PHPUnit's exit code (0 when nothing needed to
 ## Wrapper pipeline — detailed algorithm (phase 1, filtered mode)
 
 `Console\Runner\RunPipeline::run(RunRequest $request): int` — `RunRequest` = `{cwd, phpunitArgs: list<string>, fresh, noRemote, explain, dryRun, logJunit: ?string, allowCiBaseline, record: bool}`.
-Every "degrade" below means: print one line to STDERR prefixed `phpunit-replay: ` and run PHPUnit exactly as the user would have (`vendor/bin/phpunit <args>`), returning its exit code. The wrapper never swallows PHPUnit output and never changes its exit code.
+Every "degrade" below means: print one line to STDERR prefixed `phpunit-replay: ` and run PHPUnit exactly as the user would have (`vendor/bin/phpunit <args>`), returning its exit code — unless `request.dryRun`, in which case `degrade()` (the single funnel every degrade case goes through) instead prints `Replay  would run the full suite via plain phpunit (degraded: <reason>)` to STDOUT and returns 0 without ever launching PHPUnit. The wrapper never swallows PHPUnit output and never changes its exit code (dry runs aside, which never launch it at all).
 
 1. **Root & tools.** `root = Git::topLevel(cwd)`; if git is unavailable, not a repo, or has no commits → degrade ("git repository with at least one commit required"). `phpunitBin = <root>/vendor/bin/phpunit` (override: env `PHPUNIT_REPLAY_PHPUNIT_BIN`); missing → degrade. Config file: `-c|--configuration <file>` in phpunitArgs, else `<root>/phpunit.xml`, else `<root>/phpunit.xml.dist`; none → degrade ("filtered mode needs phpunit.xml").
 2. **Config & state.** `Config::load(root)`; `stateDir = StateDirectory::resolve(config.stateDir, root)`; `branch = Git::currentBranch() ?? 'HEAD'` (detached → `persist = false`); `defaultBranch = config.defaultBranch ?? Git::defaultBranch() ?? 'main'`; `head = Git::currentSha()`.
@@ -491,8 +496,8 @@ Every "degrade" below means: print one line to STDERR prefixed `phpunit-replay: 
 4. **PHPUnit configuration object.** Build a `PHPUnit\TextUI\Configuration\Configuration` in the wrapper process from the XML file + phpunitArgs using PHPUnit's `XmlConfiguration\Loader`, `CliArguments\Builder` and `Configuration\Merger` (never `Registry::init`). Wrap in `PHPUnit\ConfigurationReader`. `TestPaths::fromConfiguration(...)`.
 5. **Fingerprint.** `fp = Fingerprint::compute(root, driverName)`.
 6. **Graph.** `store = new GraphStore(stateDir, root)`; `graph = request.fresh ? null : store->load()`. If graph: `structuralDrift(graph.fingerprint, fp)` non-empty → warn "structural change (<keys>): recording a fresh baseline" → `graph = null`; else `environmentalDrift` non-empty → warn → `graph->clearResults()`. `graph?->setDefaultBranch(defaultBranch)`.
-7. **Partial selection?** `reader->hasPartialSelection()` (also true when `request.record` is false and phpunitArgs contain a positional path) → **results-only run**: xml = `ConfigurationWriter::withExtensionOnly(configFile)` (extension injected, testsuites untouched), run PHPUnit with env `MODE=results-only`; afterwards `GraphUpdater::apply(partial, branch, recordsEdges:false, complete:false)` only if `graph !== null`; save; exit code. No sha, no prune, no snapshot.
-8. **Record** (graph null, or `request.record`): no driver → degrade ("no coverage driver: install pcov or enable xdebug coverage"). Else `graph = new Graph(root)`, fingerprint set, run PHPUnit with env `MODE=record` and the extension injected, then `apply(partial, branch, recordsEdges:true, complete: !partial.meta.truncated && exit ∈ {0,1})`; if complete and persist and (!CI or allowCiBaseline): `finalizeBaseline(branch, head, Git::branchNames())`, snapshot `LastRunTree(branch, head, ChangedFiles::snapshotTree(ChangedFiles::since(head) ?? []))`; save graph; print `RecordSummary`; exit code. Fingerprint is re-computed after the run: if structural changed during the run → discard graph, warn.
+7. **Partial selection?** `reader->hasPartialSelection()` (also true when `request.record` is false and phpunitArgs contain a positional path) → **results-only run**: `request.dryRun` → print `Replay  would run only your own selection (--filter/--group/--testsuite/an explicit path); no plan to compute for a partial selection` to STDOUT, return 0, without launching PHPUnit (this branch sits before steps 8-9, so it never reaches the dry-run handling described there or in step 9). Else: xml = `ConfigurationWriter::withExtensionOnly(configFile)` (extension injected, testsuites untouched), run PHPUnit with env `MODE=results-only`; afterwards `GraphUpdater::apply(partial, branch, recordsEdges:false, complete:false)` only if `graph !== null`; save; exit code. No sha, no prune, no snapshot.
+8. **Record** (graph null, or `request.record`): no driver → degrade ("no coverage driver: install pcov or enable xdebug coverage") — subject to the dry-run short-circuit above. `request.dryRun` (driver present) → print `Replay  would record the full suite (no cached baseline)` to STDOUT, return 0, without constructing a `Graph`, opening a run directory, or launching PHPUnit — this is the path a bare `run --dry-run` takes on a project with no cached baseline yet. Else `graph = new Graph(root)`, fingerprint set, run PHPUnit with env `MODE=record` and the extension injected, then `apply(partial, branch, recordsEdges:true, complete: !partial.meta.truncated && exit ∈ {0,1})`; if complete and persist and (!CI or allowCiBaseline): `finalizeBaseline(branch, head, Git::branchNames())`, snapshot `LastRunTree(branch, head, ChangedFiles::snapshotTree(ChangedFiles::since(head) ?? []))`; save graph; print `RecordSummary`; exit code. Fingerprint is re-computed after the run: if structural changed during the run → discard graph, warn.
 9. **Replay.** `sha = graph->recordedSha(branch)`; null → treat as record (step 8, keep graph edges? no: fresh). `changed = ChangedFiles::since(sha)`; null → warn "baseline <sha7> is not an ancestor of HEAD: recording a fresh baseline" → step 8. `lastRun = LastRunTree::load(stateDir)`; if `lastRun?->branch === branch` → `changed = lastRun->filterUnchanged(changed, changedFiles)`. `selection = Selector::default(...)->affected(changed)`.
    Run list `L` = `selection.testFiles()` ∪ `unknown` (test files on disk under `TestPaths` directories/suffixes that `!graph->knowsTest()`) ∪ `rerun` (files of results in `graph->results(branch)` whose status `reader->shouldRerun()` and exist on disk). Counters: `affected = |selection|`, `uncached = |unknown ∪ rerun \ selection|`, `replayed = number of results whose file ∉ L`, `saved = Σ time of those results`.
    If `selection.sourcePhpChanged && driverName === 'none'` → `L = all test files on disk` and the run is results-only (cannot refresh edges) — warn.
@@ -570,10 +575,11 @@ public static function summaryLine(): ?string;     // printed by PrintSummaryOnA
 
 Trait `PHPUnit\Replayable` (public API: `isReplaying(): bool`; everything else prefixed `__replay`):
 - PHPUnit ≥ 12 hook: `protected function invokeTestMethod(string $methodName, array $testArguments): mixed` — if decision is a replay → apply it and return null, else `parent::invokeTestMethod(...)`.
-- PHPUnit 11.5 fallback (also forced by env `PHPUNIT_REPLAY_LEGACY_HOOK=1`, used by tests on 12): `#[Before] public function __replayBefore(): void` — only when `!method_exists(\PHPUnit\Framework\TestCase::class, 'invokeTestMethod')` or the env is set; swaps private `TestCase::$methodName` via `ReflectionProperty` to `__replayStub`; `public function __replayStub(mixed ...$args): mixed` restores the name, applies the decision, returns null.
+- PHPUnit 11.5 fallback (also forced by env `PHPUNIT_REPLAY_LEGACY_HOOK=1`, used by tests on 12 and 13): `#[Before] public function __replayBefore(): void` — only when `!method_exists(\PHPUnit\Framework\TestCase::class, 'invokeTestMethod')` or the env is set; swaps private `TestCase::$methodName` via `ReflectionProperty` to `__replayStub`; `public function __replayStub(mixed ...$args): mixed` restores the name, applies the decision, returns null.
 - Applying: `ReplayPass` → `if ($assertions === 0 && !$wasRisky) expectNotToPerformAssertions(); addToAssertionCount($assertions); ReplayState::markReplayed(id, d)`; `ReplaySkipped` → `markTestSkipped(msg)`; `ReplayIncomplete` → `markTestIncomplete(msg)`.
 - `decide()` is called with `(new ReflectionClass(static::class))->getFileName()` and `$this->valueObjectForEvents()->id()`.
 - Recorder must not record replayed tests: `StartRecordingOnPreparationStarted` consults `ReplayState::decide()` when `ReplayState::isInProcess()`; replayed → skip `beginTest`.
+- Hazard, real and handled now that PHPUnit 13.1+ is supported: PHPUnit 13.3.0 adds `--repeat`/`--retry` (`#[Repeat]`/`#[Retry]`, `RepeatTestSuite`/`RetryTestSuite`, absent from 12.5/13.0.x/13.1/13.2) and, from that version on, `TestMethod::id()` appends `' (repetition %d of %d)'` when `totalRepetitions > 1` and `' (attempt %d of %d)'` when `attempt > 1`. `ResultCollector` keys results and `decide()` looks up replay decisions by exactly this id, so it is not stable across runs that differ in those flags: a graph recorded under `--repeat`/`--retry` would miss on a plain run (fails safe on its own — a bare id never matches a suffixed one, so a miss, not a false replayed pass), but replaying a repetition or retry itself would defeat what those flags are for. Two distinct triggers for this, fixed at two distinct granularities: a `--repeat`/`--retry` **CLI flag** makes the hazard global to the whole run (every test's id could gain a suffix), so the whole run is treated as not cacheable rather than relying on the id alone — `ConfigurationReader::repeatOrRetryRequested()`, checked by `RunPipeline` and `ReplayExtension::bootstrapInProcess()` before either registers a single subscriber; the detection mechanism itself is deliberately not detailed here. A `#[Repeat]`/`#[Retry]` **attribute**, by contrast, is read by `PHPUnit\Framework\TestBuilder` regardless of any CLI flag (a method-level `#[Repeat]` takes precedence over `--retry`, per its own comments), so a decorated method gets the same suffixed ids on *every* run, flag or no flag — a whole-run degrade would be the wrong trade for one decorated method, so this is instead handled **per test**: subscriber `RecordRepeatOrRetryNotCacheableOnPreparationStarted` marks the currently-preparing test's exact `TestMethod::id()` not-cacheable (whatever repetition/attempt suffix it currently carries, including the bare, unsuffixed one a first repetition/attempt always gets) through the same `NotCacheableCollector`/`Graph::isNotCacheable()` path `#[NotCacheable]` uses (below), detected via `ReflectionMethod::getAttributes()` matching the attribute's class name as a literal string — unlike `MetadataRegistry::parser()->forMethod(...)->isRepeat()`/`isRetry()`, that never needs the named class to be loadable, so it needs no version gating at all before 13.3.
 
 Mode decision without wrapper env (`ReplayExtension::bootstrap` when `PHPUNIT_REPLAY_MODE` is absent): `Config::load(root)` merged with `Config::fromExtensionParameters` then env; `config.mode === 'off'` → Off; git unavailable → Off + warning; `hasPartialSelection()` → ResultsOnly (persist results of known files only); `mode === 'record'` or no valid graph (missing, structural drift, `--fresh` n/a) → Record when a driver is available else Off + warning `no coverage driver`; else Replay (edges recorded for executed tests when a driver exists). Replayed tests are excluded from `ChangedFiles`/graph mutations; the final `Summary` line uses `counters()`.
 
@@ -601,7 +607,7 @@ final class Hermeticity\Policy
     /** @return list<string> test files that contain at least one non-cacheable test (for RunList) */ public function nonCacheableFiles(array $allTestFiles, array $resultsByFile): array;
 }
 ```
-- Recording the attribute: subscriber `RecordNotCacheableOnPreparationStarted` (TestMethod → `ReflectionClass::getAttributes(NotCacheable::class)` → file rel; `ReflectionMethod` → `Class::method`) collects into `ResultCollector`-adjacent `NotCacheableCollector`; `RunWriter::flush` writes `not_cacheable.json` (list); `RunPartial::$notCacheable`; `GraphUpdater::apply` replaces entries for executed files/classes (`Graph::setNotCacheable(array_values(array_unique([...kept for non-executed files, ...partial])))`). `Graph::isNotCacheable(string $fileOrTestId): bool`.
+- Recording the attribute: subscriber `RecordNotCacheableOnPreparationStarted` (TestMethod → `ReflectionClass::getAttributes(NotCacheable::class)` → file rel; `ReflectionMethod` → `Class::method`) collects into `ResultCollector`-adjacent `NotCacheableCollector`; `RunWriter::flush` writes `not_cacheable.json` (list); `RunPartial::$notCacheable`; `GraphUpdater::apply` replaces entries for executed files/classes (`Graph::setNotCacheable(array_values(array_unique([...kept for non-executed files, ...partial])))`). `Graph::isNotCacheable(string $fileOrTestId): bool`. A second subscriber, `RecordRepeatOrRetryNotCacheableOnPreparationStarted`, adds to the same `NotCacheableCollector` for the `#[Repeat]`/`#[Retry]` case above: `ReflectionMethod::getAttributes()` against the two literal attribute-class-name strings (method-level only — both attributes are `Attribute::TARGET_METHOD`) → the test's own `TestMethod::id()`, suffix and all.
 - Flip detection in `GraphUpdater::apply` (constructor gains `?Quarantine $quarantine = null`): for every incoming result with a previous cached result for the same id where `old.key === new.key` and `class(old.status) !== class(new.status)` with `class = success-like {0,3,4,5,6} | failure-like {7,8} | skipped {1} | incomplete {2}` → `recordFlip`; same class → `recordStable`.
 - `RunListBuilder` adds files of quarantined test ids and non-cacheable files to `RunList::$quarantined` (Reason `Quarantine <testId>` / `NotCacheable <reason>`).
 
@@ -609,7 +615,7 @@ final class Hermeticity\Policy
 
 - `explain <path>` — `ExplainCommand`: load graph (fail: "no baseline yet" exit 1); `rel = Paths::relative`; `Selector::default(...)->affected([rel])`; print one line per affected test file `%-40s ← %-8s %s` (same formatter as `--explain`, extracted to `Console\ExplainFormatter`); then `direct dependents: N` and, when the file is unknown to the graph, either the watch patterns matched or `no recorded test executes this file`. Exit 0.
 - `prune [--flaky] [--branches] [--all]` — `PruneCommand`: `--flaky` → `Quarantine::clear()` + save; `--branches` → `pruneMissingBranches(git branchNames ∪ default)`; `--all` → delete `graph.json`, `flaky.json`, `last-run.json`, `divergence.json`, `runs/`; no flag → `pruneMissingTestFiles()` + `pruneResultsForMissingFiles(each branch)` + `--branches`. Prints what was removed. Exit 0.
-- `verify [-- <phpunit args>]` — `VerifyCommand` → `RunPipeline::runVerify`: record-mode full run (graph kept); before `apply`, snapshot `old = graph->results(branch)`; after `apply`, for each new result: `old[id]` exists and `old.key === new.key` → `wouldReplay++` unless `reader->shouldRerun(old.status)` or `!policy->cacheable()`; if additionally `class(old.status) !== class(new.status)` → divergence `{testId, k, cached: old.status, actual: new.status, sha: head, at: unix}` + `quarantine->recordFlip(id, k, 'divergence')`. Persist `divergence.json` `{"runs": n, "entries": [...]}` (append, keep last 500 entries). Print `Verify  ✓ 1240 tests · 1198 would replay · 0 divergences (lifetime: 2 in 143 runs)` (`✗` when divergences > 0 or PHPUnit failed). Exit code = PHPUnit's. `status` prints `divergences: <lifetime> in <runs> verify runs` and the quarantined ids with flips.
+- `verify [--parallel=N|-p] [-- <phpunit args>]` — `VerifyCommand` → `RunPipeline::runVerify`: record-mode full run (graph kept), launched through the same `runPhpunit()` branch `record`/`run` use — `PhpunitProcess` when `request.parallel` is null, `ParatestProcess` otherwise (§13); before `apply`, snapshot `old = graph->results(branch)`; after `apply`, for each new result: `old[id]` exists and `old.key === new.key` → `wouldReplay++` unless `reader->shouldRerun(old.status)` or `!policy->cacheable()`; if additionally `class(old.status) !== class(new.status)` → divergence `{testId, k, cached: old.status, actual: new.status, sha: head, at: unix}` + `quarantine->recordFlip(id, k, 'divergence')`. Persist `divergence.json` `{"runs": n, "entries": [...]}` (append, keep last 500 entries). Print `Verify  ✓ 1240 tests · 1198 would replay · 0 divergences (lifetime: 2 in 143 runs)` (`✗` when divergences > 0 or PHPUnit failed). Exit code = PHPUnit's. `status` prints `divergences: <lifetime> in <runs> verify runs` and the quarantined ids with flips.
 - `Graph::encode()` adds `"generator": "manuglopez/phpunit-replay " . Version::ID`.
 
 ### Laravel (SPEC §7.2 rules 1/4/5, §10) — package must NOT depend on illuminate/*
@@ -629,7 +635,7 @@ final class Laravel\LaravelIntegration  // rules(...): list<Rule> in SPEC order 
 ```
 `Selector::default()` gains an optional `array $extraRules` inserted per the SPEC order. Recorder tables flow: `Recorder::perTestTables()` → `RunWriter` `tables.json` → `GraphUpdater::replaceTestTables`.
 
-Fixture `tests/Fixtures/Projects/laravel-lite`: created from `composer create-project laravel/laravel`, reduced (sqlite `:memory:`, 3 migrations `users`/`posts`/`comments`, models `User`/`Post`, 4 Feature tests, 2 Blade views), with `manuglopez/phpunit-replay` as a path repository (`../../../..`, `@dev`) so the fixture's own `vendor/` contains PHPUnit (^11.5 from laravel/laravel) and a symlinked copy of this package. `vendor/` is gitignored; integration tests `markTestSkipped` when `vendor/autoload.php` is missing. `FixtureProject::laravelLite()` copies the fixture WITHOUT `vendor/` and symlinks `vendor` to the fixture's installed one.
+Fixture `tests/Fixtures/Projects/laravel-lite`: created from `composer create-project laravel/laravel`, reduced (sqlite `:memory:`, 3 migrations `users`/`posts`/`comments`, models `User`/`Post`, 4 Feature tests, 2 Blade views), with `manuglopez/phpunit-replay` as a path repository (`../../../..`, `@dev`) so the fixture's own `vendor/` contains PHPUnit (pinned `^12.5.12` in the fixture's own `require-dev`, independent of — and not exercising — this package's own 11.5/12/13 support matrix) and a symlinked copy of this package. `vendor/` is gitignored; integration tests `markTestSkipped` when `vendor/autoload.php` is missing. `FixtureProject::laravelLite()` copies the fixture WITHOUT `vendor/` and symlinks `vendor` to the fixture's installed one.
 
 ### Paratest (SPEC §13)
 
@@ -683,9 +689,75 @@ final class Cache\Remote\ObjectStore               // put/get of objects/<shard>
 - `--no-remote` disables all of the above for one run; `remote => null` disables permanently.
 - Deviation: `verify` and `results-only` (a partial CLI selection: `--filter`/`--group`/`--testsuite`/an explicit path) never publish — they persist the local graph the same way a full pass does, but never reach the `putObject`/`putGraph` step above. Only `record` and a full/replay `run` (`RunPipeline::pushAfterRun()`) publish; `verify`'s whole point is comparing against what is already cached, and a partial selection has nothing complete enough to be worth sharing.
 
+### Coverage format abstraction (`src/Coverage/`) — reads/writes `--coverage-php` across four php-code-coverage majors
+
+`phpunit/php-code-coverage` changed its `--coverage-php` on-disk shape and its coverage-data shape between the majors this package supports (11-13 vs 14, and — silently — within 14 itself, at 14.3). Nothing here trusts a version constraint for any of that: capability is read off the installed classes/constants, and a file's own format is read off its first line.
+
+```php
+final class Coverage\CoverageFormat
+{
+    public const SNAPSHOT_FORMAT = 2;                                      // this package's own <k>.cov shape (Snapshot); part of id()
+
+    public static function archive(): CoverageArchive;                    // SerializedArchive when cc has Serialization\Serializer+Unserializer (14+), else LegacyArchive (11-13)
+    public static function newSerializer(): ?object;                      // Serialization\Serializer instance, or null on cc 11-13 (class doesn't exist)
+    public static function newUnserializer(): ?object;                    // Serialization\Unserializer instance, or null on cc 11-13
+    public static function serializationFormat(): ?int;                   // installed SERIALIZATION_FORMAT constant; null pre-14, and on 14.0/14.1 (no such constant)
+    public static function declaredFormat(string $path): ?int;            // the format number a --coverage-php file's first line declares; null when it declares none
+    public static function isForeign(string $path): bool;                 // markerOf($path) !== ownMarker() — CoverageMerger::merge() degrades (copy unmerged) rather than throw
+    public static function markerOf(string $path): ?string;               // normalised 'fmt<n>' | 'ver<version>' | null, off the file's first line
+    public static function ownMarker(): ?string;                         // the marker the installed cc writes AND reads back
+    public static function id(): string;                                 // Fingerprint's environmental.coverage token: 'cc<major>/<fmt<n>|ser|php>/snap<SNAPSHOT_FORMAT>'
+    public static function usesTestIndexes(): bool;                      // true from cc 14.3 on: per-line hits are interned indexes, not inline id strings (LineHits)
+    public static function newProcessedData(bool $collectsHitCounts): ProcessedCodeCoverageData;             // reflection: ctor is 0-arg pre-14.3, 1-arg ($collectsHitCounts) from 14.3
+    public static function installLineCoverage(ProcessedCodeCoverageData $data, array $lineCoverage, ?array $testIds): void;  // setLineCoverage() always, setTestIds() only when $testIds !== null (14.3+)
+    public static function collectsHitCounts(ProcessedCodeCoverageData $data): bool;                          // false pre-14.3; false (not a fatal Error) for data restored from another major
+    /** @param array<mixed> $tests @return array<non-empty-string, TestType> */
+    public static function testsFrom(array $tests): array;              // validates raw CodeCoverage::getTests() entries (shape/keys differ per major) rather than trusting them
+    public static function call(object $object, string $method, mixed ...$arguments): mixed;                   // method_exists() dispatch behind a non-literal $method — see the class docblock for why (PHPStan cannot introduce a missing class/method via stubs, and a literal guard gets one branch flagged dead against whichever version is installed)
+}
+
+interface Coverage\CoverageArchive
+{
+    public function read(string $path): ?CodeCoverage;                   // absolute file paths always, regardless of on-disk representation; null when unreadable/foreign
+    public function write(string $path, CodeCoverage $coverage): bool;  // atomic; may mutate $coverage (clearCache() / excludeUncoveredFiles())
+}
+final class Coverage\LegacyArchive implements CoverageArchive     // cc 11-13's Report\PHP shape: `<?php return unserialize(<<<'END_OF_COVERAGE_SERIALIZATION' …);` — read() includes it output-buffered so a foreign/truncated file's echoed bytes never leak into the wrapper's stdout
+final class Coverage\SerializedArchive implements CoverageArchive // cc 14+'s Serialization\Serializer/Unserializer: unserializes to array{buildInformation, basePath, codeCoverage: ProcessedCodeCoverageData, testResults}, not a CodeCoverage object — read() rebuilds one around it, re-expanding basePath-relative keys back to absolute (PathReducer, upstream issue #925) and carrying the original file's driver name/version forward via NullCoverageDriver (cc 14's own Serialization\Merger refuses to merge files whose driverInformation disagrees)
+
+final class Coverage\LineHits    // shape-independent reads/writes of ProcessedCodeCoverageData::lineCoverage()'s per-line value (list<test id> up to cc 14.2, array<test index, hit count> from 14.3 — same method signature, different value shape, detected from the DATA not the version)
+{
+    /** @return array<int, non-empty-string>|null */
+    public static function testIds(ProcessedCodeCoverageData $data): ?array;                        // the interned index => id table (cc 14.3's testIds()), or null when the installed cc has none
+    /** @return array<non-empty-string, positive-int> */
+    public static function idsOnLine(?array $hit, ?array $testIds): array;                           // test id => hit count for one line's raw value; [] for null (not executable) and for no hits
+    public static function hitByAny(?array $hit, ?array $testIds, array $wanted): bool;               // short-circuiting "did any of $wanted hit this line" (PiggybackCoverageDriver's hot path)
+    /** @return array{0: array<string, array<int, mixed>>, 1: array<int, non-empty-string>|null} */
+    public static function toLineCoverage(array $neutral, bool $intern): array;                       // inverse: shape-independent `file => line => (id => hits)` → the installed representation (+ index table when $intern)
+}
+
+final class Coverage\Snapshot    // this package's own <stateDir>/coverage/<k>.cov: version-neutral JSON {format, lines, tests} — no longer a serialized php-code-coverage object (SNAPSHOT_FORMAT 1 was; a snapshot recorded under one major now merges cleanly under the next)
+{
+    public static function restrict(array $lineCoverage, ?array $testIds, array $tests, array $wantedIds): ?self;  // one test file's slice of a run's coverage; null when $wantedIds hit nothing (autoload-only file)
+    public function encode(): ?string;
+    public static function decode(string $content): ?self;              // null for anything not SNAPSHOT_FORMAT (a v1 file from an older release included) — caller warns and skips, never salvages
+    public function toCoverage(bool $collectsHitCounts): CodeCoverage;  // rebuilt in the INSTALLED cc's own representation, ready for CodeCoverage::merge(); driver is NullCoverageDriver (a snapshot never collects anything itself)
+}
+```
+
+Every public method above either returns null/false/a safe default or is called from a caller that catches `Throwable` — none of this throws out of a public method for an environmental problem, per the convention at the top of this file.
+
 ### CoverageMerger (SPEC §3.2, port of Pest CoverageMerger)
 
-`Report\CoverageMerger::merge(string $coveragePhpFromRun, string $stateDir, list<string> $replayedTestFiles): string` — the wrapper accepts `--coverage-php=FILE` and, when replayed files have a stored per-file coverage snapshot (`<stateDir>/coverage/<k>.cov`, written at record time when `--coverage-php` was requested), merges them with the run's `CodeCoverage` object and writes the final file. Only `.php` coverage (serialized `SebastianBergmann\CodeCoverage\CodeCoverage`); HTML/Clover are produced by the user from it. Documented limitation: coverage snapshots are only available for test files recorded with `--coverage-php`.
+```php
+final class Report\CoverageMerger
+{
+    /** @param list<string> $snapshotPaths absolute paths to <stateDir>/coverage/<k>.cov files */
+    public static function merge(string $runCoveragePhp, array $snapshotPaths, string $output): bool;
+    public static function writeEmptyRun(string $path, ConfigurationReader $reader): bool;      // empty CodeCoverage scoped to <source>, for a pass where the run list was empty
+}
+```
+
+The wrapper accepts `--coverage-php=FILE`; when replayed files have a stored per-file coverage snapshot (`<stateDir>/coverage/<k>.cov`, written at record time by `Record\CoverageSnapshots` when `--coverage-php` was requested), `merge()` folds them into the run's own `CodeCoverage` and writes the final file through `CoverageFormat::archive()`. Only `.php` coverage; HTML/Clover are produced by the user from it. Two failure modes degrade instead of breaking the run: a run coverage file `CoverageFormat::isForeign()` (a format the installed php-code-coverage cannot read) is copied through to `$output` unmerged, with a warning; a snapshot this installation cannot decode is skipped and counted, with one warning for the total. Git information is deliberately never written into the merged file: it spans several runs at potentially several commits, so stamping it with the working tree's current commit would assert something untrue. Documented limitation: coverage snapshots are only available for test files recorded with `--coverage-php`.
 
 ### GitHub Actions (examples in `.github/workflows/`)
 

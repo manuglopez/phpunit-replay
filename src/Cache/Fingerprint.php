@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Manuglopez\Replay\Cache;
 
+use Manuglopez\Replay\Coverage\CoverageFormat;
 use Symfony\Component\Process\Exception\ExceptionInterface;
 use Symfony\Component\Process\Process;
 
@@ -20,6 +21,19 @@ use Symfony\Component\Process\Process;
  * gitignored would still be treated as "tracked" — the opposite of what SPEC §4.5 requires.
  * When the project root is not a git repository at all (no `.git` directory or file), every
  * file is treated as tracked, since there is no index to distrust.
+ *
+ * ## The two buckets
+ *
+ * `structural` describes the PROJECT and feeds the content key (`Cache\ContentKey`): a change
+ * to any of it makes the whole graph unusable. `environmental` describes the MACHINE and only
+ * invalidates the cached RESULTS (`RunPipeline::reconcile()` / `ReplayState`): a change there
+ * leaves the dependency edges standing but throws away the recorded outcomes, because those
+ * were observed under conditions that no longer hold.
+ *
+ * `SCHEMA_VERSION` is deliberately NOT the knob for an environmental change: it sits in the
+ * structural bucket, `canonicalStructural()` feeds it into every content key, and bumping it
+ * therefore discards every graph on every machine. It describes the shape of this array, and
+ * only moves when that shape does.
  */
 final readonly class Fingerprint
 {
@@ -51,6 +65,13 @@ final readonly class Fingerprint
                 'php' => PHP_MAJOR_VERSION . '.' . PHP_MINOR_VERSION,
                 'driver' => $driver,
                 'os' => PHP_OS_FAMILY,
+                // A recorded result is only replayable while its stored coverage snapshot is
+                // still readable, and php-code-coverage changes both the `--coverage-php`
+                // serialization format and the shape of the coverage data itself between
+                // majors ({@see CoverageFormat}). Without this key nothing noticed: a cache
+                // recorded under one format was read back under another as an empty or
+                // unreadable snapshot, i.e. as silently missing coverage.
+                'coverage' => CoverageFormat::id(),
             ],
         ];
     }

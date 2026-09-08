@@ -8,6 +8,7 @@ use Manuglopez\Replay\PHPUnit\ConfigurationReader;
 use Manuglopez\Replay\Tests\Support\TempDir;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
+use PHPUnit\TextUI\Configuration\Configuration;
 
 final class ConfigurationReaderTest extends TestCase
 {
@@ -86,6 +87,59 @@ final class ConfigurationReaderTest extends TestCase
     public function test_configuration_file_returns_the_absolute_path(): void
     {
         self::assertSame($this->xmlFile, $this->build()->configurationFile());
+    }
+
+    public function test_repeat_or_retry_requested_is_false_by_default(): void
+    {
+        self::assertFalse($this->build()->repeatOrRetryRequested());
+    }
+
+    /**
+     * `--repeat`/`--retry` do not exist as CLI options before PHPUnit 13.3: passing either
+     * to an older installed `CliArgumentsBuilder` fails before this package's own code ever
+     * runs, so these two tests are meaningless (not merely inapplicable) on 11.5/12/13.0-13.2
+     * and are skipped there — the same boundary `ConfigurationReader::repeatOrRetryRequested()`
+     * itself documents.
+     */
+    public function test_repeat_or_retry_requested_is_true_with_repeat(): void
+    {
+        if (! method_exists(Configuration::class, 'repeat')) {
+            self::markTestSkipped('requires PHPUnit >= 13.3 (Configuration::repeat() not available)');
+        }
+
+        self::assertTrue($this->build(['--repeat=3'])->repeatOrRetryRequested());
+    }
+
+    public function test_repeat_or_retry_requested_is_true_with_retry(): void
+    {
+        if (! method_exists(Configuration::class, 'retry')) {
+            self::markTestSkipped('requires PHPUnit >= 13.3 (Configuration::retry() not available)');
+        }
+
+        self::assertTrue($this->build(['--retry=2'])->repeatOrRetryRequested());
+    }
+
+    /**
+     * `--repeat=1`/`--retry=1` are PHPUnit's own defaults: no different behaviour, no
+     * degrade. Asserted one option at a time — PHPUnit itself rejects `--repeat` and
+     * `--retry` together, regardless of value.
+     */
+    public function test_repeat_or_retry_requested_is_false_with_a_repeat_value_of_one(): void
+    {
+        if (! method_exists(Configuration::class, 'repeat')) {
+            self::markTestSkipped('requires PHPUnit >= 13.3 (Configuration::repeat() not available)');
+        }
+
+        self::assertFalse($this->build(['--repeat=1'])->repeatOrRetryRequested());
+    }
+
+    public function test_repeat_or_retry_requested_is_false_with_a_retry_value_of_one(): void
+    {
+        if (! method_exists(Configuration::class, 'retry')) {
+            self::markTestSkipped('requires PHPUnit >= 13.3 (Configuration::retry() not available)');
+        }
+
+        self::assertFalse($this->build(['--retry=1'])->repeatOrRetryRequested());
     }
 
     /** @return array<string, array{int, bool}> */

@@ -4,7 +4,7 @@ Run only the tests your change could possibly affect. Replay everything else as 
 
 [Packagist](https://packagist.org/packages/manuglopez/phpunit-replay) · [CI](https://github.com/manuglopez/phpunit-replay/actions)
 
-Composer package `manuglopez/phpunit-replay`, namespace `Manuglopez\Replay`. Plain PHPUnit 11.5+/12, no dependency on Pest.
+Composer package `manuglopez/phpunit-replay`, namespace `Manuglopez\Replay`. Plain PHPUnit 11.5+, 12, or 13, no dependency on Pest.
 
 ## The problem
 
@@ -88,8 +88,8 @@ Requirements:
 
 | | |
 |---|---|
-| PHP | ^8.2 |
-| PHPUnit | ^11.5 or ^12 |
+| PHP | ^8.2 (PHPUnit 12 itself needs PHP >=8.3, PHPUnit 13 needs PHP >=8.4.1) |
+| PHPUnit | ^11.5, ^12, or ^13 |
 | Git | a repository with at least one commit — baselines and diffs are computed against git history |
 | Coverage driver | `ext-pcov` **or** Xdebug with `xdebug.mode=coverage`, to record the dependency graph |
 | `phpunit.xml`/`phpunit.xml.dist` | any valid PHPUnit configuration |
@@ -199,7 +199,7 @@ and register the extension in `phpunit.xml`:
 
 `setUp()` **always runs**, for every test, replayed or not — only the code guarded behind
 `isReplaying()` (and only if you call it *after* `parent::setUp()`) is skipped; the trait hooks
-the test method itself, never `setUp()`. On **PHPUnit 12** it overrides the
+the test method itself, never `setUp()`. On **PHPUnit 12 and 13** it overrides the
 `invokeTestMethod()` hook cleanly; on **PHPUnit 11.5**, which has no such hook, a `#[Before]`
 method swaps the test's private method name through reflection instead (see
 `docs/spikes/in-process-replay.md` for the two mechanisms verified side by side).
@@ -218,8 +218,8 @@ forwarded to `vendor/bin/phpunit` untouched.
 | Command | Options | What it does |
 |---|---|---|
 | `run` (default) | `--fresh` `--no-remote` `--explain` `--dry-run` `--log-junit=FILE` `--allow-ci-baseline` `--parallel`/`-p[=N]` `[-- <phpunit args>]` | Runs only what's affected, replays the rest. See below for each option. |
-| `record` | `--fresh` `--parallel`/`-p[=N]` | Runs the full suite unconditionally and records a fresh baseline. What CI runs on the default branch after a merge. |
-| `verify` | `[-- <phpunit args>]` | Runs the full suite in record mode and compares every result against what a replay pass would have served — the divergence metric (see [Keeping the cache honest](#keeping-the-cache-honest)). |
+| `record` | `--fresh` `--parallel`/`-p[=N]` | Runs the full suite unconditionally and records a fresh baseline. What CI runs on the default branch after a merge. Exits `2` (PHPUnit's own tests may still all have passed) if it has to degrade to a plain PHPUnit run, since that means no baseline was actually written — unlike `run`, whose exit code always stays PHPUnit's own even when it degrades. |
+| `verify` | `--parallel`/`-p[=N]` `[-- <phpunit args>]` | Runs the full suite in record mode and compares every result against what a replay pass would have served — the divergence metric (see [Keeping the cache honest](#keeping-the-cache-honest)). |
 | `status` | — | Prints the cached graph: root, branch, state dir, coverage driver, framework, file/edge/table counts, `graph.json` size, per-branch results, fingerprint drift, quarantine, not-cacheable count, remote, lifetime divergences. |
 | `explain <path>` | — | Prints which recorded test files a change to `<path>` would affect, and by which rule — without running anything. |
 | `prune` | `--flaky` `--branches` `--all` `--remote --keep-months=N` `--squash` | Drops stale state without touching a live pass. See below. |
@@ -259,7 +259,7 @@ Environment variables — always win over `phpunit-replay.php`:
 | `PHPUNIT_REPLAY_DEFAULT_BRANCH` | Overrides `default_branch`. |
 | `PHPUNIT_REPLAY_MODE` | Overrides the extension `mode` (also accepts the internal `record-subset`/`results-only` values the wrapper itself uses). |
 | `PHPUNIT_REPLAY_KEEP_RUN=1` | Keeps the generated `.phpunit-replay.xml` and the run's partial directory for inspection. |
-| `PHPUNIT_REPLAY_LEGACY_HOOK=1` | Forces in-process mode's PHPUnit 11.5 reflection fallback even on PHPUnit 12. |
+| `PHPUNIT_REPLAY_LEGACY_HOOK=1` | Forces in-process mode's PHPUnit 11.5 reflection fallback even on PHPUnit 12 or 13. |
 | `CI` | Detected automatically; gates whether a `run` may publish a branch baseline (see `--allow-ci-baseline`). |
 
 A few more `PHPUNIT_REPLAY_*` variables exist purely for internal wrapper-to-extension
@@ -309,7 +309,11 @@ A **fingerprint** guards against incompatible baselines: its *structural* half (
 `phpunit.xml(.dist)`, `phpunit-replay.php`, the cache schema version) changing discards the whole
 graph and forces a fresh recording; its *environmental* half (PHP `MAJOR.MINOR`, coverage driver,
 OS family) changing keeps the edges but discards cached results, which can't be trusted across a
-PHP version or driver change.
+PHP version or driver change. Each structural file only counts once git tracks it, so `status` can
+correctly print `replay_config=null` for a `phpunit-replay.php` that is very much in effect but
+untracked (locally gitignored, say) — an untracked file cannot invalidate a baseline shared with
+machines or CI runners that don't have it at all, which is the point of hashing it in the first
+place.
 
 Baselines are kept **per branch**. On a branch with no baseline of its own, phpunit-replay walks
 an ordered list of candidates (`baseline_branches`, or the single `default_branch` as shorthand),
@@ -344,6 +348,7 @@ return [
     'never_cache' => [],                  // globs of test files that always run for real (see Keeping the cache honest)
     'quarantine_release_after' => 20,     // stable passes needed to leave automatic quarantine
     'laravel' => 'auto',                  // 'auto' | 'on' | 'off'
+    'laravel_parallel_isolation' => true, // false to run --parallel on Laravel without per-worker database isolation
     'junit_merge' => true,                // merge cached results into --log-junit output
     'mode' => 'auto',                     // extension mode override; leave at 'auto' unless you know why not
     'hermeticity_heuristics' => false,    // reserved for a future heuristic (flagging suspicious tests in `status`); not implemented — leave false
@@ -420,13 +425,17 @@ conflicts); only the CI job that owns the branch baseline (`remote_push: 'all'`,
 The recommendation is the same one Pest gives for its own TIA: **PR CI keeps running the full,
 unfiltered suite** as the actual merge gate — `phpunit-replay verify` does this while also
 comparing every result against the cache, which is what keeps the baseline trustworthy and feeds
-the divergence metric. A fast, optional lane runs `phpunit-replay run` for quick feedback in
-minutes. A separate workflow records the baseline after each merge to the default branch
-(`run --allow-ci-baseline` or `record --fresh`, then `push --graph`).
+the divergence metric. Being a full-suite pass, `verify` is the slowest command in the package, so
+it also accepts `--parallel`/`-p[=N]` (same option as `run`/`record`, [see below](#parallel)) to run
+through Paratest instead of a single `phpunit` process — on a real project this took `verify` from
+~40 minutes sequentially to 5m19s with `--parallel=8`, without changing what it checks. A fast,
+optional lane runs `phpunit-replay run` for quick feedback in minutes. A separate workflow records
+the baseline after each merge to the default branch (`run --allow-ci-baseline` or `record --fresh`,
+then `push --graph`).
 
 ```
-fast (every PR):   vendor/bin/phpunit-replay run     — quick feedback, not the gate
-full (every PR):   vendor/bin/phpunit-replay verify  — the actual merge gate
+fast (every PR):   vendor/bin/phpunit-replay run                 — quick feedback, not the gate
+full (every PR):   vendor/bin/phpunit-replay verify --parallel=8 — the actual merge gate
 baseline (on push to main/develop): record/run + push --graph
 ```
 
@@ -465,13 +474,14 @@ demonstrates the effect end to end:
 
 ## Parallel
 
-Add `--parallel`/`-p` to `run` or `record` to run the same filtered configuration through
+Add `--parallel`/`-p` to `run`, `record` or `verify` to run the same configuration through
 [Paratest](https://github.com/paratestphp/paratest) instead of a single `phpunit` process:
 
 ```bash
-phpunit-replay --parallel      # Paratest's own auto-detected process count
-phpunit-replay -p 4            # 4 worker processes
-phpunit-replay record -p 4     # a full parallel recording pass
+phpunit-replay --parallel        # Paratest's own auto-detected process count
+phpunit-replay -p 4              # 4 worker processes
+phpunit-replay record -p 4       # a full parallel recording pass
+phpunit-replay verify -p 8       # the full-suite merge gate, in parallel
 ```
 
 Paratest is an optional `require-dev` dependency (`brianium/paratest`). When `--parallel`/`-p` is
@@ -480,6 +490,16 @@ sequential PHPUnit run rather than failing. Each worker writes its own partial r
 merged back together before updating the graph (edges by union, results last-write-wins), so the
 summary line is the same regardless of process count. The coverage driver's ini flags travel to
 Paratest's workers via `--passthru-php`.
+
+On a Laravel project, `--parallel` also wires up Laravel's own per-worker database isolation
+(`--runner=\Illuminate\Testing\ParallelRunner` plus `LARAVEL_PARALLEL_TESTING=1`) automatically,
+whenever Laravel, Paratest, and a resolvable `Illuminate\Testing\ParallelRunner` are all present.
+Without it, every worker migrates the same database instead of a per-worker one, which on a real
+database engine surfaces as deadlocks or duplicate-key errors rather than a clean test failure — set
+`laravel_parallel_isolation` to `false` if your project deliberately runs `--parallel` without
+per-worker isolation. If the project's own Laravel application can't be resolved (no
+`bootstrap/app.php` and no `Tests\CreatesApplication`), phpunit-replay warns and runs `--parallel`
+without isolation instead of failing outright.
 
 ## Coverage reports with replay
 
@@ -505,7 +525,7 @@ Being specific about what each tool actually does, rather than what it aims to d
 
 | | [Pest 5 TIA](https://github.com/pestphp/pest) | [jasonmccreary/phpunit-tia](https://github.com/jasonmccreary/phpunit-tia) | [gosuperscript/phpunit-tia](https://github.com/gosuperscript/phpunit-tia) | phpunit-replay |
 |---|---|---|---|---|
-| Runner | Pest only (aborts on plain PHPUnit test classes) | PHPUnit | PHPUnit | PHPUnit 11.5+ and 12, no Pest |
+| Runner | Pest only (aborts on plain PHPUnit test classes) | PHPUnit | PHPUnit | PHPUnit 11.5+, 12, and 13, no Pest |
 | Unaffected tests | Synthetic pass, real assertion count | **Skipped** | **Skipped** | Filtered mode: never loaded at all. In-process mode: synthetic pass with the real assertion count |
 | Complete summary/JUnit | Yes | No — skipped tests lose their assertion count | No | Yes — cached results merge into the summary and, on request, into JUnit |
 | Cosmetic-only changes ignored | Yes (tokenizer) | Partial | Partial | Yes (tokenizer-based content hash) |

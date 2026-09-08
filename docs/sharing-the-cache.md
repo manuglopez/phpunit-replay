@@ -35,6 +35,18 @@ Relevant config keys, all optional: `remote`, `remote_token`, `remote_push`
 `remote_refresh_seconds` (git backend, default 300), `remote_timeout` (git backend, default 60),
 `baseline_branches`, `default_branch`.
 
+**Test ids are the cache keys.** Every shared object (`objects/<yyyy-mm>/<k>.json`) and every
+published `graph/**` baseline stores its results in a dictionary keyed by PHPUnit's own test id
+(`Class::method`, or `Class::method with data set "…"` for a data provider case) — a machine
+pulling one of those only finds a given test's result if it computes that exact same id itself. A
+data provider whose dataset name embeds something machine-specific — most commonly an absolute
+filesystem path, e.g. a dataset built from `glob()`/`scandir()`/`realpath()` over an absolute
+directory — produces a different id on every machine and in CI, so that one test's result can
+never be found by anyone but the machine that recorded it: not a defect in phpunit-replay, but a
+real sharp edge that silently degrades remote-cache sharing to a local cold start for exactly the
+tests whose dataset names aren't stable across machines. Keep dataset names relative and
+deterministic (a fixture's basename, an index) if you want their results to actually travel.
+
 ## Setup: local only
 
 Nothing to do — this is the default. Skip straight to [CI in two
