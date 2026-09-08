@@ -32,6 +32,7 @@ final readonly class ArmLaravelTrackersOnPrepared implements PreparedSubscriber
     public function __construct(
         private Recorder $recorder,
         private UsesDatabaseCollector $usesDatabase,
+        private string $projectRoot,
     ) {
     }
 
@@ -72,6 +73,6 @@ final readonly class ArmLaravelTrackersOnPrepared implements PreparedSubscriber
         $app->instance(self::MARKER, true);
 
         TableTracker::arm($app, $this->recorder);
-        BladeTracker::arm($app, $this->recorder);
+        BladeTracker::arm($app, $this->recorder, $this->projectRoot);
     }
 }

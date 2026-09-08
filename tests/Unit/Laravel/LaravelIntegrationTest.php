@@ -70,7 +70,7 @@ final class LaravelIntegrationTest extends TestCase
     {
         ReplayState::boot(Mode::Record, $this->root, $this->root . '/.phpunit-replay', 'run-1', new FakeCoverageDriver([]));
 
-        $subscribers = LaravelIntegration::subscribers(new Recorder(new FakeCoverageDriver([])));
+        $subscribers = LaravelIntegration::subscribers(new Recorder(new FakeCoverageDriver([])), $this->root);
 
         self::assertCount(2, $subscribers);
         self::assertInstanceOf(ArmLaravelTrackersOnPrepared::class, $subscribers[0]);
