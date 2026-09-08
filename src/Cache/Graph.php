@@ -949,7 +949,23 @@ final class Graph
 
     public function encode(): ?string
     {
-        $sortedFiles = array_values(array_unique($this->files));
+        // A file id that no edge references any more (its only test was deleted —
+        // pruneMissingTestFiles() — or its edge was dropped — pruneMissingDependencies(),
+        // or a partial replaceEdges()) would otherwise be carried into `files` forever:
+        // link() only ever adds, and nothing else in this class ever shrinks $this->files.
+        // Filtering to what $this->edges still points to keeps graph.json bounded by what
+        // is actually reachable, on every encode, not just under `prune`.
+        $referenced = [];
+
+        foreach ($this->edges as $ids) {
+            foreach ($ids as $id) {
+                $referenced[$id] = true;
+            }
+        }
+
+        $live = array_intersect_key(array_unique($this->files), $referenced);
+
+        $sortedFiles = array_values($live);
         sort($sortedFiles);
 
         $remap = [];
