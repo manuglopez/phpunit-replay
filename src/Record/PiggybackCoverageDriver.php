@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Manuglopez\Replay\Record;
 
 use Closure;
+use Manuglopez\Replay\Coverage\LineHits;
 use PHPUnit\Runner\CodeCoverage as PhpUnitCodeCoverage;
 use SebastianBergmann\CodeCoverage\CodeCoverage;
 
@@ -99,8 +100,11 @@ final class PiggybackCoverageDriver implements CoverageDriver
      * `ProcessedCodeCoverageData::lineCoverage()` is typed loosely and validated at runtime
      * rather than trusted to match `array<string, array<int, list<string>|null>>`: on the
      * php-code-coverage version paired with PHPUnit 11.5 the method carries no generic
-     * return annotation at all, so its actual shape cannot be relied upon statically (see
-     * the equivalent note on {@see \Manuglopez\Replay\Record\CoverageSnapshots}).
+     * return annotation at all, and from 14.3 on the per-line lists of test ids are not even
+     * the shape any more. {@see \Manuglopez\Replay\Coverage\LineHits} owns that reading:
+     * asking it whether a line was hit, instead of scanning for id strings that 14.3 no
+     * longer puts there, is what keeps this driver — and therefore the whole dependency graph
+     * of any `--coverage-*` run — from silently recording zero edges.
      *
      * @param list<string> $testIds
      * @return array<string, array<int, int>>
@@ -108,26 +112,24 @@ final class PiggybackCoverageDriver implements CoverageDriver
     private function linesTouchedBy(CodeCoverage $coverage, array $testIds): array
     {
         $wanted = array_fill_keys($testIds, true);
+        $data = $coverage->getData(true);
+        $index = LineHits::testIds($data);
         $out = [];
 
-        foreach ($coverage->getData(true)->lineCoverage() as $file => $lines) {
+        foreach ($data->lineCoverage() as $file => $lines) {
             if (! is_string($file) || ! is_array($lines) || ! $this->scope->contains($file)) {
                 continue;
             }
 
             $hits = [];
 
-            foreach ($lines as $line => $ids) {
-                if (! is_int($line) || ! is_array($ids)) {
+            foreach ($lines as $line => $hit) {
+                if (! is_int($line) || ! is_array($hit)) {
                     continue;
                 }
 
-                foreach ($ids as $id) {
-                    if (is_string($id) && isset($wanted[$id])) {
-                        $hits[$line] = 1;
-
-                        break;
-                    }
+                if (LineHits::hitByAny($hit, $index, $wanted)) {
+                    $hits[$line] = 1;
                 }
             }
 

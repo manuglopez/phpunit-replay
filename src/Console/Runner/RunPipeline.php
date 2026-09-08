@@ -239,6 +239,11 @@ final class RunPipeline
 
         $configuration = $locator->buildConfiguration($configFile, $request->phpunitArgs);
         $this->reader = new ConfigurationReader($configuration);
+
+        if ($this->reader->repeatOrRetryRequested()) {
+            return '--repeat/--retry requested: the test id it changes results on is not stable across runs, degrading to a plain PHPUnit run';
+        }
+
         $this->testPaths = TestPaths::fromConfiguration($configuration, $root);
 
         $this->watch = new WatchPatterns();

@@ -26,6 +26,7 @@ use Manuglopez\Replay\Record\Recorder;
 use Manuglopez\Replay\Record\ResultCollector;
 use Manuglopez\Replay\Record\RunPartial;
 use Manuglopez\Replay\Record\RunWriter;
+use Manuglopez\Replay\Tests\Support\TelemetryFixture;
 use Manuglopez\Replay\Tests\Support\TempDir;
 use Manuglopez\Replay\Tests\Unit\Record\FakeCoverageDriver;
 use PHPUnit\Event\Code\IssueTrigger\IssueTrigger;
@@ -54,6 +55,8 @@ use PHPUnit\Framework\Attributes\Test;
 use PHPUnit\Framework\TestCase;
 use PHPUnit\Framework\TestStatus\TestStatus;
 use PHPUnit\Metadata\MetadataCollection;
+use ReflectionClass;
+use ReflectionNamedType;
 
 /**
  * Exercises each subscriber against real PHPUnit event/value objects (constructed
@@ -64,20 +67,53 @@ final class SubscribersTest extends TestCase
 {
     private function telemetryInfo(): Telemetry\Info
     {
-        $snapshot = new Telemetry\Snapshot(
-            Telemetry\HRTime::fromSecondsAndNanoseconds(0, 0),
-            Telemetry\MemoryUsage::fromBytes(0),
-            Telemetry\MemoryUsage::fromBytes(0),
-            new Telemetry\GarbageCollectorStatus(0, 0, 0, 0, 0.0, 0.0, 0.0, 0.0, false, false, false, 0),
-        );
+        return TelemetryFixture::info();
+    }
 
-        return new Telemetry\Info(
-            $snapshot,
-            Telemetry\Duration::fromSecondsAndNanoseconds(0, 0),
-            Telemetry\MemoryUsage::fromBytes(0),
-            Telemetry\Duration::fromSecondsAndNanoseconds(0, 0),
-            Telemetry\MemoryUsage::fromBytes(0),
-        );
+    /**
+     * One of PHPUnit's issue events, filled BY PARAMETER NAME rather than by position.
+     *
+     * PHPUnit 13.3 inserted a `bool $ignoredByFilter` parameter into the middle of both
+     * deprecation events' constructors, between `$ignoredByTest` and `$trigger`, so a
+     * positional call is a `TypeError` on one side of that line or the other. `$named` supplies
+     * what the assertion is actually about; everything else gets the zero value of its
+     * declared type, which is what these tests passed positionally anyway.
+     *
+     * @template T of object
+     * @param class-string<T> $event
+     * @param array<string, mixed> $named
+     * @return T
+     */
+    private function issueEvent(string $event, array $named): object
+    {
+        $named += [
+            'telemetryInfo' => $this->telemetryInfo(),
+            'test' => $this->testMethod(),
+            'file' => '/p/src/Foo.php',
+            'line' => 5,
+        ];
+
+        $reflection = new ReflectionClass($event);
+        $arguments = [];
+
+        foreach ($reflection->getConstructor()?->getParameters() ?? [] as $parameter) {
+            $name = $parameter->getName();
+
+            if (array_key_exists($name, $named)) {
+                $arguments[] = $named[$name];
+
+                continue;
+            }
+
+            $type = $parameter->getType();
+            $arguments[] = $type instanceof ReflectionNamedType ? match ($type->getName()) {
+                'bool' => false,
+                'int' => 0,
+                default => '',
+            } : '';
+        }
+
+        return $reflection->newInstanceArgs($arguments);
     }
 
     private function testMethod(string $file = '/project/tests/FooTest.php'): TestMethod
@@ -292,20 +328,10 @@ final class SubscribersTest extends TestCase
         $collector = new ResultCollector();
         $collector->testPrepared($this->testMethod()->id());
 
-        (new RecordDeprecationTriggered($collector))->notify(
-            new DeprecationTriggered(
-                $this->telemetryInfo(),
-                $this->testMethod(),
-                'meh',
-                '/p/src/Foo.php',
-                5,
-                false,
-                false,
-                false,
-                IssueTrigger::from(null, null),
-                '',
-            ),
-        );
+        (new RecordDeprecationTriggered($collector))->notify($this->issueEvent(DeprecationTriggered::class, [
+            'message' => 'meh',
+            'trigger' => IssueTrigger::from(null, null),
+        ]));
 
         $result = $collector->all()[$this->testMethod()->id()];
         self::assertSame(TestStatus::deprecation()->asInt(), $result['status']);
@@ -317,19 +343,10 @@ final class SubscribersTest extends TestCase
         $collector = new ResultCollector();
         $collector->testPrepared($this->testMethod()->id());
 
-        (new RecordPhpDeprecationTriggered($collector))->notify(
-            new PhpDeprecationTriggered(
-                $this->telemetryInfo(),
-                $this->testMethod(),
-                'meh',
-                '/p/src/Foo.php',
-                5,
-                false,
-                false,
-                false,
-                IssueTrigger::from(null, null),
-            ),
-        );
+        (new RecordPhpDeprecationTriggered($collector))->notify($this->issueEvent(PhpDeprecationTriggered::class, [
+            'message' => 'meh',
+            'trigger' => IssueTrigger::from(null, null),
+        ]));
 
         $result = $collector->all()[$this->testMethod()->id()];
         self::assertSame(TestStatus::deprecation()->asInt(), $result['status']);

@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace Manuglopez\Replay\Report;
 
+use Manuglopez\Replay\Console\Runner\Warnings;
+use Manuglopez\Replay\Coverage\CoverageFormat;
+use Manuglopez\Replay\Coverage\Snapshot;
 use Manuglopez\Replay\PHPUnit\ConfigurationReader;
 use Manuglopez\Replay\Support\AtomicFile;
 use SebastianBergmann\CodeCoverage\CodeCoverage;
@@ -16,13 +19,26 @@ use Throwable;
  * coverage snapshots {@see \Manuglopez\Replay\Record\CoverageSnapshots} wrote at record time
  * for every REPLAYED test file back into the `CodeCoverage` this pass's own PHPUnit run
  * produced, so `--coverage-php` does not silently lose the coverage of test files TIA
- * skipped re-running. Only `.php` coverage (a serialized
- * `SebastianBergmann\CodeCoverage\CodeCoverage`) is supported — HTML/Clover/etc. reports are
+ * skipped re-running. Only `.php` coverage is supported — HTML/Clover/etc. reports are
  * produced by the user from the merged file afterwards, same as from any other
  * `--coverage-php` output (this is a narrower mechanism than Pest's own CoverageMerger,
  * which keeps one cumulative CodeCoverage cached across runs and strips/re-merges test ids
  * on each pass; this package instead keeps one small immutable snapshot per test file,
  * content-addressed, and merges only the ones this pass actually needs).
+ *
+ * Reading and writing the `--coverage-php` file itself is delegated to a
+ * {@see \Manuglopez\Replay\Coverage\CoverageArchive}, because that format is not stable:
+ * php-code-coverage 14 removed `Report\PHP` and replaced it with a `Serialization\Serializer`
+ * whose output no earlier version can read, whose own format number has already moved twice,
+ * and whose file paths are relative rather than absolute. Everything below happens in the
+ * absolute-path, `CodeCoverage`-shaped world the archive presents; nothing here knows which
+ * format is on disk.
+ *
+ * Every failure degrades with a warning instead of throwing (docs/INTERNALS.md): a snapshot
+ * this installation cannot read is skipped and counted, and a run coverage file in a format
+ * the installed php-code-coverage cannot read is copied through to the user's target
+ * unchanged — PHPUnit's own coverage of what actually ran, minus the replayed files, beats no
+ * coverage file at all.
  */
 final class CoverageMerger
 {
@@ -31,35 +47,64 @@ final class CoverageMerger
      */
     public static function merge(string $runCoveragePhp, array $snapshotPaths, string $output): bool
     {
-        $coverage = self::loadRunCoverage($runCoveragePhp);
+        if (! is_file($runCoveragePhp)) {
+            return false;
+        }
+
+        if (CoverageFormat::isForeign($runCoveragePhp)) {
+            Warnings::warn(sprintf(
+                'coverage: %s is in a --coverage-php format the installed php-code-coverage cannot read; '
+                . 'copying it to %s unmerged (the coverage of replayed test files is missing from it)',
+                $runCoveragePhp,
+                $output,
+            ));
+
+            return self::copy($runCoveragePhp, $output);
+        }
+
+        $archive = CoverageFormat::archive();
+        $coverage = $archive->read($runCoveragePhp);
 
         if ($coverage === null) {
             return false;
         }
 
+        $collectsHitCounts = CoverageFormat::collectsHitCounts($coverage->getData(true));
+        $skipped = 0;
+
         foreach ($snapshotPaths as $path) {
-            $snapshot = self::loadSnapshot($path);
+            $snapshot = self::loadSnapshot($path, $collectsHitCounts);
 
             if ($snapshot === null) {
+                $skipped++;
+
                 continue;
             }
 
             try {
                 $coverage->merge($snapshot);
             } catch (Throwable) {
-                continue;
+                $skipped++;
             }
         }
 
-        return self::write($coverage, $output);
+        if ($skipped > 0) {
+            Warnings::warn(sprintf(
+                'coverage: %d replayed test file(s) had no readable coverage snapshot; their lines are missing from %s',
+                $skipped,
+                $output,
+            ));
+        }
+
+        return $archive->write($output, $coverage);
     }
 
     /**
      * Builds and writes an empty `CodeCoverage`, scoped to the configuration's `<source>`
-     * directories, in the same on-disk shape PHPUnit's own `--coverage-php` produces
-     * (`SebastianBergmann\CodeCoverage\Report\PHP::process()`): used when nothing executed
-     * this pass (the run list is empty, no PHPUnit process was even launched) so
-     * {@see self::merge()} still has a run coverage to fold the snapshots into.
+     * directories, in the same on-disk shape the installed php-code-coverage's own
+     * `--coverage-php` produces: used when nothing executed this pass (the run list is empty,
+     * no PHPUnit process was even launched) so {@see self::merge()} still has a run coverage
+     * to fold the snapshots into.
      *
      * Uses {@see NullCoverageDriver} rather than
      * `SebastianBergmann\CodeCoverage\Driver\Selector::forLineCoverage()`: the coverage built
@@ -73,27 +118,16 @@ final class CoverageMerger
     {
         $filter = $reader->emptyCoverageFilter();
 
-        return self::write(new CodeCoverage(new NullCoverageDriver(), $filter), $path);
+        return CoverageFormat::archive()->write($path, new CodeCoverage(new NullCoverageDriver(), $filter));
     }
 
-    /** PHPUnit's own `--coverage-php` output: `<?php return unserialize(<<<'...'\n...\n...);`. */
-    private static function loadRunCoverage(string $path): ?CodeCoverage
-    {
-        if (! is_file($path)) {
-            return null;
-        }
-
-        try {
-            $value = @include $path;
-        } catch (Throwable) {
-            return null;
-        }
-
-        return $value instanceof CodeCoverage ? $value : null;
-    }
-
-    /** A snapshot written by {@see \Manuglopez\Replay\Record\CoverageSnapshots}: raw `serialize()` bytes, never `include`d. */
-    private static function loadSnapshot(string $path): ?CodeCoverage
+    /**
+     * A snapshot written by {@see \Manuglopez\Replay\Record\CoverageSnapshots}:
+     * shape-independent JSON, rebuilt into whatever the installed php-code-coverage
+     * understands. null for a missing, truncated, hand-edited or older-format snapshot, which
+     * the caller counts and reports rather than failing the run over.
+     */
+    private static function loadSnapshot(string $path, bool $collectsHitCounts): ?CodeCoverage
     {
         $content = AtomicFile::read($path);
 
@@ -101,30 +135,24 @@ final class CoverageMerger
             return null;
         }
 
-        try {
-            $value = @unserialize($content);
-        } catch (Throwable) {
+        $snapshot = Snapshot::decode($content);
+
+        if ($snapshot === null) {
             return null;
         }
 
-        return $value instanceof CodeCoverage ? $value : null;
+        try {
+            return $snapshot->toCoverage($collectsHitCounts);
+        } catch (Throwable) {
+            return null;
+        }
     }
 
-    private static function write(CodeCoverage $coverage, string $output): bool
+    /** Atomically, via {@see AtomicFile}: the target is the path the user asked for. */
+    private static function copy(string $from, string $to): bool
     {
-        try {
-            $coverage->clearCache();
-            $serialized = serialize($coverage);
-        } catch (Throwable) {
-            return false;
-        }
+        $content = AtomicFile::read($from);
 
-        $buffer = "<?php\n"
-            . "return unserialize(<<<'END_OF_COVERAGE_SERIALIZATION'\n"
-            . $serialized . "\n"
-            . "END_OF_COVERAGE_SERIALIZATION\n"
-            . ");\n";
-
-        return AtomicFile::write($output, $buffer);
+        return $content !== null && AtomicFile::write($to, $content);
     }
 }

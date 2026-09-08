@@ -1,6 +1,6 @@
 # manuglopez/phpunit-replay — Technical specification
 
-> Test Impact Analysis + result replay for pure PHPUnit (11.5+ / 12).
+> Test Impact Analysis + result replay for pure PHPUnit (11.5+ / 12 / 13).
 > Document intended to be handed in full to Claude Code as an implementation prompt.
 > Status: v0.1 — 2026-09-06.
 
@@ -14,7 +14,7 @@ Differences from what already exists (`jasonmccreary/phpunit-tia`, `gosuperscrip
 
 | | Pest 5 TIA | phpunit-tia (both) | **phpunit-replay** |
 |---|---|---|---|
-| Runner | Pest only (aborts with PHPUnit classes) | PHPUnit 12 / 13 | PHPUnit 11.5+ and 12 |
+| Runner | Pest only (aborts with PHPUnit classes) | PHPUnit 12 / 13 | PHPUnit 11.5+, 12, and 13 |
 | Unaffected tests | Synthetic pass with assertions | **Skipped** | Synthetic pass with assertions (in-process) or not loaded (filtered) |
 | Full summary/JUnit | Yes | No | Yes: the wrapper merges cached results into the summary and the JUnit |
 | Cosmetic changes ignored | Yes (tokenizer) | Partial | Yes (tokenizer) |
@@ -115,7 +115,7 @@ phpunit-replay/
     "php": "^8.2",
     "ext-json": "*",
     "ext-tokenizer": "*",
-    "phpunit/phpunit": "^11.5 || ^12.0",
+    "phpunit/phpunit": "^11.5 || ^12.0 || ^13.0",
     "symfony/process": "^6.4 || ^7.0 || ^8.0",
     "symfony/console": "^6.4 || ^7.0 || ^8.0",
     "symfony/finder": "^6.4 || ^7.0 || ^8.0"
@@ -620,13 +620,13 @@ RemoteCache filesystem + HTTP, `push/pull`, replayed-remote by `k`, CoverageMerg
 
 - **Unit**: ContentHash (comments/whitespace don't change the hash; renaming a variable does), Fingerprint drift structural vs environmental, Graph encode/decode round-trip and hostility (corrupt JSON, mistyped sections), ChangedFiles against a temporary git repo (commit, modify, revert, delete, rename, untracked, ignored), Selector per rule, ResultCollector status precedence, TableExtractor with varied SQL and migrations, Policy and quarantine.
 - **Integration** (run real PHPUnit against `tests/Fixtures/Projects/plain` in a tmp dir with git init): (1) first run records the graph; (2) second run with no changes executes 0 and replays everything, exit 0; (3) changing a source file executes only its dependents; (4) a comment-only change executes 0; (5) a failing test is saved and re-run even if nothing changes; (6) `--filter` doesn't touch edges or sha; (7) a different `composer.lock` forces a record; (8) a new test in a known file gets executed; (9) a deleted test gets pruned; (10) in-process mode replays as pass with the original assertions and `--fail-on-risky` isn't triggered; (11) the merged JUnit contains every test; (12) a quarantined test always runs.
-- Package CI: matrix PHP 8.2/8.3/8.4 × PHPUnit 11.5/12 × driver pcov/xdebug.
+- Package CI: `test` job matrix PHP 8.2/8.3/8.4 × PHPUnit 11.5/12/13 × driver pcov/xdebug, excluding cells PHPUnit can't resolve (12.0 needs PHP >=8.3; 13.0 needs PHP >=8.4.1) — 12 of the 18 possible cells. A second `coverage-format` job pins PHPUnit 13.1.14 and forces `phpunit/php-code-coverage` to each of 14.0/14.1/14.2 in turn (3 more cells), because PHPUnit's own version axis resolves `^13.0` straight to php-code-coverage 14.3 and would otherwise leave the other three `--coverage-php` file formats untested (see docs/INTERNALS.md — CoverageFormat). 15 cells total.
 
 ---
 
 ## 16. v0.1 acceptance criteria
 
-1. On a PHPUnit 11.5+ project without modifying its tests, `vendor/bin/phpunit-replay` on a second run with no changes finishes in < 2 s + bootstrap time, with exit 0 and summary "0 executed, N replayed".
+1. On a PHPUnit 11.5, 12, or 13 project without modifying its tests, `vendor/bin/phpunit-replay` on a second run with no changes finishes in < 2 s + bootstrap time, with exit 0 and summary "0 executed, N replayed".
 2. Changing a source file executes exactly the test files with an edge to it (verifiable with `--explain`).
 3. A test that failed is never replayed.
 4. A comments/whitespace-only change executes nothing.

@@ -285,4 +285,50 @@ final class Scenario10InProcessReplayTest extends TestCase
         self::assertDirectoryDoesNotExist(ReplayAssert::stateDir($fixture));
         self::assertSame(35, $this->setUpCount($fixture));
     }
+
+    /**
+     * PHPUnit 13.3+ hazard (docs/INTERNALS.md "hazard, real and handled now that PHPUnit
+     * 13.1+ is supported"): no wrapper stands in front of this process, so
+     * `ReplayExtension::bootstrapInProcess()` is the only place that ever sees
+     * `--repeat`/`--retry` here. It must react exactly like `PHPUNIT_REPLAY=0` above —
+     * plain PHPUnit, no subscriber registered, no state written — rather than replay from,
+     * or record into, a graph keyed on an id `--repeat` makes different every run.
+     */
+    public function test_repeat_disables_in_process_replay_and_writes_no_state(): void
+    {
+        if (! method_exists(\PHPUnit\TextUI\Configuration\Configuration::class, 'repeat')) {
+            self::markTestSkipped('requires PHPUnit >= 13.3 (--repeat/--retry do not exist before it)');
+        }
+
+        $fixture = $this->fixture();
+
+        $result = $this->phpunit($fixture, ['--repeat=2']);
+
+        self::assertSame(0, $result['exitCode'], $result['stdout'] . $result['stderr']);
+        self::assertStringContainsString(
+            'phpunit-replay: --repeat/--retry requested',
+            $result['stderr'],
+        );
+        self::assertStringNotContainsString('Replay ', $result['stdout']);
+        self::assertDirectoryDoesNotExist(ReplayAssert::stateDir($fixture));
+    }
+
+    public function test_retry_disables_in_process_replay_and_writes_no_state(): void
+    {
+        if (! method_exists(\PHPUnit\TextUI\Configuration\Configuration::class, 'retry')) {
+            self::markTestSkipped('requires PHPUnit >= 13.3 (--repeat/--retry do not exist before it)');
+        }
+
+        $fixture = $this->fixture();
+
+        $result = $this->phpunit($fixture, ['--retry=2']);
+
+        self::assertSame(0, $result['exitCode'], $result['stdout'] . $result['stderr']);
+        self::assertStringContainsString(
+            'phpunit-replay: --repeat/--retry requested',
+            $result['stderr'],
+        );
+        self::assertStringNotContainsString('Replay ', $result['stdout']);
+        self::assertDirectoryDoesNotExist(ReplayAssert::stateDir($fixture));
+    }
 }

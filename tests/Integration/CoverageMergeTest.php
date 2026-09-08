@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Manuglopez\Replay\Tests\Integration;
 
+use Manuglopez\Replay\Coverage\CoverageFormat;
+use Manuglopez\Replay\Tests\Support\CoverageFixture;
 use Manuglopez\Replay\Tests\Support\FixtureProject;
 use Manuglopez\Replay\Tests\Support\ReplayAssert;
 use PHPUnit\Framework\TestCase;
@@ -16,6 +18,14 @@ use SebastianBergmann\CodeCoverage\CodeCoverage;
  * file, (2) a later pass that replays everything from cache still produces the same
  * coverage report by folding those snapshots together, and (3) a pass that DOES execute
  * something merges its own coverage with the snapshot of whatever it replayed.
+ *
+ * This is the only place that proves the whole chain against the php-code-coverage that is
+ * actually installed: a real PHPUnit child process with a real coverage driver writes a real
+ * `--coverage-php` file, this package's extension writes real snapshots beside it, and the
+ * wrapper folds them back together. Reading the result goes through
+ * `Coverage\CoverageFormat::archive()` rather than `include`, because from php-code-coverage
+ * 14 on that file is a serialized ARRAY with relative paths, not a `CodeCoverage` object with
+ * absolute ones — an `include` returns something that is not even the right type.
  */
 final class CoverageMergeTest extends TestCase
 {
@@ -56,13 +66,13 @@ final class CoverageMergeTest extends TestCase
         $recorded = $this->fixture->replay(['record', '--', '--coverage-php=cov.php']);
         self::assertSame(0, $recorded['exitCode'], $recorded['stdout'] . $recorded['stderr']);
 
-        $lines1 = self::loadCoverage($this->fixture->root() . '/cov.php')->getData(true)->lineCoverage();
+        $lines1 = self::lineCoverage($this->fixture->root() . '/cov.php');
 
         $result = $this->fixture->replay(['--', '--coverage-php=cov2.php']);
         self::assertSame(0, $result['exitCode'], $result['stdout'] . $result['stderr']);
         self::assertSame(0, ReplayAssert::executedCount($result['stdout']), $result['stdout']);
 
-        $lines2 = self::loadCoverage($this->fixture->root() . '/cov2.php')->getData(true)->lineCoverage();
+        $lines2 = self::lineCoverage($this->fixture->root() . '/cov2.php');
 
         foreach (self::SRC_FILES as $relative) {
             $absolute = $this->fixture->root() . '/' . $relative;
@@ -92,7 +102,7 @@ final class CoverageMergeTest extends TestCase
         $recorded = $this->fixture->replay(['record', '--', '--coverage-php=cov.php']);
         self::assertSame(0, $recorded['exitCode'], $recorded['stdout'] . $recorded['stderr']);
 
-        $lines1 = self::loadCoverage($this->fixture->root() . '/cov.php')->getData(true)->lineCoverage();
+        $lines1 = self::lineCoverage($this->fixture->root() . '/cov.php');
 
         // The wrapper process itself has no coverage driver available (plain `php`); the
         // child PhpunitProcess is never even launched, since nothing needs to run.
@@ -103,7 +113,7 @@ final class CoverageMergeTest extends TestCase
         self::assertStringNotContainsString('could not build an empty coverage baseline', $result['stderr']);
         self::assertFileExists($this->fixture->root() . '/cov2.php');
 
-        $lines2 = self::loadCoverage($this->fixture->root() . '/cov2.php')->getData(true)->lineCoverage();
+        $lines2 = self::lineCoverage($this->fixture->root() . '/cov2.php');
 
         foreach (self::SRC_FILES as $relative) {
             $absolute = $this->fixture->root() . '/' . $relative;
@@ -128,7 +138,7 @@ final class CoverageMergeTest extends TestCase
         self::assertSame(0, $result['exitCode'], $result['stdout'] . $result['stderr']);
         self::assertSame(31, ReplayAssert::executedCount($result['stdout']), $result['stdout']);
 
-        $lines3 = self::loadCoverage($this->fixture->root() . '/cov3.php')->getData(true)->lineCoverage();
+        $lines3 = self::lineCoverage($this->fixture->root() . '/cov3.php');
 
         $greeter = $this->fixture->root() . '/src/Greeter.php';
         self::assertArrayHasKey($greeter, $lines3, 'src/Greeter.php (never re-executed) should still come from its snapshot');
@@ -141,10 +151,27 @@ final class CoverageMergeTest extends TestCase
 
     private static function loadCoverage(string $path): CodeCoverage
     {
-        $coverage = include $path;
+        self::assertFileExists($path);
+        self::assertFalse(
+            CoverageFormat::isForeign($path),
+            $path . ' should be in the --coverage-php format the installed php-code-coverage reads',
+        );
+
+        $coverage = CoverageFormat::archive()->read($path);
         self::assertInstanceOf(CodeCoverage::class, $coverage);
 
         return $coverage;
+    }
+
+    /**
+     * `file => line => list<test id>`, whatever the installed php-code-coverage stores
+     * internally ({@see CoverageFixture::neutral()}).
+     *
+     * @return array<string, array<int, list<string>|null>>
+     */
+    private static function lineCoverage(string $path): array
+    {
+        return CoverageFixture::neutral(self::loadCoverage($path));
     }
 
     /**
