@@ -134,15 +134,27 @@ final class WatchPatterns
 
     private function keyMatches(string $key, string $file): bool
     {
-        $rule = $this->parse($key);
-
-        if ($rule['include'] === '' || ! Glob::matches($rule['include'], $file)) {
-            return false;
-        }
-
         $file = str_replace('\\', '/', $file);
 
         if ($this->touchesVcs($file)) {
+            return false;
+        }
+
+        // A key that IS the path names that one file and nothing else, so it matches without
+        // going through the glob machinery at all. Checked first because {@see self::parse()}
+        // splits a key on whitespace and reads a leading `!` as an exclude token, and because
+        // Glob treats `*` and `?` as wildcards — all three of which mangle a key that was
+        // meant literally. {@see ResiduePatterns::for()} registers exactly such keys (the
+        // changed file's own project-relative path), and `lang/es MX/messages.php` tokenised
+        // into the include `lang/es`, which matches nothing. A hand-written watch pattern is
+        // unaffected: one equal to a real path already matched it as a glob.
+        if (str_replace('\\', '/', trim($key)) === $file) {
+            return true;
+        }
+
+        $rule = $this->parse($key);
+
+        if ($rule['include'] === '' || ! Glob::matches($rule['include'], $file)) {
             return false;
         }
 

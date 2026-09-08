@@ -12,6 +12,7 @@ use Manuglopez\Replay\Select\TestPaths;
 use Manuglopez\Replay\Select\WatchPatterns;
 use Manuglopez\Replay\Tests\Support\TempDir;
 use PHPUnit\Framework\Attributes\DataProvider;
+use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\TestCase;
 
 final class SiblingRuleTest extends TestCase
@@ -134,6 +135,31 @@ final class SiblingRuleTest extends TestCase
 
         self::assertSame([], $selection->testFiles());
         self::assertSame(['app/Listeners/Deleted.php'], $context->remaining);
+    }
+
+    #[Group('static-declaration-edges')]
+    public function test_leaves_a_sibling_candidate_with_no_sibling_to_stand_on_unconsumed(): void
+    {
+        // The presumption is "a new class in a directory full of already-tested siblings is
+        // exercised the same way they are". With no tested sibling there is no presumption to
+        // make, and consuming the path anyway hid it from WatchRule — the only rule that
+        // would have covered it, since the Laravel watch default for `app/` is
+        // `app/** !*.php` and excludes exactly these files. With static_declaration_edges on
+        // it also swallowed the conservative residue pattern (Select\ResiduePatterns), so a
+        // brand-new provider affected nothing at all. BladeRule has always guarded its
+        // consume this way.
+        TempDir::write($this->root . '/app/Providers/NewProvider.php', '<?php class NewProvider {}');
+
+        $graph = new Graph($this->root);
+        $graph->replaceEdges(['tests/FooTest.php' => ['app/Other.php']]);
+
+        $selection = new Selection();
+        $context = $this->makeContext($graph, ['app/Providers/NewProvider.php'], $selection);
+
+        (new SiblingRule())->apply($context);
+
+        self::assertSame([], $selection->testFiles());
+        self::assertSame(['app/Providers/NewProvider.php'], $context->remaining);
     }
 
     /** @param list<string> $remaining */

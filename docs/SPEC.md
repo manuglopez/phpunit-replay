@@ -293,6 +293,99 @@ k = xxh128(
 
 `k` is computed while recording and saved with each result. It serves two purposes: (a) the remote cache is indexed by `k` (`objects/<k>.json` holding the results of every test in that file), so any machine with the same contents gets the same results without needing the same `sha`; (b) quarantine detects flips: same `k`, different `s` → not hermetic.
 
+#### 4.3.1 `static_declaration_edges` (opt-in, default off)
+
+`deps` above comes from coverage attribution, and PHP executes a file's top level **exactly
+once per process**. The load-time footprint of a declaration-only file — an enum's cases, a
+constants class, an interface, a `return [...]` config or language file — is therefore
+credited to whichever test in that process loaded it first, and every other test that depends
+on it gets no edge at all. Union-on-re-record (§7.3) can never invent the missing edge,
+because it never existed.
+
+With `static_declaration_edges => true` (`phpunit-replay.php`, or the internal
+`PHPUNIT_REPLAY_STATIC_DECLARATION_EDGES=1` the wrapper passes to the PHPUnit child), `deps`
+is built from two order-independent sources instead:
+
+1. **Behavioural edges.** A coverage hit counts only when the executed line falls inside a
+   function/method/closure statement list (`Analysis\FileFacts`, nikic/php-parser, cached by
+   `ContentHash` under `<stateDir>/analysis/`). Those lines run when something *calls* them,
+   so the attribution is identical in every process and every Paratest distribution. A file
+   php-parser cannot read keeps today's Pest heuristic — "cannot classify" must never turn
+   into "no dependencies".
+2. **Static edges, one hop.** Any file that declares a class-like name — with or without
+   method bodies — becomes a dependency of a test when the test's **own source** names
+   something it declares; and, when the file has **no function body at all**, also when any
+   file that is already a behavioural dependency of the test names it (`Analysis\StaticEdges`,
+   resolved names plus class-shaped string literals). No second hop, and hop sources are the
+   dependencies *this run's coverage* reported, never the graph's accumulated list — following
+   the graph would reach one file further on every re-record and make the graph a function of
+   how many partial passes had run rather than of the source tree.
+
+   The two halves partition by **kind of signal**, not by file shape: coverage owns "a test
+   executed this code", names own "a test mentions this symbol". An earlier design split them
+   by shape — static edges only for files with no body — and the two then failed to meet in
+   the middle: a file with even one method body whose bodies a given test never entered got no
+   behavioural edge and no static edge, while the residue net below also declined it because
+   another test's coverage had already given it a `fileId`. Adding one method to an enum was
+   enough to drop it out of the graph for every test that merely read its cases.
+
+   The asymmetry in the rule is what makes it affordable, and it is measured. A file with no
+   body can never be attributed by coverage at all, so the transitive hop is the only mechanism
+   it will ever have, and its reach is narrow: on a 2,195-file Laravel project with 726 tests
+   and 62,743 recorded edges, 730 added edges. A file that *has* bodies is already reachable by
+   coverage from every test that calls into it, so the only edge it can lack is the one from a
+   test that names it without calling it — and letting a behavioural dependency reach it too
+   costs 66,219 edges on the same project (+105.5%, median dependencies per test 82 → 173),
+   60% of them from five files that name classes they merely *register* (`routes/web.php`,
+   `routes/api.php`, `routes/breadcrumbs.php`, `routes/console.php` and one kitchen-sink
+   model), each a behavioural dependency of 700 of the 726 tests. Every test that hit any route
+   would inherit an edge to every controller in the application, with no safety gained. With
+   the asymmetry the same project gains **1,781 edges, +2.84%**, median dependencies per test
+   82 → 84, and those five files contribute exactly zero.
+
+Everything neither source reaches — `lang/` and `config/` files and Blade templates (they
+declare no name), a file php-parser cannot read (nothing about it is known, so its edges fall
+back to the Pest heuristic), a brand-new `.php` file — is **residue**, and residue is covered
+conservatively rather than dropped: `Select\RunListBuilder` registers the changed path itself
+as a watch pattern onto every test directory *and* every `<testsuite><file>` entry (§7.2.6),
+so `WatchRule` selects everything the graph knows. The pattern key is the changed path
+verbatim, so `WatchPatterns` compares a key to the path for equality before parsing it as a
+glob — otherwise a path containing whitespace, or starting with `!`, would never match its own
+file. That net is deliberately wider than necessary and deliberately not
+`Fingerprint::structuralDrift`, which would discard every graph on every machine over a
+translation tweak.
+
+The **invariant** the flag is held to: with it on, no test loses an edge the flag-off pass gave
+it, unless that edge was itself first-loader noise *and* something else now covers the file —
+either the tests that call into it or name it (it has a `fileId`, so §7.2.2 selects them), or
+the whole suite (it has none, so the residue net selects everything). A changed file is never
+silently attributed to nobody. `Select\Rules\SiblingRule` therefore only consumes a path once
+it has actually found a tested sibling to stand on, the way `BladeRule` does with its
+ancestors: consuming it unmatched hid it from `WatchRule`, which with the flag on is the only
+thing that would have covered it (the Laravel watch default for `app/` is `app/** !*.php` and
+excludes exactly those files, so with the flag off the guard changes no outcome).
+
+The classifier's cache lives at `<stateDir>/analysis/v<rules>/<xx>/<hash>.json`, one
+immutable entry per distinct file content (so Paratest workers can write it concurrently and
+a lost write costs one re-parse, never a wrong answer). `<hash>` is `xxh128` of the file's
+**raw bytes**, deliberately not `ContentHash` — the payload is a list of line ranges, so the
+normalisation that makes a comment-only edit invisible to the content key would serve line
+numbers that no longer describe the file. The bytes are read once and both the key and the
+facts come from that one read, and a failed scan is never stored (a swallowed EMFILE would
+otherwise pin "unparseable" to that content forever). The `v<rules>` segment is
+`DeclarationScanner::RULES_VERSION`, and it exists because a content hash answers "has this
+file changed" and never "have we changed our mind about what this file means" — bump it
+whenever the classification rules move, or every machine keeps serving the old verdict for
+unchanged files. A bump is also structural drift (§4.5), because re-parsing alone corrects
+the facts and leaves every already-recorded edge as the old rules got it: `unionEdges()` only
+grows. `prune --all` clears the whole thing along with the rest of the state directory.
+
+The flag participates in the **structural** fingerprint (§4.5), and only when it is on: a
+graph whose edges came from coverage attribution and a graph that also carries static edges
+are not comparable, so flipping it in either direction is structural drift and forces a fresh
+record. Adding the key unconditionally would have invalidated every existing cache
+everywhere; leaving it out when off is what makes the feature shippable.
+
 ### 4.4 ContentHash (normalization)
 
 - `.php` (not `.blade.php`): `token_get_all`, drop `T_WHITESPACE`, `T_COMMENT`, `T_DOC_COMMENT`, concatenate the `text` of each token, `hash('xxh128', ...)`. If the tokenizer returns empty → hash the raw content.
@@ -304,7 +397,7 @@ k = xxh128(
 
 ### 4.5 Fingerprint
 
-- **Structural** (change → graph fully discarded, fresh record): `composer.lock`, `phpunit.xml`, `phpunit.xml.dist`, `phpunit-replay.php`, and the package's `SCHEMA_VERSION` constant. Only hashed if tracked by git.
+- **Structural** (change → graph fully discarded, fresh record): `composer.lock`, `phpunit.xml`, `phpunit.xml.dist`, `phpunit-replay.php`, and the package's `SCHEMA_VERSION` constant. Only hashed if tracked by git. Plus `static_declaration_edges: true` and `analysis_rules: DeclarationScanner::RULES_VERSION`, both present only while that flag is on (§4.3.1) — a rules bump has to force a fresh record, since the graph's edges are never re-derived otherwise.
 - **Environmental** (change → results discarded, edges kept): PHP `MAJOR.MINOR` version, driver, `PHP_OS_FAMILY`.
 - Checked at the start **and at the end** of the run: if it changed during execution, the edges recorded in that run are discarded.
 
@@ -533,6 +626,7 @@ return [
     'quarantine_release_after' => 20,
     'laravel' => 'auto',                       // auto|on|off
     'junit_merge' => true,
+    'static_declaration_edges' => false,       // §4.3.1: order-independent edges (opt-in, changes every content key)
 ];
 ```
 
@@ -581,7 +675,7 @@ tests/Feature/BillingTest.php   ← Watch    config/billing/plans.php (config/bi
 tests/Unit/PricingTest.php      ← TestFile tests/Unit/PricingTest.php
 ```
 
-Environment variables: `PHPUNIT_REPLAY=1` is equivalent to `run`; `PHPUNIT_REPLAY=0` disables it even with the extension registered; `PHPUNIT_REPLAY_MODE`, `PHPUNIT_REPLAY_STATE_DIR`, `PHPUNIT_REPLAY_REMOTE`, `PHPUNIT_REPLAY_RUN_ID` are internal wrapper→extension variables.
+Environment variables: `PHPUNIT_REPLAY=1` is equivalent to `run`; `PHPUNIT_REPLAY=0` disables it even with the extension registered; `PHPUNIT_REPLAY_MODE`, `PHPUNIT_REPLAY_STATE_DIR`, `PHPUNIT_REPLAY_REMOTE`, `PHPUNIT_REPLAY_RUN_ID`, `PHPUNIT_REPLAY_STATIC_DECLARATION_EDGES` (`1`/`0`, §4.3.1) are internal wrapper→extension variables.
 
 ---
 

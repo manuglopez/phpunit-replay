@@ -52,18 +52,30 @@ final class SiblingRule implements Rule
             }
 
             $dir = dirname($rel);
+            $matched = false;
 
             foreach ($graph->allTestFiles() as $testFile) {
                 foreach ($graph->dependenciesOf($testFile) as $dependency) {
                     if (dirname($dependency) === $dir) {
                         $context->selection->add($testFile, new Reason($this->name(), $rel, $dir));
+                        $matched = true;
 
                         break;
                     }
                 }
             }
 
-            $context->consume($rel);
+            // Only consume when the presumption actually found a sibling to stand on, the
+            // way {@see BladeRule} does with its ancestors. A directory none of whose files
+            // any test has an edge to tells us nothing, and swallowing the path there hid it
+            // from {@see WatchRule} — which is the only rule that would have covered it,
+            // since the Laravel watch default for `app/` is `app/** !*.php` and excludes
+            // exactly these files. With `static_declaration_edges` on that also silently
+            // consumed the conservative residue pattern
+            // ({@see \Manuglopez\Replay\Select\ResiduePatterns}).
+            if ($matched) {
+                $context->consume($rel);
+            }
         }
     }
 

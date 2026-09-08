@@ -25,7 +25,11 @@ final class RunListBuilder
     /** @var list<string>|null memoised directory walk (project-relative candidates) */
     private ?array $candidates = null;
 
-    /** @param array{migration?: Rule, sibling?: Rule, blade?: Rule} $extraRules Laravel-only rules, docs/INTERNALS.md "Laravel" */
+    /**
+     * @param array{migration?: Rule, sibling?: Rule, blade?: Rule} $extraRules Laravel-only rules, docs/INTERNALS.md "Laravel"
+     * @param bool $staticDeclarationEdges the `static_declaration_edges` opt-in (SPEC.md §4.3.1);
+     *        turns on the {@see ResiduePatterns} fallback, and nothing else here
+     */
     public function __construct(
         private readonly Graph $graph,
         private readonly TestPaths $testPaths,
@@ -34,12 +38,20 @@ final class RunListBuilder
         private readonly Policy $policy,
         private readonly string $projectRoot,
         private readonly array $extraRules = [],
+        private readonly bool $staticDeclarationEdges = false,
     ) {
     }
 
     /** @param list<string> $changed project-relative changed files */
     public function build(array $changed, string $branch): RunList
     {
+        if ($this->staticDeclarationEdges) {
+            // SPEC.md §4.3.1: whatever neither technique could attribute is covered
+            // conservatively rather than dropped. Added before the rule chain runs so
+            // Rules\WatchRule sees it.
+            $this->watch->add((new ResiduePatterns($this->graph, $this->testPaths))->for($changed));
+        }
+
         $selection = Selector::default($this->graph, $this->testPaths, $this->watch, $this->projectRoot, $this->extraRules)
             ->affected($changed);
 

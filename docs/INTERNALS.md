@@ -26,6 +26,9 @@ Ported-from-Pest files carry:
 | `Manuglopez\Replay` | `src/` |
 | `Manuglopez\Replay\Tests` | `tests/` (`tests/Unit`, `tests/Integration`, `tests/Support`) |
 
+`Manuglopez\Replay\Analysis` (`src/Analysis/`) is the static classifier behind
+`static_declaration_edges` — see "Static declaration edges" below.
+
 ## Support
 
 ```php
@@ -417,6 +420,7 @@ final readonly class Config                  // SPEC §9 keys
     /** @var array<string, string|list<string>> */ public array $watch; /** @var list<string> */ public array $neverCache;
     public int $quarantineReleaseAfter; public string $laravel; public bool $junitMerge;
     public string $mode; public bool $hermeticityHeuristics;
+    public bool $staticDeclarationEdges;                              // SPEC §4.3.1, default false; env PHPUNIT_REPLAY_STATIC_DECLARATION_EDGES=1|0
     public static function defaults(): self;
     public static function load(string $projectRoot): self;           // phpunit-replay.php if present (returns array), else defaults; then env overrides
     public static function fromArray(array $values): self;
@@ -425,6 +429,65 @@ final readonly class Config                  // SPEC §9 keys
     public function mergeEnv(array $server): self;
 }
 ```
+
+## Static declaration edges (SPEC §4.3.1) — `src/Analysis/`
+
+Off by default. Everything here is reached through a nullable collaborator, so with the flag
+off the graph, the content keys and the selection are byte-for-byte what they were.
+
+```php
+final readonly class Analysis\FileFacts                  // one source file, as the classifier sees it
+{
+    public bool $parsed;                                  // false = php-parser could not read it; NOTHING may be inferred
+    /** @var list<array{int, int}> */ public array $bodies;      // inclusive line spans of every function/method/closure stmt list
+    /** @var list<string> */ public array $declares;             // FQ class-like names declared here
+    /** @var list<string> */ public array $references;           // FQ names mentioned here (resolved names + class-shaped strings)
+    public function declarationOnly(): bool;              // $parsed && $bodies === []
+    public function coversAnyBodyLine(array $lines): bool;
+}
+final class Analysis\DeclarationScanner
+{
+    public const RULES_VERSION = 2;                       // BUMP whenever FactsVisitor's rules change: the content cache cannot notice, and (being structural) a bump re-records
+    public function scan(string $absoluteFile): FileFacts;
+    public function scanSource(string $source): FileFacts;
+}
+final class Analysis\FactsVisitor extends \PhpParser\NodeVisitorAbstract;   // runs after NameResolver, never standalone
+final class Analysis\FactsCache      // <stateDir>/analysis/v<RULES_VERSION>/<xx>/<hash>.json, keyed by xxh128 of the RAW bytes (the payload is line ranges); one read, failures never stored
+{
+    public function __construct(string $stateDir, string $projectRoot, DeclarationScanner $scanner = new DeclarationScanner());
+    public function for(string $absoluteFile): FileFacts;         // .blade.php is refused outright
+    public function forRelative(string $relativeFile): FileFacts;
+}
+final class Analysis\StaticEdges
+{
+    public function __construct(string $projectRoot, Record\SourceScope $scope, FactsCache $facts, int $maxFiles = self::MAX_FILES);
+    /** @return array<string, list<string>> lowercased FQ name => declaring files (relative) */
+    public function index(): array;   // MAX_FILES only warns; giving up removed edges without adding any
+    /** @param array<string, list<string>> $behaviouralEdges test (rel) => this run's coverage edges, one entry per executed test @return int edges added */
+    public function expand(Cache\Graph $graph, array $behaviouralEdges): int;
+}
+```
+
+Wiring, all of it optional and null/false by default:
+
+| Seam | With the flag on |
+|---|---|
+| `Record\Recorder::__construct(CoverageDriver, ?FactsCache)` | an edge needs an executed line inside a body; an unparseable file falls back to the Pest heuristic |
+| `Cache\GraphUpdater::__construct(..., ?StaticEdges)` | `expand()` runs right after `unionEdges()`, before `mergeResults()` computes content keys |
+| `Select\RunListBuilder::__construct(..., bool $staticDeclarationEdges)` | `Select\ResiduePatterns` adds each changed-but-unknown `.php` path as its own watch pattern (shared with `Console\Commands\ExplainCommand`, so `explain` shows the same plan) |
+| `Console\Commands\{Pull,Status}Command` | must pass the flag to `Fingerprint::compute()` too — omitting it makes the "current" fingerprint lack a key the stored one has, which `detectDrift()` reads as permanent drift |
+| `Cache\Fingerprint::compute(..., bool $staticDeclarationEdges)` | adds `structural.static_declaration_edges = true` and `structural.analysis_rules = RULES_VERSION` — present only when on; the parameter has no default, twice bitten |
+| `Console\Runner\RunPipeline::baseEnv()` | sets `PHPUNIT_REPLAY_STATIC_DECLARATION_EDGES=1` for the PHPUnit child and its Paratest workers |
+| `PHPUnit\ReplayState::boot(..., bool $staticDeclarationEdges)` | builds the `Recorder`'s `FactsCache`; `bootInProcess()` also builds the `StaticEdges` the in-process persist path uses |
+
+`Console\Commands\PruneCommand`'s `--all` now clears `<stateDir>/analysis/` too (its
+`removeRunsDirectory()` became the generic `removeDirectory($stateDir, $name)`).
+
+Fixture: `tests/Fixtures/Projects/declarations` (`FixtureProject::declarations()`) — four test
+files over a cases-only enum, a constants-only class, one class with real bodies, and a
+`lang/`-shaped `return [...]` file nothing loads. Tests carry
+`#[Group('static-declaration-edges')]`, so `--exclude-group static-declaration-edges`
+reproduces the pre-feature suite exactly.
 
 ## Test support (`tests/Support/`)
 

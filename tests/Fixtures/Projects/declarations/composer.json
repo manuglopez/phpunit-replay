@@ -1,0 +1,19 @@
+{
+    "name": "fixture/declarations",
+    "description": "Fixture for SPEC.md §4.3.1 static_declaration_edges: declaration-only files whose load-time footprint PHP can only ever credit to whichever test loaded them first.",
+    "type": "project",
+    "require": {
+        "php": "^8.2"
+    },
+    "autoload": {
+        "psr-4": {
+            "App\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "App\\Tests\\": "tests/"
+        }
+    },
+    "minimum-stability": "stable"
+}

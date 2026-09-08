@@ -28,7 +28,7 @@ final class FingerprintTest extends TestCase
         $this->repo->write('composer.lock', '{"content-hash": "abc"}');
         // deliberately not added/committed: untracked.
 
-        $fingerprint = Fingerprint::compute($this->repo->root, 'none');
+        $fingerprint = Fingerprint::compute($this->repo->root, 'none', false);
 
         self::assertNull($fingerprint['structural']['composer_lock']);
     }
@@ -38,7 +38,7 @@ final class FingerprintTest extends TestCase
         $this->repo->write('composer.lock', '{"content-hash": "abc"}');
         $this->repo->commitAll('add composer.lock');
 
-        $fingerprint = Fingerprint::compute($this->repo->root, 'none');
+        $fingerprint = Fingerprint::compute($this->repo->root, 'none', false);
 
         self::assertIsString($fingerprint['structural']['composer_lock']);
         self::assertNotSame('', $fingerprint['structural']['composer_lock']);
@@ -46,7 +46,7 @@ final class FingerprintTest extends TestCase
 
     public function testMissingStructuralFileIsNull(): void
     {
-        $fingerprint = Fingerprint::compute($this->repo->root, 'none');
+        $fingerprint = Fingerprint::compute($this->repo->root, 'none', false);
 
         self::assertNull($fingerprint['structural']['phpunit_xml']);
         self::assertNull($fingerprint['structural']['phpunit_xml_dist']);
@@ -55,7 +55,7 @@ final class FingerprintTest extends TestCase
 
     public function testStructuralKeysArePresent(): void
     {
-        $fingerprint = Fingerprint::compute($this->repo->root, 'pcov');
+        $fingerprint = Fingerprint::compute($this->repo->root, 'pcov', false);
 
         self::assertSame(
             ['schema', 'composer_lock', 'phpunit_xml', 'phpunit_xml_dist', 'replay_config'],
@@ -66,7 +66,7 @@ final class FingerprintTest extends TestCase
 
     public function testEnvironmentalKeysReflectRuntime(): void
     {
-        $fingerprint = Fingerprint::compute($this->repo->root, 'pcov');
+        $fingerprint = Fingerprint::compute($this->repo->root, 'pcov', false);
 
         self::assertSame(['php', 'driver', 'os', 'coverage'], array_keys($fingerprint['environmental']));
         self::assertSame(PHP_MAJOR_VERSION . '.' . PHP_MINOR_VERSION, $fingerprint['environmental']['php']);
@@ -85,7 +85,7 @@ final class FingerprintTest extends TestCase
      */
     public function testEnvironmentalDriftReportsACoverageFormatChange(): void
     {
-        $stored = Fingerprint::compute($this->repo->root, 'pcov');
+        $stored = Fingerprint::compute($this->repo->root, 'pcov', false);
         $current = $stored;
 
         $stored['environmental']['coverage'] = 'cc12/legacy/snap1';
@@ -102,7 +102,7 @@ final class FingerprintTest extends TestCase
      */
     public function testEnvironmentalDriftReportsAFingerprintRecordedWithoutACoverageKey(): void
     {
-        $current = Fingerprint::compute($this->repo->root, 'pcov');
+        $current = Fingerprint::compute($this->repo->root, 'pcov', false);
         $stored = $current;
 
         unset($stored['environmental']['coverage']);
@@ -119,7 +119,7 @@ final class FingerprintTest extends TestCase
      */
     public function testTheCoverageFormatIsNotPartOfTheContentKeyInput(): void
     {
-        $fingerprint = Fingerprint::compute($this->repo->root, 'pcov');
+        $fingerprint = Fingerprint::compute($this->repo->root, 'pcov', false);
 
         self::assertArrayNotHasKey('coverage', $fingerprint['structural']);
         self::assertStringNotContainsString('coverage', Fingerprint::canonicalStructural($fingerprint));
@@ -130,11 +130,11 @@ final class FingerprintTest extends TestCase
         $this->repo->write('phpunit.xml', '<phpunit><testsuites></testsuites></phpunit>');
         $this->repo->commitAll('add phpunit.xml');
 
-        $before = Fingerprint::compute($this->repo->root, 'none');
+        $before = Fingerprint::compute($this->repo->root, 'none', false);
 
         $this->repo->write('phpunit.xml', '<phpunit><testsuites><testsuite name="x"/></testsuites></phpunit>');
 
-        $after = Fingerprint::compute($this->repo->root, 'none');
+        $after = Fingerprint::compute($this->repo->root, 'none', false);
 
         self::assertNotSame($before['structural']['phpunit_xml'], $after['structural']['phpunit_xml']);
         self::assertFalse(Fingerprint::structuralMatches($before, $after));
@@ -151,16 +151,16 @@ final class FingerprintTest extends TestCase
 
     public function testEnvironmentalDriftReportsDriverChange(): void
     {
-        $before = Fingerprint::compute($this->repo->root, 'pcov');
-        $after = Fingerprint::compute($this->repo->root, 'xdebug');
+        $before = Fingerprint::compute($this->repo->root, 'pcov', false);
+        $after = Fingerprint::compute($this->repo->root, 'xdebug', false);
 
         self::assertSame(['driver'], Fingerprint::environmentalDrift($before, $after));
     }
 
     public function testEnvironmentalDriftIsEmptyWhenNothingChanges(): void
     {
-        $before = Fingerprint::compute($this->repo->root, 'pcov');
-        $after = Fingerprint::compute($this->repo->root, 'pcov');
+        $before = Fingerprint::compute($this->repo->root, 'pcov', false);
+        $after = Fingerprint::compute($this->repo->root, 'pcov', false);
 
         self::assertSame([], Fingerprint::environmentalDrift($before, $after));
     }

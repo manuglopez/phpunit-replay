@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Manuglopez\Replay\Cache;
 
+use Manuglopez\Replay\Analysis\StaticEdges;
 use Manuglopez\Replay\Hermeticity\Quarantine;
 use Manuglopez\Replay\Record\RunPartial;
 
@@ -25,11 +26,17 @@ final class GraphUpdater
         7 => 'fail', 8 => 'fail',
     ];
 
+    /**
+     * `$staticEdges` is the `static_declaration_edges` opt-in (SPEC.md §4.3.1): null — the
+     * default, and every existing caller — leaves {@see self::apply()} recording exactly
+     * the edges the coverage driver reported, byte for byte.
+     */
     public function __construct(
         private readonly Graph $graph,
         private readonly string $projectRoot,
         private readonly ContentKey $contentKey,
         private readonly ?Quarantine $quarantine = null,
+        private readonly ?StaticEdges $staticEdges = null,
     ) {
     }
 
@@ -73,6 +80,14 @@ final class GraphUpdater
 
             foreach ($partial->edges as $sources) {
                 $edgesCount += count($sources);
+            }
+
+            // One hop of name-resolution edges for what this run's tests can never get from
+            // coverage (Analysis\StaticEdges). Must happen here, before mergeResults() below,
+            // because that is where each touched file's content key is computed from its (by
+            // then final) dependency list.
+            if ($this->staticEdges !== null) {
+                $edgesCount += $this->staticEdges->expand($this->graph, self::behaviouralEdges($partial, $executed));
             }
         }
 
@@ -230,6 +245,33 @@ final class GraphUpdater
         }
 
         $this->graph->setNotCacheable(array_values(array_unique([...$kept, ...$partial->notCacheable])));
+    }
+
+    /**
+     * This run's coverage-derived edges, with an entry for every test that executed —
+     * `[]` for one whose coverage reported no source file at all.
+     *
+     * `Analysis\StaticEdges::expand()` needs both halves of that. It must not read the hop
+     * sources off the graph (it would follow static edges from earlier passes and grow the
+     * graph pass after pass), and it must still be handed the tests with no behavioural edge:
+     * `Record\Recorder::endTest()` only creates `perTestFiles[$test]` inside its loop over the
+     * files coverage reported, so a test whose coverage saw nothing has no key in `edges.json`
+     * — which is precisely the case static edges exist for (a `<source><exclude>` over the
+     * test directory, or any `--coverage-*` report, produces it). Passing
+     * `array_keys($partial->edges)` skipped exactly those tests.
+     *
+     * @param list<string> $executed project-relative test files
+     * @return array<string, list<string>>
+     */
+    private static function behaviouralEdges(RunPartial $partial, array $executed): array
+    {
+        $out = array_fill_keys($executed, []);
+
+        foreach ($partial->edges as $testFile => $sources) {
+            $out[$testFile] = $sources;
+        }
+
+        return $out;
     }
 
     /** @return list<string> */

@@ -11,6 +11,7 @@ use Manuglopez\Replay\Config;
 use Manuglopez\Replay\Console\ExplainFormatter;
 use Manuglopez\Replay\Console\Runner\ProjectLocator;
 use Manuglopez\Replay\Laravel\LaravelIntegration;
+use Manuglopez\Replay\Select\ResiduePatterns;
 use Manuglopez\Replay\Select\RunList;
 use Manuglopez\Replay\Select\Selector;
 use Manuglopez\Replay\Select\TestPaths;
@@ -72,6 +73,13 @@ final class ExplainCommand extends Command
         /** @var string $path */
         $path = $input->getArgument('path');
         $rel = self::relativize($root, $cwd, $path);
+
+        // SPEC.md §4.3.1: the same conservative watch fallback Select\RunListBuilder adds on
+        // a real pass, through the same object — `explain` has to show the plan a real run
+        // would produce, not a rosier one.
+        if ($config->staticDeclarationEdges) {
+            $watch->add((new ResiduePatterns($graph, $testPaths))->for([$rel]));
+        }
 
         $extraRules = LaravelIntegration::rulesFor($graph, $root, $config);
         $selection = Selector::default($graph, $testPaths, $watch, $root, $extraRules)->affected([$rel]);

@@ -73,7 +73,11 @@ final class PullCommand extends Command
 
                 $drift = Fingerprint::structuralDrift(
                     $graph->fingerprint(),
-                    Fingerprint::compute($root, DriverDetector::loadedExtension() ?? 'none'),
+                    // The flag must be passed: Fingerprint only carries the
+                    // `static_declaration_edges` key while it is on, and detectDrift()
+                    // reads absent-vs-present as drift — so omitting it here made every
+                    // `pull` on a flag-on project reject its own remote baseline.
+                    Fingerprint::compute($root, DriverDetector::loadedExtension() ?? 'none', $config->staticDeclarationEdges),
                 );
 
                 if ($drift !== []) {

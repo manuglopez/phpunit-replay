@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Manuglopez\Replay\Cache;
 
+use Manuglopez\Replay\Analysis\DeclarationScanner;
 use Manuglopez\Replay\Coverage\CoverageFormat;
 use Symfony\Component\Process\Exception\ExceptionInterface;
 use Symfony\Component\Process\Process;
@@ -34,6 +35,32 @@ use Symfony\Component\Process\Process;
  * structural bucket, `canonicalStructural()` feeds it into every content key, and bumping it
  * therefore discards every graph on every machine. It describes the shape of this array, and
  * only moves when that shape does.
+ *
+ * ## `static_declaration_edges`
+ *
+ * The `static_declaration_edges` config flag changes what an edge *means*
+ * (`Analysis\StaticEdges`), so a graph recorded with it on and a graph recorded with it off
+ * must never be mixed: the edges are not comparable, and neither are the keys computed from
+ * them. That makes it `structural`, not `environmental` — `environmental` only throws away
+ * the recorded *results* and keeps the edges standing, which is precisely the wrong half.
+ *
+ * It is added to the bucket ONLY when the flag is on. Adding it unconditionally, even as
+ * `false`, would change `canonicalStructural()` for every project on earth and invalidate
+ * every existing cache on every machine the moment this version shipped — the same blast
+ * radius as bumping `SCHEMA_VERSION`, for a feature nobody asked for yet. Absent-vs-present
+ * still drifts in both directions (`detectDrift()` walks both sides), so flipping the flag
+ * discards the graph deliberately, in exactly one direction at a time.
+ *
+ * `analysis_rules` rides along with it, for the same reason and with the same scope. It is
+ * `Analysis\DeclarationScanner::RULES_VERSION`, and the argument for putting the flag here —
+ * it "changes what an edge means" — applies verbatim to a change in the classification rules.
+ * Bumping the rules version re-parses `<stateDir>/analysis/` but changes no *content* key, so
+ * without this it re-ran no test and therefore never corrected an edge the old rules got
+ * wrong: `Cache\Graph::unionEdges()` only ever grows an edge set, so a dropped edge stays
+ * dropped and an invented one stays invented, on every machine, forever. A rules bump is not
+ * a cache detail, it is a change of meaning, and it costs a fresh record — which is why it is
+ * a separate key rather than folded into the flag's value: `structuralDrift()` then names
+ * `analysis_rules` when only the rules moved, and a user who changed nothing gets told why.
  */
 final readonly class Fingerprint
 {
@@ -49,14 +76,25 @@ final readonly class Fingerprint
     ];
 
     /**
-     * @return array{structural: array<string, int|string|null>, environmental: array<string, string|null>}
+     * `$staticDeclarationEdges` has no default on purpose. It used to default to `false`, and
+     * inside one diff that omission silently disabled the structural key twice — in
+     * `PullCommand`, where the remote baseline was then rejected on every pull, and in
+     * `StatusCommand`, where the fingerprint read as drifted against itself. A caller that
+     * has not decided is a caller that must be made to.
+     *
+     * @return array{structural: array<string, bool|int|string|null>, environmental: array<string, string|null>}
      */
-    public static function compute(string $projectRoot, string $driver): array
+    public static function compute(string $projectRoot, string $driver, bool $staticDeclarationEdges): array
     {
         $structural = ['schema' => self::SCHEMA_VERSION];
 
         foreach (self::STRUCTURAL_FILES as $key => $relative) {
             $structural[$key] = self::trackedHash($projectRoot, $relative);
+        }
+
+        if ($staticDeclarationEdges) {
+            $structural['static_declaration_edges'] = true;
+            $structural['analysis_rules'] = DeclarationScanner::RULES_VERSION;
         }
 
         return [

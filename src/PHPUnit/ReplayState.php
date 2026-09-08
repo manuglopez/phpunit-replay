@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Manuglopez\Replay\PHPUnit;
 
 use LogicException;
+use Manuglopez\Replay\Analysis\FactsCache;
+use Manuglopez\Replay\Analysis\StaticEdges;
 use Manuglopez\Replay\Cache\BaselineWriter;
 use Manuglopez\Replay\Cache\ContentKey;
 use Manuglopez\Replay\Cache\Fingerprint;
@@ -98,6 +100,9 @@ final class ReplayState
 
     private static ?Quarantine $quarantine = null;
 
+    /** The `static_declaration_edges` collaborator (SPEC.md §4.3.1); null when the flag is off. */
+    private static ?StaticEdges $staticEdges = null;
+
     private static ?Git $git = null;
 
     private static string $branch = 'HEAD';
@@ -143,13 +148,24 @@ final class ReplayState
     /** @var array<string, true> classes whose method metadata has already been scanned */
     private static array $scannedForDepends = [];
 
-    public static function boot(Mode $mode, string $root, string $stateDir, string $runId, ?CoverageDriver $driver): void
+    /**
+     * `$facts` is the SPEC.md §4.3.1 opt-in, already built: with it, the Recorder only
+     * attributes coverage that landed inside a function body (Analysis\FileFacts). The
+     * wrapper hands the flag down through `PHPUNIT_REPLAY_STATIC_DECLARATION_EDGES`, because
+     * this process — and every Paratest worker under it — reads nothing but env.
+     *
+     * The caller passes the instance rather than the flag so that one process holds one
+     * cache. {@see self::bootInProcess()} needs the same one for `Analysis\StaticEdges`, and
+     * building a second here made both hash, read and parse every shared file twice, with two
+     * copies of the memo to show for it.
+     */
+    public static function boot(Mode $mode, string $root, string $stateDir, string $runId, ?CoverageDriver $driver, ?FactsCache $facts = null): void
     {
         self::$mode = $mode;
         self::$root = $root;
         self::$stateDir = $stateDir;
         self::$runId = $runId;
-        self::$recorder = $driver !== null ? new Recorder($driver) : null;
+        self::$recorder = $driver !== null ? new Recorder($driver, $facts) : null;
         self::$collector = new ResultCollector();
         self::$notCacheable = new NotCacheableCollector();
         self::$runWriter = new RunWriter($stateDir . '/runs/' . $runId, $root);
@@ -182,8 +198,15 @@ final class ReplayState
 
         $stateDir = StateDirectory::resolve($config->stateDir, $root);
         $reader = new ConfigurationReader($configuration);
-        $driver = DriverDetector::detect(SourceScope::fromProjectRoot($root, $configuration));
-        $fingerprint = Fingerprint::compute($root, $driver?->name() ?? 'none');
+        $scope = SourceScope::fromProjectRoot($root, $configuration);
+        $driver = DriverDetector::detect($scope);
+        $fingerprint = Fingerprint::compute($root, $driver?->name() ?? 'none', $config->staticDeclarationEdges);
+
+        $facts = $config->staticDeclarationEdges ? new FactsCache($stateDir, $root) : null;
+
+        if ($facts !== null) {
+            self::$staticEdges = new StaticEdges($root, $scope, $facts);
+        }
 
         $branch = $git->currentBranch();
         $persist = $branch !== null;
@@ -213,7 +236,7 @@ final class ReplayState
             $graph->setDefaultBranch($defaultBranch);
         }
 
-        self::boot($mode, $root, $stateDir, self::newRunId(), $mode === Mode::ResultsOnly ? null : $driver);
+        self::boot($mode, $root, $stateDir, self::newRunId(), $mode === Mode::ResultsOnly ? null : $driver, $facts);
 
         self::$inProcess = true;
         self::$graph = $graph;
@@ -471,7 +494,7 @@ final class ReplayState
             $partial = LaravelIntegration::augment($partial, $root);
         }
 
-        $updater = new GraphUpdater($graph, $root, new ContentKey($root), self::$quarantine);
+        $updater = new GraphUpdater($graph, $root, new ContentKey($root), self::$quarantine, self::$staticEdges);
         $applied = $updater->apply($partial, self::$branch, recordsEdges: $recordsEdges, complete: $complete);
 
         $git = self::$git ?? new Git($root);
@@ -627,6 +650,7 @@ final class ReplayState
         self::$policy = null;
         self::$reader = null;
         self::$quarantine = null;
+        self::$staticEdges = null;
         self::$git = null;
         self::$branch = 'HEAD';
         self::$head = null;
@@ -770,6 +794,7 @@ final class ReplayState
             $policy,
             $root,
             LaravelIntegration::rulesFor($graph, $root, $config),
+            $config->staticDeclarationEdges,
         ))->build($changed, $branch);
         self::$runList = self::replayAffectedFromRemote($graph, $runList, $branch, $root);
 
