@@ -282,6 +282,54 @@ k = xxh128(
 
 `k` is computed while recording and saved with each result. It serves two purposes: (a) the remote cache is indexed by `k` (`objects/<k>.json` holding the results of every test in that file), so any machine with the same contents gets the same results without needing the same `sha`; (b) quarantine detects flips: same `k`, different `s` → not hermetic.
 
+#### 4.3.1 `static_declaration_edges` (opt-in, default off)
+
+`deps` above comes from coverage attribution, and PHP executes a file's top level **exactly
+once per process**. The load-time footprint of a declaration-only file — an enum's cases, a
+constants class, an interface, a `return [...]` config or language file — is therefore
+credited to whichever test in that process loaded it first, and every other test that depends
+on it gets no edge at all. Union-on-re-record (§7.3) can never invent the missing edge,
+because it never existed.
+
+With `static_declaration_edges => true` (`phpunit-replay.php`, or the internal
+`PHPUNIT_REPLAY_STATIC_DECLARATION_EDGES=1` the wrapper passes to the PHPUnit child), `deps`
+is built from two order-independent sources instead:
+
+1. **Behavioural edges.** A coverage hit counts only when the executed line falls inside a
+   function/method/closure statement list (`Analysis\FileFacts`, nikic/php-parser, cached by
+   `ContentHash` under `<stateDir>/analysis/`). Those lines run when something *calls* them,
+   so the attribution is identical in every process and every Paratest distribution. A file
+   php-parser cannot read keeps today's Pest heuristic — "cannot classify" must never turn
+   into "no dependencies".
+2. **Static edges, one hop.** A declaration-only file becomes a dependency of a test when the
+   test's own source, or any file that is already a behavioural dependency of it, names
+   something that file declares (`Analysis\StaticEdges`, resolved names plus class-shaped
+   string literals). No second hop: the only thing it could add is a name reachable solely
+   from inside another declaration-only file.
+
+Everything neither source reaches — `lang/` and `config/` files (they declare no name), an
+unparseable file, a class whose bodies no test ever enters — is **residue**, and residue is
+covered conservatively rather than dropped: `Select\RunListBuilder` registers the changed
+path itself as a watch pattern onto every test directory (§7.2.6), so `WatchRule` selects
+everything the graph knows. That is deliberately wider than necessary (a brand-new `.php`
+file lands there too) and deliberately not `Fingerprint::structuralDrift`, which would
+discard every graph on every machine over a translation tweak.
+
+The classifier's cache lives at `<stateDir>/analysis/v<rules>/<xx>/<hash>.json`, one
+immutable entry per distinct file content (so Paratest workers can write it concurrently and
+a lost write costs one re-parse, never a wrong answer). The `v<rules>` segment is
+`DeclarationScanner::RULES_VERSION`, and it exists because a content hash answers "has this
+file changed" and never "have we changed our mind about what this file means" — bump it
+whenever the classification rules move, or every machine keeps serving the old verdict for
+unchanged files. `prune --all` clears the whole thing along with the rest of the state
+directory.
+
+The flag participates in the **structural** fingerprint (§4.5), and only when it is on: a
+graph whose edges came from coverage attribution and a graph that also carries static edges
+are not comparable, so flipping it in either direction is structural drift and forces a fresh
+record. Adding the key unconditionally would have invalidated every existing cache
+everywhere; leaving it out when off is what makes the feature shippable.
+
 ### 4.4 ContentHash (normalization)
 
 - `.php` (not `.blade.php`): `token_get_all`, drop `T_WHITESPACE`, `T_COMMENT`, `T_DOC_COMMENT`, concatenate the `text` of each token, `hash('xxh128', ...)`. If the tokenizer returns empty → hash the raw content.
@@ -293,7 +341,7 @@ k = xxh128(
 
 ### 4.5 Fingerprint
 
-- **Structural** (change → graph fully discarded, fresh record): `composer.lock`, `phpunit.xml`, `phpunit.xml.dist`, `phpunit-replay.php`, and the package's `SCHEMA_VERSION` constant. Only hashed if tracked by git.
+- **Structural** (change → graph fully discarded, fresh record): `composer.lock`, `phpunit.xml`, `phpunit.xml.dist`, `phpunit-replay.php`, and the package's `SCHEMA_VERSION` constant. Only hashed if tracked by git. Plus `static_declaration_edges: true`, present only while that flag is on (§4.3.1).
 - **Environmental** (change → results discarded, edges kept): PHP `MAJOR.MINOR` version, driver, `PHP_OS_FAMILY`.
 - Checked at the start **and at the end** of the run: if it changed during execution, the edges recorded in that run are discarded.
 
@@ -522,6 +570,7 @@ return [
     'quarantine_release_after' => 20,
     'laravel' => 'auto',                       // auto|on|off
     'junit_merge' => true,
+    'static_declaration_edges' => false,       // §4.3.1: order-independent edges (opt-in, changes every content key)
 ];
 ```
 
@@ -570,7 +619,7 @@ tests/Feature/BillingTest.php   ← Watch    config/billing/plans.php (config/bi
 tests/Unit/PricingTest.php      ← TestFile tests/Unit/PricingTest.php
 ```
 
-Environment variables: `PHPUNIT_REPLAY=1` is equivalent to `run`; `PHPUNIT_REPLAY=0` disables it even with the extension registered; `PHPUNIT_REPLAY_MODE`, `PHPUNIT_REPLAY_STATE_DIR`, `PHPUNIT_REPLAY_REMOTE`, `PHPUNIT_REPLAY_RUN_ID` are internal wrapper→extension variables.
+Environment variables: `PHPUNIT_REPLAY=1` is equivalent to `run`; `PHPUNIT_REPLAY=0` disables it even with the extension registered; `PHPUNIT_REPLAY_MODE`, `PHPUNIT_REPLAY_STATE_DIR`, `PHPUNIT_REPLAY_REMOTE`, `PHPUNIT_REPLAY_RUN_ID`, `PHPUNIT_REPLAY_STATIC_DECLARATION_EDGES` (`1`/`0`, §4.3.1) are internal wrapper→extension variables.
 
 ---
 

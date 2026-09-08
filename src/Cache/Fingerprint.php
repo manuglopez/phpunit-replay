@@ -34,6 +34,21 @@ use Symfony\Component\Process\Process;
  * structural bucket, `canonicalStructural()` feeds it into every content key, and bumping it
  * therefore discards every graph on every machine. It describes the shape of this array, and
  * only moves when that shape does.
+ *
+ * ## `static_declaration_edges`
+ *
+ * The `static_declaration_edges` config flag changes what an edge *means*
+ * (`Analysis\StaticEdges`), so a graph recorded with it on and a graph recorded with it off
+ * must never be mixed: the edges are not comparable, and neither are the keys computed from
+ * them. That makes it `structural`, not `environmental` — `environmental` only throws away
+ * the recorded *results* and keeps the edges standing, which is precisely the wrong half.
+ *
+ * It is added to the bucket ONLY when the flag is on. Adding it unconditionally, even as
+ * `false`, would change `canonicalStructural()` for every project on earth and invalidate
+ * every existing cache on every machine the moment this version shipped — the same blast
+ * radius as bumping `SCHEMA_VERSION`, for a feature nobody asked for yet. Absent-vs-present
+ * still drifts in both directions (`detectDrift()` walks both sides), so flipping the flag
+ * discards the graph deliberately, in exactly one direction at a time.
  */
 final readonly class Fingerprint
 {
@@ -49,14 +64,18 @@ final readonly class Fingerprint
     ];
 
     /**
-     * @return array{structural: array<string, int|string|null>, environmental: array<string, string|null>}
+     * @return array{structural: array<string, bool|int|string|null>, environmental: array<string, string|null>}
      */
-    public static function compute(string $projectRoot, string $driver): array
+    public static function compute(string $projectRoot, string $driver, bool $staticDeclarationEdges = false): array
     {
         $structural = ['schema' => self::SCHEMA_VERSION];
 
         foreach (self::STRUCTURAL_FILES as $key => $relative) {
             $structural[$key] = self::trackedHash($projectRoot, $relative);
+        }
+
+        if ($staticDeclarationEdges) {
+            $structural['static_declaration_edges'] = true;
         }
 
         return [

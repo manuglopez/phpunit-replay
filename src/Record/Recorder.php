@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Manuglopez\Replay\Record;
 
+use Manuglopez\Replay\Analysis\FactsCache;
+
 /**
  * Derived from Pest (© Nuno Maduro, MIT). @see https://github.com/pestphp/pest/blob/17d709e/src/Plugins/Tia/Recorder.php
  *
@@ -21,8 +23,15 @@ final class Recorder
     /** @var array<string, array<string, true>> */
     private array $perTestTables = [];
 
-    public function __construct(private readonly CoverageDriver $driver)
-    {
+    /**
+     * `$facts` is the `static_declaration_edges` opt-in (SPEC.md §9). When null — the
+     * default, and every existing caller — {@see self::filesWithExecutedLines()} behaves
+     * exactly as it always has.
+     */
+    public function __construct(
+        private readonly CoverageDriver $driver,
+        private readonly ?FactsCache $facts = null,
+    ) {
     }
 
     /**
@@ -122,10 +131,27 @@ final class Recorder
     }
 
     /**
-     * File-level reduction heuristic, ported from Pest: a file counts as executed if it
-     * has a line with hits > 0, except when the driver also reports unexecuted lines and
-     * the only executed line is the highest-numbered one (a file that was merely
-     * autoloaded, not actually exercised).
+     * File-level reduction: which of the files the driver reported count as dependencies of
+     * the test that just ran.
+     *
+     * Two strategies, and which one applies is per-file, not per-run:
+     *
+     *  - **Behavioural** (`static_declaration_edges` on, and the file parses): the file
+     *    counts only when at least one executed line falls inside a function/method/closure
+     *    body ({@see \Manuglopez\Replay\Analysis\FileFacts::coversAnyBodyLine()}). Those
+     *    lines run when something *calls* them, so the attribution is the same in every
+     *    process and every worker distribution. A file whose only coverage is its own
+     *    top level was merely loaded, and PHP loads it once per process — that credit
+     *    belongs to no test in particular, and `Analysis\StaticEdges` replaces it with a
+     *    name-resolution edge instead.
+     *  - **The Pest heuristic** (the default, and the fallback for any file php-parser
+     *    cannot read): a file counts if it has a line with hits > 0, except when the driver
+     *    also reports unexecuted lines and the only executed line is the highest-numbered
+     *    one. The behavioural test supersedes it wherever it applies, but it is kept — not
+     *    deleted — because "unparseable" must not collapse into "no dependencies". A syntax
+     *    error in one file silently dropping every edge it has is the exact false green
+     *    this whole mechanism exists to remove, so an unclassifiable file keeps the
+     *    behaviour it has today.
      *
      * @param array<string, array<int, int>> $data
      * @return list<string>
@@ -145,6 +171,18 @@ final class Recorder
 
             if ($covered === []) {
                 continue;
+            }
+
+            if ($this->facts !== null) {
+                $facts = $this->facts->for($file);
+
+                if ($facts->parsed) {
+                    if ($facts->coversAnyBodyLine($covered)) {
+                        $out[] = $file;
+                    }
+
+                    continue;
+                }
             }
 
             $lineKeys = array_keys($lines);

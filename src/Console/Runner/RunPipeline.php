@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Manuglopez\Replay\Console\Runner;
 
 use FilesystemIterator;
+use Manuglopez\Replay\Analysis\FactsCache;
+use Manuglopez\Replay\Analysis\StaticEdges;
 use Manuglopez\Replay\Cache\BaselineWriter;
 use Manuglopez\Replay\Cache\ContentHash;
 use Manuglopez\Replay\Cache\ContentKey;
@@ -35,6 +37,7 @@ use Manuglopez\Replay\PHPUnit\ConfigurationReader;
 use Manuglopez\Replay\PHPUnit\ConfigurationWriter;
 use Manuglopez\Replay\Record\DriverDetector;
 use Manuglopez\Replay\Record\RunPartial;
+use Manuglopez\Replay\Record\SourceScope;
 use Manuglopez\Replay\Report\CoverageMerger;
 use Manuglopez\Replay\Report\DryRunSummary;
 use Manuglopez\Replay\Report\JUnitMerger;
@@ -115,6 +118,12 @@ final class RunPipeline
 
     /** @var array<string, mixed> */
     private array $fingerprint = [];
+
+    /**
+     * The `static_declaration_edges` collaborator (SPEC.md §9), built once per pass and
+     * left null when the flag is off — which is what keeps the graph byte-identical.
+     */
+    private ?StaticEdges $staticEdges = null;
 
     private ?Graph $graph = null;
 
@@ -272,7 +281,15 @@ final class RunPipeline
             $this->watch->add($config->watch);
         }
 
-        $this->fingerprint = Fingerprint::compute($root, $this->driverName);
+        $this->fingerprint = Fingerprint::compute($root, $this->driverName, $config->staticDeclarationEdges);
+
+        if ($config->staticDeclarationEdges) {
+            $this->staticEdges = new StaticEdges(
+                $root,
+                SourceScope::fromProjectRoot($root, $configuration),
+                new FactsCache($this->stateDir, $root),
+            );
+        }
         $this->openRemote($request, $root, $config);
 
         Warnings::debug(sprintf(
@@ -526,7 +543,7 @@ final class RunPipeline
                     $partial = LaravelIntegration::augment($partial, $root);
                 }
 
-                $updater = new GraphUpdater($this->graph, $root, new ContentKey($root), $this->quarantine);
+                $updater = new GraphUpdater($this->graph, $root, new ContentKey($root), $this->quarantine, $this->staticEdges);
                 $updater->apply($partial, $this->branch, recordsEdges: false, complete: false);
                 $this->store->save($this->graph);
                 $this->quarantine->save($this->stateDir);
@@ -593,7 +610,7 @@ final class RunPipeline
 
         $complete = ! (bool) ($partial->meta['truncated'] ?? false) && in_array($exitCode, [0, 1], true);
 
-        $updater = new GraphUpdater($graph, $root, new ContentKey($root), $this->quarantine);
+        $updater = new GraphUpdater($graph, $root, new ContentKey($root), $this->quarantine, $this->staticEdges);
         $applied = $updater->apply($partial, $this->branch, recordsEdges: true, complete: $complete);
         $this->quarantine->save($this->stateDir);
 
@@ -691,7 +708,7 @@ final class RunPipeline
 
         // No quarantine passed here: divergences are detected explicitly below (reason
         // 'divergence', not the generic 'flip' GraphUpdater's own detection would use).
-        $updater = new GraphUpdater($graph, $root, new ContentKey($root));
+        $updater = new GraphUpdater($graph, $root, new ContentKey($root), null, $this->staticEdges);
         $updater->apply($partial, $this->branch, recordsEdges: $recordsEdges, complete: $complete);
 
         if ($this->fingerprintDrifted($partial)) {
@@ -872,7 +889,7 @@ final class RunPipeline
         if ($runList === []) {
             if ($changed !== []) {
                 if ($this->persist && (! $this->ciMode || $request->allowCiBaseline)) {
-                    (new GraphUpdater($graph, $root, new ContentKey($root), $this->quarantine))
+                    (new GraphUpdater($graph, $root, new ContentKey($root), $this->quarantine, $this->staticEdges))
                         ->finalizeBaseline($this->branch, $this->head, $this->git->branchNames());
                 }
 
@@ -955,7 +972,7 @@ final class RunPipeline
 
         $complete = ! (bool) ($partial->meta['truncated'] ?? false) && in_array($exitCode, [0, 1], true);
 
-        $updater = new GraphUpdater($graph, $root, new ContentKey($root), $this->quarantine);
+        $updater = new GraphUpdater($graph, $root, new ContentKey($root), $this->quarantine, $this->staticEdges);
         $applied = $updater->apply($partial, $this->branch, recordsEdges: $recordsEdges, complete: $complete);
         $this->quarantine->save($this->stateDir);
 
@@ -1038,6 +1055,7 @@ final class RunPipeline
             new Policy($graph, $this->config, $this->quarantine, $root),
             $root,
             LaravelIntegration::rulesFor($graph, $root, $this->config),
+            $this->config->staticDeclarationEdges,
         );
 
         $list = $builder->build($changed, $branch);
@@ -1597,6 +1615,13 @@ final class RunPipeline
             'PHPUNIT_REPLAY_RUN_ID' => $runId,
             'PHPUNIT_REPLAY_ROOT' => $this->root ?? $this->request->cwd,
         ];
+
+        // The extension in the child process (and in every Paratest worker under it) has
+        // to filter behavioural edges and compute the same structural fingerprint as this
+        // wrapper, and it only ever reads env — Config::mergeEnv().
+        if ($this->config->staticDeclarationEdges) {
+            $env['PHPUNIT_REPLAY_STATIC_DECLARATION_EDGES'] = '1';
+        }
 
         if (Warnings::debugEnabled()) {
             $env['PHPUNIT_REPLAY_DEBUG'] = '1';

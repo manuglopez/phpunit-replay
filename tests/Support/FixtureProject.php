@@ -53,6 +53,17 @@ final class FixtureProject
     }
 
     /**
+     * Same, for tests/Fixtures/Projects/declarations: four test files over two
+     * declaration-only source files (an enum and a constants class), one file with real
+     * method bodies, and a `lang/` style `return [...]` file nothing loads — the fixture
+     * for SPEC.md §9 `static_declaration_edges`.
+     */
+    public static function declarations(?string $root = null): self
+    {
+        return self::fromProject('declarations', $root);
+    }
+
+    /**
      * Same, for tests/Fixtures/Projects/inprocess: the plain fixture whose test classes
      * extend a base `App\Tests\TestCase` carrying the `Replayable` trait, with the
      * extension registered in its own phpunit.xml (SPEC.md §3.2).

@@ -65,9 +65,16 @@ final class PruneCommand extends Command
                 @unlink(rtrim($stateDir, '/') . '/' . $file);
             }
 
-            self::removeRunsDirectory($stateDir);
+            self::removeDirectory($stateDir, 'runs');
 
-            $output->writeln('removed: graph.json, flaky.json, last-run.json, divergence.json, runs/');
+            // `analysis/` is the static classifier's cache (SPEC §4.3.1). Its entries are
+            // content-addressed and therefore never wrong, only ever stale, so nothing else
+            // has a reason to clear them — but one entry is written per distinct file content
+            // ever seen, and `--all` is the one command whose job is an empty state
+            // directory.
+            self::removeDirectory($stateDir, 'analysis');
+
+            $output->writeln('removed: graph.json, flaky.json, last-run.json, divergence.json, runs/, analysis/');
 
             return Command::SUCCESS;
         }
@@ -254,9 +261,9 @@ final class PruneCommand extends Command
         return array_keys($out);
     }
 
-    private static function removeRunsDirectory(string $stateDir): void
+    private static function removeDirectory(string $stateDir, string $name): void
     {
-        $dir = rtrim($stateDir, '/') . '/runs';
+        $dir = rtrim($stateDir, '/') . '/' . $name;
 
         if (! is_dir($dir)) {
             return;

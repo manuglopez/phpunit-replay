@@ -54,6 +54,7 @@ final readonly class Config
         public int $remoteTimeout = 60,
         public array $baselineBranches = [],
         public bool $laravelParallelIsolation = true,
+        public bool $staticDeclarationEdges = false,
     ) {
     }
 
@@ -77,6 +78,7 @@ final readonly class Config
             remoteTimeout: 60,
             baselineBranches: [],
             laravelParallelIsolation: true,
+            staticDeclarationEdges: false,
         );
     }
 
@@ -109,6 +111,7 @@ final readonly class Config
             remoteTimeout: self::intOrDefault($values['remote_timeout'] ?? null, $defaults->remoteTimeout),
             baselineBranches: self::stringListOrDefault($values['baseline_branches'] ?? null),
             laravelParallelIsolation: self::boolOrDefault($values['laravel_parallel_isolation'] ?? null, $defaults->laravelParallelIsolation),
+            staticDeclarationEdges: self::boolOrDefault($values['static_declaration_edges'] ?? null, $defaults->staticDeclarationEdges),
         );
     }
 
@@ -154,6 +157,7 @@ final readonly class Config
             remoteTimeout: $defaults->remoteTimeout,
             baselineBranches: $defaults->baselineBranches,
             laravelParallelIsolation: $defaults->laravelParallelIsolation,
+            staticDeclarationEdges: $defaults->staticDeclarationEdges,
         );
     }
 
@@ -165,6 +169,12 @@ final readonly class Config
      * uses the internal `record-subset` / `results-only` values here, not just the four modes
      * documented for the extension `<parameter>`. Anything absent, empty, or invalid keeps the
      * current value.
+     *
+     * `PHPUNIT_REPLAY_STATIC_DECLARATION_EDGES` (`1`/`0`) is not a user-facing convenience:
+     * the wrapper sets it on the PHPUnit child process it spawns, because the extension
+     * running in that child (and in every Paratest worker) has to filter behavioural edges
+     * and compute the same fingerprint as the wrapper that started it
+     * ({@see \Manuglopez\Replay\Console\Runner\RunPipeline::baseEnv()}).
      *
      * @param array<array-key, mixed> $server
      */
@@ -178,6 +188,7 @@ final readonly class Config
             'mode' => self::envModeOrDefault($server, $this->mode),
             'remotePush' => self::envEnumOrDefault($server, 'PHPUNIT_REPLAY_REMOTE_PUSH', self::REMOTE_PUSH_MODES, $this->remotePush),
             'baselineBranches' => self::envBranchListOrDefault($server, 'PHPUNIT_REPLAY_BASELINE_BRANCHES', $this->baselineBranches),
+            'staticDeclarationEdges' => self::envBoolOrDefault($server, 'PHPUNIT_REPLAY_STATIC_DECLARATION_EDGES', $this->staticDeclarationEdges),
         ]);
     }
 
@@ -208,6 +219,7 @@ final readonly class Config
      *     remoteTimeout?: int,
      *     baselineBranches?: list<string>,
      *     laravelParallelIsolation?: bool,
+     *     staticDeclarationEdges?: bool,
      * } $overrides
      */
     public function with(array $overrides): self
@@ -230,6 +242,7 @@ final readonly class Config
             remoteTimeout: array_key_exists('remoteTimeout', $overrides) ? $overrides['remoteTimeout'] : $this->remoteTimeout,
             baselineBranches: array_key_exists('baselineBranches', $overrides) ? $overrides['baselineBranches'] : $this->baselineBranches,
             laravelParallelIsolation: array_key_exists('laravelParallelIsolation', $overrides) ? $overrides['laravelParallelIsolation'] : $this->laravelParallelIsolation,
+            staticDeclarationEdges: array_key_exists('staticDeclarationEdges', $overrides) ? $overrides['staticDeclarationEdges'] : $this->staticDeclarationEdges,
         );
     }
 
@@ -329,6 +342,25 @@ final readonly class Config
         $masked = preg_replace('#(://[^/@\s:]+):[^/@\s]*@#', '$1:***@', $remote);
 
         return is_string($masked) ? $masked : $remote;
+    }
+
+    /**
+     * `1` and `0` only — deliberately not `true`/`yes`/`on`. Every other boolean this
+     * package reads from the environment (`PHPUNIT_REPLAY_DEBUG`, `PHPUNIT_REPLAY=0`,
+     * `PHPUNIT_REPLAY_KEEP_RUN`) is already an exact `'1'` comparison, and a flag that
+     * silently ignores `TRUE` is better than one that silently accepts half a spelling.
+     *
+     * @param array<array-key, mixed> $server
+     */
+    private static function envBoolOrDefault(array $server, string $key, bool $default): bool
+    {
+        $value = $server[$key] ?? null;
+
+        return match ($value) {
+            '1' => true,
+            '0' => false,
+            default => $default,
+        };
     }
 
     /**

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Manuglopez\Replay\Cache;
 
+use Manuglopez\Replay\Analysis\StaticEdges;
 use Manuglopez\Replay\Hermeticity\Quarantine;
 use Manuglopez\Replay\Record\RunPartial;
 
@@ -25,11 +26,17 @@ final class GraphUpdater
         7 => 'fail', 8 => 'fail',
     ];
 
+    /**
+     * `$staticEdges` is the `static_declaration_edges` opt-in (SPEC.md §9): null — the
+     * default, and every existing caller — leaves {@see self::apply()} recording exactly
+     * the edges the coverage driver reported, byte for byte.
+     */
     public function __construct(
         private readonly Graph $graph,
         private readonly string $projectRoot,
         private readonly ContentKey $contentKey,
         private readonly ?Quarantine $quarantine = null,
+        private readonly ?StaticEdges $staticEdges = null,
     ) {
     }
 
@@ -73,6 +80,14 @@ final class GraphUpdater
 
             foreach ($partial->edges as $sources) {
                 $edgesCount += count($sources);
+            }
+
+            // One hop of name-resolution edges for the declaration-only files this run's
+            // tests can never get from coverage (Analysis\StaticEdges). Must happen here,
+            // before mergeResults() below, because that is where each touched file's
+            // content key is computed from its (by then final) dependency list.
+            if ($this->staticEdges !== null) {
+                $edgesCount += $this->staticEdges->expand($this->graph, array_keys($partial->edges));
             }
         }
 

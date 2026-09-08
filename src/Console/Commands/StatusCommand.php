@@ -54,7 +54,10 @@ final class StatusCommand extends Command
         };
 
         $framework = self::detectFramework($root);
-        $currentFingerprint = Fingerprint::compute($root, $loaded ?? 'none');
+        // Same reason as PullCommand: without the flag, StatusReport::fingerprintLine()
+        // diffs a fingerprint that never carries the key against a stored one that does,
+        // and prints a permanent phantom "(drift)".
+        $currentFingerprint = Fingerprint::compute($root, $loaded ?? 'none', $config->staticDeclarationEdges);
         $remoteLine = self::remoteLine($config, $stateDir);
 
         $quarantine = Quarantine::load($stateDir);
