@@ -72,9 +72,9 @@ final class StaticEdgesTest extends TestCase
         // declares no name at all, so nothing can ever reference it.
         self::assertSame(
             [
-                'App\Decision' => ['src/Decision.php'],
-                'App\Limits' => ['src/Limits.php'],
-                'App\Policy' => ['src/Policy.php'],
+                'app\decision' => ['src/Decision.php'],
+                'app\limits' => ['src/Limits.php'],
+                'app\policy' => ['src/Policy.php'],
             ],
             $this->staticEdges()->index(),
         );
@@ -231,10 +231,14 @@ final class StaticEdgesTest extends TestCase
     }
 
     #[Test]
-    public function a_declaration_only_test_file_is_still_a_hop_source(): void
+    public function a_test_file_is_a_hop_source_whatever_shape_it_has(): void
     {
-        // A stub test whose only method has an empty body classifies as declaration-only,
-        // and must not therefore stop being the hop source for its own test.
+        // This used to claim the stub below "classifies as declaration-only", which is not
+        // true and cannot be: an empty concrete `{}` counts as a body
+        // (Analysis\FactsVisitor::recordBody()), so no file with a runnable test method in
+        // it is ever declaration-only, and the test proved nothing about the hop. What it
+        // does establish is the `$anyShape` half of `collect()`: the test's OWN file reaches
+        // what it names without the shape of anything being consulted.
         $this->write('tests/StubTest.php', <<<'PHP'
             <?php
             namespace App\Tests;
@@ -243,6 +247,10 @@ final class StaticEdgesTest extends TestCase
                 public function test__construct() {}
             }
             PHP);
+
+        $facts = (new FactsCache($this->stateDir, $this->root))->forRelative('tests/StubTest.php');
+        self::assertSame([[5, 5]], $facts->bodies, 'an empty concrete body is a body');
+        self::assertFalse($facts->declarationOnly());
 
         $graph = new Graph($this->root);
         $graph->markKnownTestFiles([$this->root . '/tests/StubTest.php']);
@@ -414,7 +422,7 @@ final class StaticEdgesTest extends TestCase
             interface Published {}
             PHP);
 
-        self::assertArrayHasKey('Lang\Vendor\Published', $this->staticEdges()->index());
+        self::assertArrayHasKey('lang\vendor\published', $this->staticEdges()->index());
     }
 
     #[Test]
@@ -427,7 +435,7 @@ final class StaticEdgesTest extends TestCase
             interface Marker {}
             PHP);
 
-        self::assertArrayNotHasKey('Acme\Marker', $this->staticEdges()->index());
+        self::assertArrayNotHasKey('acme\marker', $this->staticEdges()->index());
     }
 
     #[Test]
@@ -439,7 +447,133 @@ final class StaticEdgesTest extends TestCase
             interface Marker {}
             PHP);
 
-        self::assertArrayNotHasKey('Node\Marker', $this->staticEdges()->index());
+        self::assertArrayNotHasKey('node\marker', $this->staticEdges()->index());
+    }
+
+    // -- index(): names match the way PHP matches them --------------------------
+
+    #[Test]
+    public function a_differently_cased_reference_still_reaches_the_declaring_file(): void
+    {
+        // PHP resolves class names case-insensitively over ASCII; the index was byte-exact.
+        // `use App\Models\user;` then `user::find(1)` gives the reference `App\Models\user`
+        // — NameContext returns the FQ name as written — against a declaration indexed as
+        // `App\Decision`: no match, no edge, and no diagnostic to say so.
+        $this->write('tests/CasedTest.php', <<<'PHP'
+            <?php
+            namespace App\Tests;
+            use App\decision;
+            final class CasedTest extends \PHPUnit\Framework\TestCase {
+                public function testCase(): void { self::assertNotNull(decision::Approved); }
+            }
+            PHP);
+
+        $graph = new Graph($this->root);
+        $graph->markKnownTestFiles([$this->root . '/tests/CasedTest.php']);
+
+        $this->staticEdges()->expand($graph, ['tests/CasedTest.php' => []]);
+
+        self::assertContains('src/Decision.php', $graph->dependenciesOf('tests/CasedTest.php'));
+    }
+
+    #[Test]
+    public function a_differently_cased_namespace_segment_still_matches(): void
+    {
+        $this->write('tests/SegmentTest.php', <<<'PHP'
+            <?php
+            namespace App\Tests;
+            final class SegmentTest extends \PHPUnit\Framework\TestCase {
+                public function testSegment(): void { self::assertTrue(class_exists(\app\Limits::class)); }
+            }
+            PHP);
+
+        $graph = new Graph($this->root);
+        $graph->markKnownTestFiles([$this->root . '/tests/SegmentTest.php']);
+
+        $this->staticEdges()->expand($graph, ['tests/SegmentTest.php' => []]);
+
+        self::assertContains('src/Limits.php', $graph->dependenciesOf('tests/SegmentTest.php'));
+    }
+
+    #[Test]
+    public function a_differently_cased_class_shaped_string_still_matches(): void
+    {
+        $this->write('tests/StringTest.php', <<<'PHP'
+            <?php
+            namespace App\Tests;
+            final class StringTest extends \PHPUnit\Framework\TestCase {
+                public function testString(): void { self::assertTrue(class_exists('app\Limits')); }
+            }
+            PHP);
+
+        $graph = new Graph($this->root);
+        $graph->markKnownTestFiles([$this->root . '/tests/StringTest.php']);
+
+        $this->staticEdges()->expand($graph, ['tests/StringTest.php' => []]);
+
+        self::assertContains('src/Limits.php', $graph->dependenciesOf('tests/StringTest.php'));
+    }
+
+    // -- index(): the walk survives the filesystem ------------------------------
+
+    #[Test]
+    public function a_directory_it_cannot_open_does_not_abort_the_pass(): void
+    {
+        if (function_exists('posix_geteuid') && posix_geteuid() === 0) {
+            self::markTestSkipped('root ignores the permission bits this test depends on');
+        }
+
+        // `is_dir()` accepts a mode-000 directory; `new RecursiveDirectoryIterator()` throws
+        // UnexpectedValueException for it, and CATCH_GET_CHILD guards only getChildren().
+        // One root-owned directory in a CI image used to abort the whole pass, since nothing
+        // between candidateFiles() and Cache\GraphUpdater::apply() catches it.
+        @mkdir($this->root . '/blocked', 0o755, true);
+        $this->write('blocked/Hidden.php', "<?php\nnamespace App;\nenum Hidden { case A; }\n");
+        @mkdir($this->root . '/src/locked', 0o755, true);
+        $this->write('src/locked/Buried.php', "<?php\nnamespace App;\nenum Buried { case A; }\n");
+
+        self::assertTrue(chmod($this->root . '/blocked', 0o000));
+        self::assertTrue(chmod($this->root . '/src/locked', 0o000));
+
+        try {
+            if (is_readable($this->root . '/blocked')) {
+                self::markTestSkipped('the filesystem did not honour mode 000');
+            }
+
+            $edges = new StaticEdges(
+                $this->root,
+                new SourceScope([$this->root . '/blocked', $this->root . '/src'], []),
+                new FactsCache($this->stateDir, $this->root),
+            );
+
+            self::assertSame(['src/Decision.php'], $edges->index()['app\decision'] ?? []);
+            self::assertArrayNotHasKey('app\hidden', $edges->index());
+            self::assertArrayNotHasKey('app\buried', $edges->index());
+        } finally {
+            chmod($this->root . '/blocked', 0o755);
+            chmod($this->root . '/src/locked', 0o755);
+        }
+    }
+
+    #[Test]
+    public function more_candidates_than_the_threshold_still_produces_an_index(): void
+    {
+        // The threshold used to disable the index: over it, index() warned and returned [].
+        // That is one-sided — `Record\Recorder` in the PHPUnit child has already dropped
+        // every load-time-only edge by then, so the flag became a pure edge remover with
+        // nothing added back, and a file that got static edges on an earlier pass still
+        // holds a fileId, so the residue net does not fire either.
+        $edges = new StaticEdges(
+            $this->root,
+            new SourceScope([$this->root . '/src', $this->root . '/config'], []),
+            new FactsCache($this->stateDir, $this->root),
+            1,
+        );
+
+        self::assertSame(
+            ['app\decision' => ['src/Decision.php'], 'app\limits' => ['src/Limits.php'], 'app\policy' => ['src/Policy.php']],
+            $edges->index(),
+        );
     }
 
     private function staticEdges(): StaticEdges

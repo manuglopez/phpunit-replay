@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Manuglopez\Replay\PHPUnit;
 
+use Manuglopez\Replay\Analysis\FactsCache;
 use Manuglopez\Replay\Cache\Fingerprint;
 use Manuglopez\Replay\Cache\StateDirectory;
 use Manuglopez\Replay\Config;
@@ -91,7 +92,7 @@ final class ReplayExtension implements Extension
         $stateDir = StateDirectory::resolve(self::env('PHPUNIT_REPLAY_STATE_DIR'), $root);
         $runId = self::env('PHPUNIT_REPLAY_RUN_ID') ?? (date('Ymd-His') . '-' . bin2hex(random_bytes(3)));
         $debug = self::env('PHPUNIT_REPLAY_DEBUG') === '1';
-        // SPEC.md §9 `static_declaration_edges`. Only the wrapper knows the config file, so
+        // SPEC.md §4.3.1 `static_declaration_edges`. Only the wrapper knows the config file, so
         // it hands the flag down as env (Console\Runner\RunPipeline::baseEnv()); this
         // process must agree with it on both the edge semantics and the fingerprint, or
         // every run would look like structural drift to the wrapper that started it.
@@ -119,7 +120,7 @@ final class ReplayExtension implements Extension
             }
         }
 
-        ReplayState::boot($mode, $root, $stateDir, $runId, $driver, $staticDeclarationEdges);
+        ReplayState::boot($mode, $root, $stateDir, $runId, $driver, $staticDeclarationEdges ? new FactsCache($stateDir, $root) : null);
 
         if ($debug) {
             fwrite(STDERR, sprintf(

@@ -12,7 +12,7 @@ use PHPUnit\Framework\Attributes\Test;
 use PHPUnit\Framework\TestCase;
 
 /**
- * SPEC.md §9 `static_declaration_edges`, end to end over
+ * SPEC.md §4.3.1 `static_declaration_edges`, end to end over
  * tests/Fixtures/Projects/declarations.
  *
  * The fixture is the `PublisherReviewDecision` shape in miniature: `src/ReviewDecision.php`
@@ -379,7 +379,9 @@ final class StaticDeclarationEdgesTest extends TestCase
         $pushed = $this->fixture->replay(['push', '--graph'], $remote);
         self::assertSame(0, $pushed['exitCode'], $pushed['stdout'] . $pushed['stderr']);
 
-        $second = $this->fixture->copyTo(TempDir::make('declarations-machine2') . '/other');
+        $machine2 = TempDir::make('declarations-machine2');
+        $this->temporaries[] = $machine2;
+        $second = $this->fixture->copyTo($machine2 . '/other');
         $this->fixtures[] = $second;
 
         $pulled = $second->replay(['pull'], $remote);
@@ -405,7 +407,7 @@ final class StaticDeclarationEdgesTest extends TestCase
 
         self::assertSame(0, $result['exitCode'], $result['stdout'] . $result['stderr']);
         self::assertStringContainsString(
-            'structural change (static_declaration_edges): the cached baseline cannot be used, recording a fresh baseline',
+            'structural change (static_declaration_edges, analysis_rules): the cached baseline cannot be used, recording a fresh baseline',
             $result['stderr'],
         );
         self::assertStringContainsString('recorded 4 tests in 4 test files', $result['stdout']);
@@ -424,7 +426,7 @@ final class StaticDeclarationEdgesTest extends TestCase
 
         self::assertSame(0, $result['exitCode'], $result['stdout'] . $result['stderr']);
         self::assertStringContainsString(
-            'structural change (static_declaration_edges): the cached baseline cannot be used, recording a fresh baseline',
+            'structural change (static_declaration_edges, analysis_rules): the cached baseline cannot be used, recording a fresh baseline',
             $result['stderr'],
         );
         self::assertStringContainsString('recorded 4 tests in 4 test files', $result['stdout']);

@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace Manuglopez\Replay\Analysis;
 
+use EmptyIterator;
 use FilesystemIterator;
+use Generator;
 use Iterator;
 use Manuglopez\Replay\Cache\Graph;
 use Manuglopez\Replay\Console\Runner\Warnings;
@@ -14,6 +16,7 @@ use RecursiveCallbackFilterIterator;
 use RecursiveDirectoryIterator;
 use RecursiveIteratorIterator;
 use SplFileInfo;
+use Throwable;
 
 /**
  * The static half of the `static_declaration_edges` feature: the edges a *name* justifies,
@@ -51,6 +54,9 @@ use SplFileInfo;
  * explicitly also makes the result independent of whether the coverage scope happens to
  * include the test directory.
  *
+ * Names are matched case-insensitively over ASCII, because that is how PHP resolves a class
+ * name — see {@see self::fold()}.
+ *
  * ## Why only one hop, and why provenance decides it
  *
  * The hop sources are the dependencies *this run's coverage* reported, never the graph's
@@ -72,9 +78,8 @@ use SplFileInfo;
  * {@see self::index()} parses every candidate source file once, then caches the result by
  * content hash ({@see FactsCache}), so only files that actually changed are re-parsed on
  * later passes. Measured cold on a 2,195-file Laravel project: 3.6s; warm: 0.5s, for an
- * 8.6 MB cache. Both the walk and the parsing stop at {@see self::MAX_FILES}; overrunning it
- * disables the index rather than the safety net, since an unindexed file simply stays unknown
- * to the graph and falls through to the conservative watch fallback.
+ * 8.6 MB cache. {@see self::MAX_FILES} is a warning threshold, not a ceiling — see the
+ * constant.
  *
  * Indexing by declaration rather than by absence of bodies widens the index from the
  * declaration-only files to every declaring file — on the same project, from 42 indexed names
@@ -84,15 +89,35 @@ use SplFileInfo;
 final class StaticEdges
 {
     /**
-     * Ceiling on files scanned while building the index. A repository large enough to hit it
-     * would spend minutes parsing on the first pass; giving up is safe (see the class
-     * docblock) and loud (a warning), where silently grinding is neither.
+     * How many candidate files it takes before the first pass is worth warning about.
+     *
+     * This used to disable the index: over the cap, `index()` warned and returned `[]`. That
+     * was not a safe default, it was a one-sided one. The behavioural half of the feature
+     * lives in the PHPUnit child (`Record\Recorder`), which has already dropped every
+     * load-time-only edge by the time this class runs in the parent — so giving up here
+     * turned the flag into a pure edge *remover* with nothing added back. Worse, it did not
+     * even degrade cleanly: a file that received static edges on an earlier pass still holds
+     * a `fileId`, so `Select\ResiduePatterns` declines to select conservatively for it, and
+     * the missing edges become a silent under-selection rather than a loud one.
+     *
+     * So the index is always built, and crossing this many files only says so out loud. The
+     * cost is bounded and one-time (the analysis cache absorbs every later pass), the flag is
+     * opt-in, and a project big enough to notice gets told before it waits.
+     *
+     * The constructor takes it as a parameter so the over-threshold path has a test that does
+     * not involve creating 25,000 files.
      */
-    private const MAX_FILES = 25_000;
+    public const MAX_FILES = 25_000;
 
     /**
      * Directory names never walked, whatever the scope says: none holds project PHP source,
      * and they are large enough to be worth not stat-ing.
+     *
+     * This is a pruning optimisation, never a filter: `Record\SourceScope::contains()` still
+     * decides whether any file that survives the walk is in scope
+     * ({@see self::candidateFiles()}), and it excludes strictly more than this list does. The
+     * only thing that would make the two disagree is a `<source><include>` pointing *inside*
+     * one of these, which is not a configuration this feature is willing to walk.
      *
      * `vendor` is NOT on this list, and must not be: Laravel publishes package translations
      * into `lang/vendor/<package>/<locale>/*.php`, which are ordinary tracked project files
@@ -106,13 +131,14 @@ final class StaticEdges
      */
     private const SKIP_DIRS = ['node_modules', '.git', '.svn', '.hg'];
 
-    /** @var array<string, list<string>>|null fully-qualified name => the files declaring it (relative) */
+    /** @var array<string, list<string>>|null folded declared name => the files declaring it (relative) */
     private ?array $index = null;
 
     public function __construct(
         private readonly string $projectRoot,
         private readonly SourceScope $scope,
         private readonly FactsCache $facts,
+        private readonly int $maxFiles = self::MAX_FILES,
     ) {
     }
 
@@ -216,7 +242,7 @@ final class StaticEdges
     private function collect(array $index, string $hopSource, array $known, array &$targets, bool $anyShape): void
     {
         foreach ($this->facts->forRelative($hopSource)->references as $name) {
-            foreach ($index[$name] ?? [] as $declaringFile) {
+            foreach ($index[self::fold($name)] ?? [] as $declaringFile) {
                 if (isset($known[$declaringFile]) || isset($targets[$declaringFile])) {
                     continue;
                 }
@@ -229,10 +255,10 @@ final class StaticEdges
     }
 
     /**
-     * Every file in scope that declares a class-like name, indexed by every fully-qualified
-     * name it declares — whether or not it also has method bodies. A file with bodies is
-     * already reachable by coverage *when something calls into it*; being in this index is
-     * what makes it reachable by the tests that only ever name it.
+     * Every file in scope that declares a class-like name, indexed by {@see self::fold()} of
+     * every fully-qualified name it declares — whether or not it also has method bodies. A
+     * file with bodies is already reachable by coverage *when something calls into it*; being
+     * in this index is what makes it reachable by the tests that only ever name it.
      *
      * A `return [...]` config or language file declares no name at all, so it never appears
      * here — nothing can reference it lexically, and it is left to the conservative watch
@@ -247,23 +273,23 @@ final class StaticEdges
             return $this->index;
         }
 
+        $candidates = $this->candidateFiles();
+
+        // Before the parsing, not during it: the old check fired on candidate 25,001, by
+        // which point 25,000 `analysis/` entries had already been written for a result that
+        // was about to be discarded.
+        if (count($candidates) > $this->maxFiles) {
+            Warnings::warn(sprintf(
+                'static_declaration_edges: %d source files in scope; the first pass will parse all of them (later passes read <stateDir>/analysis/ instead)',
+                count($candidates),
+            ));
+        }
+
         $index = [];
-        $scanned = 0;
 
-        foreach ($this->candidateFiles() as $relative) {
-            if (++$scanned > self::MAX_FILES) {
-                Warnings::warn(sprintf(
-                    'static_declaration_edges: more than %d source files in scope; static edges disabled for this pass (changes to files the graph has no edge for still force a conservative selection)',
-                    self::MAX_FILES,
-                ));
-
-                return $this->index = [];
-            }
-
-            $facts = $this->facts->forRelative($relative);
-
-            foreach ($facts->declares as $name) {
-                $index[$name][] = $relative;
+        foreach ($candidates as $relative) {
+            foreach ($this->facts->forRelative($relative)->declares as $name) {
+                $index[self::fold($name)][] = $relative;
             }
         }
 
@@ -275,10 +301,27 @@ final class StaticEdges
     }
 
     /**
-     * Every `.php` file under the coverage scope's include directories, project-relative
-     * and deduplicated (the scope's includes overlap: PHPUnit's `<source><include>` dirs
-     * usually sit inside the top-level project dirs). Stops one past
-     * {@see self::MAX_FILES} so neither the walk nor this array is unbounded.
+     * A name as PHP compares it: class, interface, trait and enum names are case-insensitive
+     * over ASCII (and only over ASCII — bytes >= 0x80 in an identifier are compared exactly,
+     * which is also what `strtolower()` has done since PHP 8.2).
+     *
+     * Without this the index was byte-exact and PHP was not. `use App\Models\user;` followed
+     * by `user::find(1)` resolves to the reference `App\Models\user` — `NameContext` returns
+     * the fully-qualified name as written — while the declaration indexes as
+     * `App\Models\User`: no match, no edge, and no diagnostic to say so. The same held for a
+     * differently-cased namespace segment, which PHP also accepts, and for the string-literal
+     * path (`class_exists('app\Models\User')`).
+     */
+    private static function fold(string $name): string
+    {
+        return strtolower($name);
+    }
+
+    /**
+     * Every `.php` file under the coverage scope's include directories, project-relative,
+     * deduplicated (the scope's includes overlap: PHPUnit's `<source><include>` dirs
+     * usually sit inside the top-level project dirs) and sorted, so which files get parsed
+     * never depends on the order the filesystem hands them over.
      *
      * @return list<string>
      */
@@ -299,13 +342,6 @@ final class StaticEdges
                 }
 
                 $files[$relative] = true;
-
-                // One over the cap is enough for index() to notice the overrun and warn.
-                // Collecting the rest would only grow this array for a result that is
-                // already being thrown away.
-                if (count($files) > self::MAX_FILES) {
-                    return array_keys($files);
-                }
             }
         }
 
@@ -316,44 +352,87 @@ final class StaticEdges
     }
 
     /**
-     * Every `.php` file under `$directory`, absolute. `.blade.php` is skipped: php-parser
-     * rejects Blade syntax, so it would only ever produce an unparseable entry, and Blade
-     * already has its own reference walker (`Laravel\BladeReferences`).
+     * Every `.php` file under `$directory`, absolute, yielded as the walk finds them so one
+     * enormous include directory is never materialised whole. `.blade.php` is skipped:
+     * php-parser rejects Blade syntax, so it would only ever produce an unparseable entry,
+     * and Blade already has its own reference walker (`Laravel\BladeReferences`).
      *
-     * @return list<string>
+     * Never throws, the same guarantee {@see DeclarationScanner} gives. A directory that
+     * `is_dir()` accepts but the process cannot open — one root-owned directory in a CI
+     * image is enough — makes `RecursiveDirectoryIterator` throw `UnexpectedValueException`
+     * from its *constructor* and `RecursiveIteratorIterator` throw it from `rewind()`;
+     * `CATCH_GET_CHILD` covers neither, only `getChildren()`. Nothing between here and
+     * `Cache\GraphUpdater::apply()` catches it, so the whole pass used to abort.
+     *
+     * @return Generator<int, string>
      */
-    private function walk(string $directory): array
+    private function walk(string $directory): Generator
     {
-        $out = [];
+        $leaves = $this->leaves($directory);
 
-        foreach ($this->leaves($directory) as $fileInfo) {
-            if (! $fileInfo instanceof SplFileInfo || ! $fileInfo->isFile()) {
-                continue;
-            }
-
-            $path = Paths::normalizeSeparators($fileInfo->getPathname());
-            $lower = strtolower($path);
-
-            if (! str_ends_with($lower, '.php') || str_ends_with($lower, '.blade.php')) {
-                continue;
-            }
-
-            $out[] = $path;
+        try {
+            $leaves->rewind();
+        } catch (Throwable) {
+            return;
         }
 
-        return $out;
+        while (true) {
+            try {
+                if (! $leaves->valid()) {
+                    return;
+                }
+
+                $current = $leaves->current();
+            } catch (Throwable) {
+                return;
+            }
+
+            $path = self::sourcePath($current);
+
+            if ($path !== null) {
+                yield $path;
+            }
+
+            try {
+                $leaves->next();
+            } catch (Throwable) {
+                return;
+            }
+        }
+    }
+
+    /** `$leaf`'s normalised path when it is a `.php` file this classifier will read, else null. */
+    private static function sourcePath(mixed $leaf): ?string
+    {
+        if (! $leaf instanceof SplFileInfo || ! $leaf->isFile()) {
+            return null;
+        }
+
+        $path = Paths::normalizeSeparators($leaf->getPathname());
+        $lower = strtolower($path);
+
+        if (! str_ends_with($lower, '.php') || str_ends_with($lower, '.blade.php')) {
+            return null;
+        }
+
+        return $path;
     }
 
     /**
      * Leaves under `$directory`, with unwanted directories pruned rather than filtered out
      * afterwards — a nested Composer `vendor/` is thousands of files this must not even
-     * stat.
+     * stat. An `EmptyIterator` when the directory cannot be opened at all; {@see self::walk()}
+     * explains why that is not an exception.
      *
      * @return Iterator<mixed, mixed>
      */
     private function leaves(string $directory): Iterator
     {
-        $directories = new RecursiveDirectoryIterator($directory, FilesystemIterator::SKIP_DOTS);
+        try {
+            $directories = new RecursiveDirectoryIterator($directory, FilesystemIterator::SKIP_DOTS);
+        } catch (Throwable) {
+            return new EmptyIterator();
+        }
 
         $filtered = new RecursiveCallbackFilterIterator(
             $directories,

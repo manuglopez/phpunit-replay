@@ -12,7 +12,7 @@ use PHPUnit\Framework\Attributes\Test;
 use PHPUnit\Framework\TestCase;
 
 /**
- * The `static_declaration_edges` half of the recorder (SPEC.md §9): an edge is only
+ * The `static_declaration_edges` half of the recorder (SPEC.md §4.3.1): an edge is only
  * attributed when the executed lines landed inside a function/method/closure body.
  */
 #[Group('static-declaration-edges')]

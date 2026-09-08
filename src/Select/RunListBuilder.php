@@ -27,7 +27,7 @@ final class RunListBuilder
 
     /**
      * @param array{migration?: Rule, sibling?: Rule, blade?: Rule} $extraRules Laravel-only rules, docs/INTERNALS.md "Laravel"
-     * @param bool $staticDeclarationEdges the `static_declaration_edges` opt-in (SPEC.md §9);
+     * @param bool $staticDeclarationEdges the `static_declaration_edges` opt-in (SPEC.md §4.3.1);
      *        turns on the {@see ResiduePatterns} fallback, and nothing else here
      */
     public function __construct(

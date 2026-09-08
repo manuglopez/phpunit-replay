@@ -18,7 +18,7 @@ use PHPUnit\Framework\Attributes\Test;
 use PHPUnit\Framework\TestCase;
 
 /**
- * The conservative half of `static_declaration_edges` (SPEC.md §9): with the flag on, a
+ * The conservative half of `static_declaration_edges` (SPEC.md §4.3.1): with the flag on, a
  * changed `.php` file the graph has no edge for is covered by the widest lever the package
  * already has — a literal watch pattern onto every test directory, which `WatchRule` turns
  * into "run everything the graph knows".

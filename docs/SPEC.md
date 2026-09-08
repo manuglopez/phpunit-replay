@@ -367,12 +367,18 @@ excludes exactly those files, so with the flag off the guard changes no outcome)
 
 The classifier's cache lives at `<stateDir>/analysis/v<rules>/<xx>/<hash>.json`, one
 immutable entry per distinct file content (so Paratest workers can write it concurrently and
-a lost write costs one re-parse, never a wrong answer). The `v<rules>` segment is
+a lost write costs one re-parse, never a wrong answer). `<hash>` is `xxh128` of the file's
+**raw bytes**, deliberately not `ContentHash` — the payload is a list of line ranges, so the
+normalisation that makes a comment-only edit invisible to the content key would serve line
+numbers that no longer describe the file. The bytes are read once and both the key and the
+facts come from that one read, and a failed scan is never stored (a swallowed EMFILE would
+otherwise pin "unparseable" to that content forever). The `v<rules>` segment is
 `DeclarationScanner::RULES_VERSION`, and it exists because a content hash answers "has this
 file changed" and never "have we changed our mind about what this file means" — bump it
 whenever the classification rules move, or every machine keeps serving the old verdict for
-unchanged files. `prune --all` clears the whole thing along with the rest of the state
-directory.
+unchanged files. A bump is also structural drift (§4.5), because re-parsing alone corrects
+the facts and leaves every already-recorded edge as the old rules got it: `unionEdges()` only
+grows. `prune --all` clears the whole thing along with the rest of the state directory.
 
 The flag participates in the **structural** fingerprint (§4.5), and only when it is on: a
 graph whose edges came from coverage attribution and a graph that also carries static edges
@@ -391,7 +397,7 @@ everywhere; leaving it out when off is what makes the feature shippable.
 
 ### 4.5 Fingerprint
 
-- **Structural** (change → graph fully discarded, fresh record): `composer.lock`, `phpunit.xml`, `phpunit.xml.dist`, `phpunit-replay.php`, and the package's `SCHEMA_VERSION` constant. Only hashed if tracked by git. Plus `static_declaration_edges: true`, present only while that flag is on (§4.3.1).
+- **Structural** (change → graph fully discarded, fresh record): `composer.lock`, `phpunit.xml`, `phpunit.xml.dist`, `phpunit-replay.php`, and the package's `SCHEMA_VERSION` constant. Only hashed if tracked by git. Plus `static_declaration_edges: true` and `analysis_rules: DeclarationScanner::RULES_VERSION`, both present only while that flag is on (§4.3.1) — a rules bump has to force a fresh record, since the graph's edges are never re-derived otherwise.
 - **Environmental** (change → results discarded, edges kept): PHP `MAJOR.MINOR` version, driver, `PHP_OS_FAMILY`.
 - Checked at the start **and at the end** of the run: if it changed during execution, the edges recorded in that run are discarded.
 

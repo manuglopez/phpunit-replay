@@ -6,6 +6,7 @@ namespace Manuglopez\Replay\Tests\Unit\Analysis;
 
 use Manuglopez\Replay\Analysis\DeclarationScanner;
 use PHPUnit\Framework\Attributes\Group;
+use PHPUnit\Framework\Attributes\RequiresPhp;
 use PHPUnit\Framework\Attributes\Test;
 use PHPUnit\Framework\TestCase;
 
@@ -333,6 +334,193 @@ final class DeclarationScannerTest extends TestCase
             PHP);
 
         self::assertNotContains('App\Enums', $facts->references);
+    }
+
+    // -- bodies: lines the declaration itself runs on ---------------------------
+
+    #[Test]
+    public function a_one_line_closure_in_a_config_file_keeps_it_declaration_only(): void
+    {
+        // The body statement and the closure's creation site are the same line, and that
+        // line runs on a bare `require` (verified under pcov 1.0.12 and xdebug 3.5.3).
+        // Recording it made a logging config / container binding / route registry a
+        // "behavioural" dependency of whichever test loaded the file first, and of no other.
+        $facts = $this->scanner->scanSource(<<<'PHP'
+            <?php
+
+            return ['resolver' => function () { return 42; }, 'other' => 'x'];
+            PHP);
+
+        self::assertSame([], $facts->bodies);
+        self::assertTrue($facts->declarationOnly());
+    }
+
+    #[Test]
+    public function a_closure_body_below_its_creation_line_is_still_a_body(): void
+    {
+        $facts = $this->scanner->scanSource(<<<'PHP'
+            <?php
+
+            return [
+                'resolver' => function () {
+                    return 42;
+                },
+            ];
+            PHP);
+
+        self::assertSame([[5, 5]], $facts->bodies);
+    }
+
+    #[Test]
+    public function a_conditionally_declared_one_line_function_contributes_no_range(): void
+    {
+        // `if (! function_exists(...))` compiles to a runtime declaration opcode on the
+        // `function` line, which xdebug reports as executed on a bare `require`.
+        $facts = $this->scanner->scanSource(<<<'PHP'
+            <?php
+
+            if (! function_exists('h')) {
+                function h() { return 1; }
+            }
+            PHP);
+
+        self::assertSame([], $facts->bodies);
+    }
+
+    #[Test]
+    public function an_unconditional_one_line_function_keeps_its_range(): void
+    {
+        // The counterpart, and the reason the ancestors decide this: a top-level function is
+        // early-bound, both drivers agree its line is not covered at load, and a helpers
+        // file full of one-liners must not become declaration-only.
+        $facts = $this->scanner->scanSource(<<<'PHP'
+            <?php
+
+            function ty_a() { return 1; }
+            PHP);
+
+        self::assertSame([[3, 3]], $facts->bodies);
+
+        $namespaced = $this->scanner->scanSource(<<<'PHP'
+            <?php
+            namespace App;
+            function n() { return 1; }
+            PHP);
+
+        self::assertSame([[3, 3]], $namespaced->bodies);
+    }
+
+    // -- bodies: property hooks -------------------------------------------------
+
+    #[Test]
+    #[RequiresPhp('>= 8.4.0')]
+    public function short_property_hooks_contribute_a_body_range(): void
+    {
+        // PropertyHook::getStmts() synthesises `new Return_($this->body)` with no attributes,
+        // so its getStartLine() is -1 and the range was dropped: a hooks-only class scanned
+        // to no body at all and classified as declaration-only. xdebug 3.5.3 reports lines 8
+        // and 9 executed when the property is read/written, and neither at load.
+        $facts = $this->scanner->scanSource(<<<'PHP'
+            <?php
+            namespace App;
+            class Temp
+            {
+                public int $celsius = 0;
+
+                public int $fahrenheit {
+                    get => (int) ($this->celsius * 1.8 + 32);
+                    set => $this->celsius = (int) (($value - 32) / 1.8);
+                }
+            }
+            PHP);
+
+        self::assertSame([[8, 8], [9, 9]], $facts->bodies);
+        self::assertFalse($facts->declarationOnly());
+    }
+
+    #[Test]
+    #[RequiresPhp('>= 8.4.0')]
+    public function a_hook_written_on_the_class_declaration_line_is_still_a_body(): void
+    {
+        // The declaration line is not load-executed either, so there is nothing to guard
+        // against here — verified with both drivers.
+        $facts = $this->scanner->scanSource(<<<'PHP'
+            <?php
+            namespace App;
+            class One { public int $v { get => 7; } }
+            PHP);
+
+        self::assertSame([[3, 3]], $facts->bodies);
+    }
+
+    #[Test]
+    #[RequiresPhp('>= 8.4.0')]
+    public function a_block_form_property_hook_still_records_its_statements(): void
+    {
+        $facts = $this->scanner->scanSource(<<<'PHP'
+            <?php
+            namespace App;
+            class Two
+            {
+                public int $celsius = 0;
+
+                public int $fahrenheit {
+                    get {
+                        return (int) ($this->celsius * 1.8 + 32);
+                    }
+                }
+            }
+            PHP);
+
+        self::assertSame([[9, 9]], $facts->bodies);
+    }
+
+    // -- references: what an import statement may contribute --------------------
+
+    #[Test]
+    public function a_grouped_import_contributes_its_items_joined_to_the_prefix(): void
+    {
+        // php-parser does not rewrite the items of a group use, so the raw names leaked:
+        // `App\Sub` (which names no class) plus the bare `Alpha`/`Beta`, root-namespace
+        // names nobody wrote, either of which could mint an edge to an unrelated file.
+        $facts = $this->scanner->scanSource(<<<'PHP'
+            <?php
+            namespace App;
+            use App\Sub\{Alpha, Beta};
+            class Z {}
+            PHP);
+
+        self::assertSame(['App\Sub\Alpha', 'App\Sub\Beta'], $facts->references);
+    }
+
+    #[Test]
+    public function a_function_or_constant_name_is_never_a_class_reference(): void
+    {
+        // Resolved, these are shaped exactly like class names — and StaticEdges matches
+        // names case-insensitively, so `App\Support\str` would have reached a class
+        // `App\Support\Str`.
+        $facts = $this->scanner->scanSource(<<<'PHP'
+            <?php
+            namespace App\Tests;
+            use function App\Support\str;
+            use const App\Support\MAX;
+            class T2 { public function y() { return str('a') . MAX . strlen('x'); } }
+            PHP);
+
+        self::assertSame([], $facts->references);
+    }
+
+    #[Test]
+    public function a_trait_use_is_still_a_class_reference(): void
+    {
+        $facts = $this->scanner->scanSource(<<<'PHP'
+            <?php
+            namespace App;
+            use App\Concerns\Sluggable;
+            class M { use Sluggable; }
+            PHP);
+
+        self::assertSame(['App\Concerns\Sluggable'], $facts->references);
     }
 
     // -- unparseable -----------------------------------------------------------

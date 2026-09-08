@@ -120,7 +120,7 @@ final class RunPipeline
     private array $fingerprint = [];
 
     /**
-     * The `static_declaration_edges` collaborator (SPEC.md §9), built once per pass and
+     * The `static_declaration_edges` collaborator (SPEC.md §4.3.1), built once per pass and
      * left null when the flag is off — which is what keeps the graph byte-identical.
      */
     private ?StaticEdges $staticEdges = null;

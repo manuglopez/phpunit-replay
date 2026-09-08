@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Manuglopez\Replay\Tests\Unit\Cache;
 
+use Manuglopez\Replay\Analysis\DeclarationScanner;
 use Manuglopez\Replay\Cache\Fingerprint;
 use Manuglopez\Replay\Tests\Support\GitRepo;
 use PHPUnit\Framework\Attributes\Group;
@@ -36,12 +37,13 @@ final class FingerprintStaticDeclarationEdgesTest extends TestCase
     #[Test]
     public function with_the_flag_off_the_structural_bucket_is_exactly_what_it_always_was(): void
     {
-        $fingerprint = Fingerprint::compute($this->repo->root, 'pcov');
+        $fingerprint = Fingerprint::compute($this->repo->root, 'pcov', false);
 
         self::assertSame(
             ['schema', 'composer_lock', 'phpunit_xml', 'phpunit_xml_dist', 'replay_config'],
             array_keys($fingerprint['structural']),
         );
+        self::assertArrayNotHasKey('analysis_rules', $fingerprint['structural']);
     }
 
     #[Test]
@@ -51,10 +53,10 @@ final class FingerprintStaticDeclarationEdgesTest extends TestCase
         // every machine in the world would be invalidated by upgrading.
         self::assertSame(
             '{"composer_lock":null,"phpunit_xml":null,"phpunit_xml_dist":null,"replay_config":null,"schema":1}',
-            Fingerprint::canonicalStructural(Fingerprint::compute($this->repo->root, 'pcov')),
+            Fingerprint::canonicalStructural(Fingerprint::compute($this->repo->root, 'pcov', false)),
         );
         self::assertSame(
-            Fingerprint::canonicalStructural(Fingerprint::compute($this->repo->root, 'pcov')),
+            Fingerprint::canonicalStructural(Fingerprint::compute($this->repo->root, 'pcov', false)),
             Fingerprint::canonicalStructural(Fingerprint::compute($this->repo->root, 'pcov', false)),
         );
     }
@@ -73,12 +75,39 @@ final class FingerprintStaticDeclarationEdgesTest extends TestCase
     }
 
     #[Test]
+    public function with_the_flag_on_the_classification_rules_version_rides_along(): void
+    {
+        // Without this, bumping RULES_VERSION re-parsed <stateDir>/analysis/ and changed no
+        // content key, so it re-ran no test and never corrected an edge the old rules got
+        // wrong — `Graph::unionEdges()` only grows, so a dropped edge stays dropped.
+        $fingerprint = Fingerprint::compute($this->repo->root, 'pcov', true);
+
+        self::assertSame(DeclarationScanner::RULES_VERSION, $fingerprint['structural']['analysis_rules']);
+        self::assertStringContainsString(
+            '"analysis_rules":' . DeclarationScanner::RULES_VERSION,
+            Fingerprint::canonicalStructural($fingerprint),
+        );
+    }
+
+    #[Test]
+    public function a_graph_recorded_under_older_classification_rules_is_structural_drift(): void
+    {
+        $stored = Fingerprint::compute($this->repo->root, 'pcov', true);
+        $stored['structural']['analysis_rules'] = DeclarationScanner::RULES_VERSION - 1;
+
+        $current = Fingerprint::compute($this->repo->root, 'pcov', true);
+
+        self::assertSame(['analysis_rules'], Fingerprint::structuralDrift($stored, $current));
+        self::assertFalse(Fingerprint::structuralMatches($stored, $current));
+    }
+
+    #[Test]
     public function flipping_the_flag_on_is_structural_drift(): void
     {
-        $off = Fingerprint::compute($this->repo->root, 'pcov');
+        $off = Fingerprint::compute($this->repo->root, 'pcov', false);
         $on = Fingerprint::compute($this->repo->root, 'pcov', true);
 
-        self::assertSame(['static_declaration_edges'], Fingerprint::structuralDrift($off, $on));
+        self::assertSame(['static_declaration_edges', 'analysis_rules'], Fingerprint::structuralDrift($off, $on));
         self::assertFalse(Fingerprint::structuralMatches($off, $on));
     }
 
@@ -87,16 +116,16 @@ final class FingerprintStaticDeclarationEdgesTest extends TestCase
     {
         // Symmetric on purpose: a graph recorded with static edges must not be read back
         // by a pass that no longer produces them.
-        $off = Fingerprint::compute($this->repo->root, 'pcov');
+        $off = Fingerprint::compute($this->repo->root, 'pcov', false);
         $on = Fingerprint::compute($this->repo->root, 'pcov', true);
 
-        self::assertSame(['static_declaration_edges'], Fingerprint::structuralDrift($on, $off));
+        self::assertSame(['static_declaration_edges', 'analysis_rules'], Fingerprint::structuralDrift($on, $off));
     }
 
     #[Test]
     public function the_flag_never_shows_up_as_environmental_drift(): void
     {
-        $off = Fingerprint::compute($this->repo->root, 'pcov');
+        $off = Fingerprint::compute($this->repo->root, 'pcov', false);
         $on = Fingerprint::compute($this->repo->root, 'pcov', true);
 
         self::assertSame([], Fingerprint::environmentalDrift($off, $on));

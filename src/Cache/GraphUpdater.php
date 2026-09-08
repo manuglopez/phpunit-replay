@@ -27,7 +27,7 @@ final class GraphUpdater
     ];
 
     /**
-     * `$staticEdges` is the `static_declaration_edges` opt-in (SPEC.md §9): null — the
+     * `$staticEdges` is the `static_declaration_edges` opt-in (SPEC.md §4.3.1): null — the
      * default, and every existing caller — leaves {@see self::apply()} recording exactly
      * the edges the coverage driver reported, byte for byte.
      */

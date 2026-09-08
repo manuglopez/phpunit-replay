@@ -447,12 +447,12 @@ final readonly class Analysis\FileFacts                  // one source file, as 
 }
 final class Analysis\DeclarationScanner
 {
-    public const RULES_VERSION = 1;                       // BUMP whenever FactsVisitor's rules change: the content-hash cache cannot notice on its own
+    public const RULES_VERSION = 2;                       // BUMP whenever FactsVisitor's rules change: the content cache cannot notice, and (being structural) a bump re-records
     public function scan(string $absoluteFile): FileFacts;
     public function scanSource(string $source): FileFacts;
 }
 final class Analysis\FactsVisitor extends \PhpParser\NodeVisitorAbstract;   // runs after NameResolver, never standalone
-final class Analysis\FactsCache      // <stateDir>/analysis/v<RULES_VERSION>/<xx>/<hash>.json, keyed by Cache\ContentHash (immutable, Paratest-safe)
+final class Analysis\FactsCache      // <stateDir>/analysis/v<RULES_VERSION>/<xx>/<hash>.json, keyed by xxh128 of the RAW bytes (the payload is line ranges); one read, failures never stored
 {
     public function __construct(string $stateDir, string $projectRoot, DeclarationScanner $scanner = new DeclarationScanner());
     public function for(string $absoluteFile): FileFacts;         // .blade.php is refused outright
@@ -460,11 +460,11 @@ final class Analysis\FactsCache      // <stateDir>/analysis/v<RULES_VERSION>/<xx
 }
 final class Analysis\StaticEdges
 {
-    public function __construct(string $projectRoot, Record\SourceScope $scope, FactsCache $facts);
-    /** @return array<string, list<string>> FQ name => declaration-only files (relative) */
-    public function index(): array;
-    /** @param list<string> $testFilesRelative @return int edges added */
-    public function expand(Cache\Graph $graph, array $testFilesRelative): int;
+    public function __construct(string $projectRoot, Record\SourceScope $scope, FactsCache $facts, int $maxFiles = self::MAX_FILES);
+    /** @return array<string, list<string>> lowercased FQ name => declaring files (relative) */
+    public function index(): array;   // MAX_FILES only warns; giving up removed edges without adding any
+    /** @param array<string, list<string>> $behaviouralEdges test (rel) => this run's coverage edges, one entry per executed test @return int edges added */
+    public function expand(Cache\Graph $graph, array $behaviouralEdges): int;
 }
 ```
 
@@ -476,7 +476,7 @@ Wiring, all of it optional and null/false by default:
 | `Cache\GraphUpdater::__construct(..., ?StaticEdges)` | `expand()` runs right after `unionEdges()`, before `mergeResults()` computes content keys |
 | `Select\RunListBuilder::__construct(..., bool $staticDeclarationEdges)` | `Select\ResiduePatterns` adds each changed-but-unknown `.php` path as its own watch pattern (shared with `Console\Commands\ExplainCommand`, so `explain` shows the same plan) |
 | `Console\Commands\{Pull,Status}Command` | must pass the flag to `Fingerprint::compute()` too — omitting it makes the "current" fingerprint lack a key the stored one has, which `detectDrift()` reads as permanent drift |
-| `Cache\Fingerprint::compute(..., bool $staticDeclarationEdges)` | adds `structural.static_declaration_edges = true` — present only when on |
+| `Cache\Fingerprint::compute(..., bool $staticDeclarationEdges)` | adds `structural.static_declaration_edges = true` and `structural.analysis_rules = RULES_VERSION` — present only when on; the parameter has no default, twice bitten |
 | `Console\Runner\RunPipeline::baseEnv()` | sets `PHPUNIT_REPLAY_STATIC_DECLARATION_EDGES=1` for the PHPUnit child and its Paratest workers |
 | `PHPUnit\ReplayState::boot(..., bool $staticDeclarationEdges)` | builds the `Recorder`'s `FactsCache`; `bootInProcess()` also builds the `StaticEdges` the in-process persist path uses |
 

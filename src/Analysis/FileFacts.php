@@ -28,6 +28,18 @@ namespace Manuglopez\Replay\Analysis;
  * shares its line with the enclosing top-level statement. Counting it would make a
  * `return ['handler' => fn () => ...]` config file look behavioural on the very line its
  * load-time execution covers.
+ *
+ * This describes when PHP runs a line, never what a coverage driver happens to report about
+ * it, and the difference is not hypothetical: pcov 1.0.12 instruments no PHP 8.4 property
+ * hook at all, in either direction, while xdebug 3.5.3 reports a hook's line on access and
+ * not at load. A hook body is call-time code, so it is a `$bodies` range in both cases
+ * ({@see FactsVisitor::recordBody()}); what a hooks-only class then gets under pcov is no
+ * behavioural edge and a static edge from the tests whose own source names it
+ * ({@see StaticEdges::collect()}), the same as any other file whose bodies a test never
+ * enters. A driver-dependent classifier would be far worse than that: the driver is an
+ * *environmental* fingerprint key ({@see \Manuglopez\Replay\Cache\Fingerprint}), so one
+ * graph accumulates edges recorded under either, and two machines would disagree about what
+ * a file *is*.
  */
 final readonly class FileFacts
 {

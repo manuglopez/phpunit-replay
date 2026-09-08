@@ -100,7 +100,7 @@ final class ReplayState
 
     private static ?Quarantine $quarantine = null;
 
-    /** The `static_declaration_edges` collaborator (SPEC.md §9); null when the flag is off. */
+    /** The `static_declaration_edges` collaborator (SPEC.md §4.3.1); null when the flag is off. */
     private static ?StaticEdges $staticEdges = null;
 
     private static ?Git $git = null;
@@ -149,20 +149,23 @@ final class ReplayState
     private static array $scannedForDepends = [];
 
     /**
-     * `$staticDeclarationEdges` is the SPEC.md §9 opt-in: with it on, the Recorder only
+     * `$facts` is the SPEC.md §4.3.1 opt-in, already built: with it, the Recorder only
      * attributes coverage that landed inside a function body (Analysis\FileFacts). The
-     * wrapper hands it down through `PHPUNIT_REPLAY_STATIC_DECLARATION_EDGES`, because this
-     * process — and every Paratest worker under it — reads nothing but env.
+     * wrapper hands the flag down through `PHPUNIT_REPLAY_STATIC_DECLARATION_EDGES`, because
+     * this process — and every Paratest worker under it — reads nothing but env.
+     *
+     * The caller passes the instance rather than the flag so that one process holds one
+     * cache. {@see self::bootInProcess()} needs the same one for `Analysis\StaticEdges`, and
+     * building a second here made both hash, read and parse every shared file twice, with two
+     * copies of the memo to show for it.
      */
-    public static function boot(Mode $mode, string $root, string $stateDir, string $runId, ?CoverageDriver $driver, bool $staticDeclarationEdges = false): void
+    public static function boot(Mode $mode, string $root, string $stateDir, string $runId, ?CoverageDriver $driver, ?FactsCache $facts = null): void
     {
         self::$mode = $mode;
         self::$root = $root;
         self::$stateDir = $stateDir;
         self::$runId = $runId;
-        self::$recorder = $driver !== null
-            ? new Recorder($driver, $staticDeclarationEdges ? new FactsCache($stateDir, $root) : null)
-            : null;
+        self::$recorder = $driver !== null ? new Recorder($driver, $facts) : null;
         self::$collector = new ResultCollector();
         self::$notCacheable = new NotCacheableCollector();
         self::$runWriter = new RunWriter($stateDir . '/runs/' . $runId, $root);
@@ -199,8 +202,10 @@ final class ReplayState
         $driver = DriverDetector::detect($scope);
         $fingerprint = Fingerprint::compute($root, $driver?->name() ?? 'none', $config->staticDeclarationEdges);
 
-        if ($config->staticDeclarationEdges) {
-            self::$staticEdges = new StaticEdges($root, $scope, new FactsCache($stateDir, $root));
+        $facts = $config->staticDeclarationEdges ? new FactsCache($stateDir, $root) : null;
+
+        if ($facts !== null) {
+            self::$staticEdges = new StaticEdges($root, $scope, $facts);
         }
 
         $branch = $git->currentBranch();
@@ -231,7 +236,7 @@ final class ReplayState
             $graph->setDefaultBranch($defaultBranch);
         }
 
-        self::boot($mode, $root, $stateDir, self::newRunId(), $mode === Mode::ResultsOnly ? null : $driver, $config->staticDeclarationEdges);
+        self::boot($mode, $root, $stateDir, self::newRunId(), $mode === Mode::ResultsOnly ? null : $driver, $facts);
 
         self::$inProcess = true;
         self::$graph = $graph;
