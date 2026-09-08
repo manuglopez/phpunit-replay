@@ -712,6 +712,57 @@ final class GraphTest extends TestCase
         );
     }
 
+    /**
+     * Regression found in review: encode()'s orphan filter must key on PATH, not file id.
+     * Graph::link() can never itself produce two ids for the same path — it only mints a
+     * fresh one when the path is not already in $fileIds — so the only route to this
+     * state (which is why this test goes in through decode() with a hand-built payload,
+     * rather than through the normal link()/replaceEdges() API) is decode() trusting a
+     * `files` JSON array verbatim with no de-duplication (Graph.php's decode()): a
+     * graph.json from a foreign or older writer, or a hand-edited one, can hold one path
+     * under two ids. Here 'dup.php' is both id 1 and id 2; the edge references id 2.
+     * array_unique($this->files) keeps id 1 as 'dup.php''s representative (first
+     * occurrence); array_flip($this->files) — what decode() builds $fileIds from — keeps
+     * id 2 (last occurrence). An id-keyed filter checks whether id 1 is referenced, finds
+     * it is not (only id 2 is), and silently drops the edge instead of remapping it.
+     */
+    public function test_encode_keeps_an_edge_to_a_path_duplicated_under_two_ids(): void
+    {
+        $json = json_encode([
+            'schema' => 1,
+            'generator' => 'test',
+            'fingerprint' => [],
+            'files' => ['a.php', 'dup.php', 'dup.php'],
+            'edges' => ['tests/Feature/FooTest.php' => [0, 2]],
+            'test_tables' => [],
+            'not_cacheable' => [],
+            'baselines' => [],
+        ]);
+        self::assertIsString($json);
+
+        $graph = Graph::decode($json, $this->root);
+        self::assertNotNull($graph);
+        self::assertEqualsCanonicalizing(
+            ['a.php', 'dup.php'],
+            $graph->dependenciesOf('tests/Feature/FooTest.php'),
+        );
+
+        $reEncoded = $graph->encode();
+        self::assertNotNull($reEncoded);
+
+        $raw = json_decode($reEncoded, true);
+        self::assertIsArray($raw);
+        self::assertEqualsCanonicalizing(['a.php', 'dup.php'], $raw['files']);
+        self::assertEqualsCanonicalizing([0, 1], $raw['edges']['tests/Feature/FooTest.php']);
+
+        $decoded = Graph::decode($reEncoded, $this->root);
+        self::assertNotNull($decoded);
+        self::assertEqualsCanonicalizing(
+            ['a.php', 'dup.php'],
+            $decoded->dependenciesOf('tests/Feature/FooTest.php'),
+        );
+    }
+
     public function test_decode_returns_null_for_invalid_json(): void
     {
         self::assertNull(Graph::decode('{not valid json', $this->root));
