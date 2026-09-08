@@ -11,46 +11,54 @@ use PHPUnit\Framework\TestCase;
 use ReflectionClass;
 
 /**
- * Characterizes `Application::splitPassthrough()` (`Application.php:103-174`) — the argv
- * pre-splitter that decides, token by token, whether a CLI argument belongs to
- * phpunit-replay itself or should be forwarded to PHPUnit/Paratest after an inserted `--`.
- * Every expected value below was produced by RUNNING the current implementation (via
- * `ReflectionMethod`, since `splitPassthrough()` is private) and then read back by hand to
- * confirm it is what the CLI should do, per the task's own discipline — see "PINNED,
- * DISCLOSED GAPS" below for the cases where that reading concluded "this looks wrong, but
- * is out of scope to fix here".
+ * Characterizes `Application::splitPassthrough()` — the argv pre-splitter that decides,
+ * token by token, whether a CLI argument belongs to phpunit-replay itself or should be
+ * forwarded to PHPUnit/Paratest after an inserted `--`. Every expected value below was
+ * produced by RUNNING the implementation this corpus was first written against (the
+ * previous, hand-maintained-constants one, via `ReflectionMethod` since `splitPassthrough()`
+ * is private) and then read back by hand to confirm it is what the CLI should do — see
+ * "PINNED, DISCLOSED GAPS" below for the cases where that reading concluded "this looks
+ * wrong, but is out of scope to fix here".
  *
- * This corpus is what makes the splitter's rewrite safe: `splitPassthrough()` is about to
- * stop consulting five hand-maintained constants (`COMMAND_NAMES`, `OWN_LONG_OPTIONS`,
- * `GLOBAL_LONG_OPTIONS`, `GLOBAL_SHORT_OPTIONS`, `PARALLEL_SHORTCUT_COMMANDS`) and start
- * deriving ownership from the live Symfony `InputDefinition` objects instead — every case
- * here must pass, byte-for-byte, against BOTH implementations.
+ * This corpus is what made the splitter's rewrite safe: `splitPassthrough()` no longer
+ * consults five hand-maintained constants (`COMMAND_NAMES`, `OWN_LONG_OPTIONS`,
+ * `GLOBAL_LONG_OPTIONS`, `GLOBAL_SHORT_OPTIONS`, `PARALLEL_SHORTCUT_COMMANDS`) — it derives
+ * ownership from the live Symfony `InputDefinition` objects instead — and every case here
+ * passes, byte-for-byte, against BOTH implementations.
  *
  * PINNED, DISCLOSED GAPS (today's actual behaviour, deliberately not fixed by this corpus
- * or by the refactor that follows it — behavioural equivalence is the bar):
+ * or by the rewrite it made safe — behavioural equivalence was the bar):
  *
- * - `--log-junit`/`--keep-months` are recognised ONLY in their `--option=value` form
- *   (`Application.php:207,215`). The bare form — `--log-junit result.xml` as two tokens —
- *   is NOT recognised: the first token alone trips the passthrough latch and takes the
- *   value token with it. Real Symfony's own `ArgvInput::addLongOption()` would peek the
- *   next token as the value for a bare `VALUE_REQUIRED` option exactly the way it does for
- *   `--parallel`, so this asymmetry looks like a genuine defect rather than a deliberate
- *   choice — reported as such, pinned as-is here.
+ * - `--log-junit`/`--keep-months` are recognised ONLY in their `--option=value` form. The
+ *   bare form — `--log-junit result.xml` as two tokens — is NOT recognised: the first token
+ *   alone trips the passthrough latch and takes the value token with it. Real Symfony's own
+ *   `ArgvInput::addLongOption()` would peek the next token as the value for a bare
+ *   `VALUE_REQUIRED` option exactly the way it does for `--parallel`, so this asymmetry
+ *   looks like a genuine defect rather than a deliberate choice — reported as such, pinned
+ *   as-is here.
  * - `-p=2` (short form, literal `=`) is NOT recognised, even though `-p`, `-p 2` (two
  *   tokens), `--parallel`, `--parallel 2` and `--parallel=2` all are, and both SPEC.md and
  *   README document the option as `-p[=N]`. This looks like a second, independent instance
  *   of the same class of defect — reported separately, pinned as-is here.
- * - `-p4` / `-p10` (a process count glued directly onto the shortcut, no `=`) IS
- *   recognised today, via a regex (`/^p\d*$/`) that the refactor deliberately does not
- *   reproduce (see the Application::splitPassthrough() docblock once the refactor lands):
- *   it is not part of this corpus for exactly that reason — it is expected to change, not
- *   pinned.
+ * - `-p4` / `-p10` (a process count glued directly onto the shortcut, no `=`) WAS
+ *   recognised by the previous implementation, via a regex (`/^p\d*$/`) the rewrite
+ *   deliberately does not reproduce (see `Application::splitPassthrough()`'s docblock): it
+ *   was never part of this corpus for exactly that reason — it was expected to change, not
+ *   pinned, and now does not recognise these tokens (see the dedicated regression cases at
+ *   the bottom of {@see self::cases()}, added once the rewrite landed).
  * - Clustering (`-xyz`) is not implemented; a clustered token is simply not recognised
  *   (goes to passthrough, tripping the latch like any other unrecognised token).
  */
 final class ApplicationArgvSplitTest extends TestCase
 {
     /**
+     * `splitPassthrough()` is now an instance method (it reads the live command/application
+     * `InputDefinition` objects via `$this`), so — unlike against the previous,
+     * hand-maintained-constants implementation this corpus was first generated against — it
+     * is invoked here on a real `Application` instance rather than statically. This is the
+     * only thing about this file that changed between the two implementations: every case
+     * in {@see self::cases()} is unchanged.
+     *
      * @param list<string> $argv
      * @return list<string>
      */
@@ -60,7 +68,7 @@ final class ApplicationArgvSplitTest extends TestCase
         $method->setAccessible(true);
 
         /** @var list<string> $result */
-        $result = $method->invoke(null, $argv);
+        $result = $method->invoke(new Application(), $argv);
 
         return $result;
     }
@@ -337,5 +345,38 @@ final class ApplicationArgvSplitTest extends TestCase
             ['run', '--fresh', ''],
             ['run', '--fresh', '--', ''],
         ];
+
+        // ---------------------------------------------------------------------------
+        // NEW cases below, added once the derivation-based rewrite landed: these
+        // document behaviour that CHANGED, not behaviour pinned from before it. They
+        // were never part of the frozen corpus above (which passes unchanged against
+        // both implementations) — see the class docblock's "PINNED, DISCLOSED GAPS".
+        // ---------------------------------------------------------------------------
+
+        // `--silent` is a real global option (Symfony 8.1's own `getDefaultInputDefinition()`)
+        // that the previous hand-maintained `GLOBAL_LONG_OPTIONS` constant never listed —
+        // confirmed missing from it while this corpus was written — so it used to be
+        // misrouted to PHPUnit passthrough. Deriving from the live application definition
+        // fixes this automatically, on whichever Symfony version is actually installed.
+        yield 'run --silent (FIXED: previously missing from GLOBAL_LONG_OPTIONS, now recognised)' => [
+            ['run', '--silent'],
+            ['run', '--silent'],
+        ];
+
+        // `-p4`/`-p10` (a process count glued directly onto the shortcut) used to be
+        // recognised via a regex (`/^p\d*$/`) this rewrite deliberately does not reproduce:
+        // short-option recognition is now exact-shortcut-string-match only. Neither SPEC.md
+        // nor README document this attached form (only `-p`, `-p 2` and `--parallel[=N]`
+        // are), so this is treated as a disclosed narrowing rather than a regression.
+        foreach (['run', 'record', 'verify'] as $command) {
+            yield "$command -p4 (CHANGED: previously recognised via regex, now NOT — disclosed narrowing)" => [
+                [$command, '-p4'],
+                [$command, '--', '-p4'],
+            ];
+            yield "$command -p10 (CHANGED: previously recognised via regex, now NOT — disclosed narrowing)" => [
+                [$command, '-p10'],
+                [$command, '--', '-p10'],
+            ];
+        }
     }
 }

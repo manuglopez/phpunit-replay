@@ -19,10 +19,11 @@ use Symfony\Component\Process\Process;
  * remote cache instead of the local graph.
  *
  * `PruneCommand` is exercised directly through Symfony's `CommandTester` (not through the
- * `bin/phpunit-replay` binary): `Console\Application`'s own argv splitter hardcodes the long
- * options it recognises per command and is out of scope for this change, so a real CLI
- * invocation of `prune --remote --keep-months=3` would have its options misrouted to the
- * PHPUnit passthrough bucket. `PruneCommand::execute()` itself only depends on `getcwd()`
+ * `bin/phpunit-replay` binary): {@see PruneRemoteArgvTest} already covers `prune --remote
+ * --keep-months=N [--squash]` end to end through the real binary and its argv splitter, so
+ * this one instead spends its budget on `PruneCommand::execute()`'s own logic against a
+ * real git-backed remote (a real bare repo, not a stub) without the overhead of spawning a
+ * PHP process for every case. `PruneCommand::execute()` itself only depends on `getcwd()`
  * and the project's `phpunit-replay.php`, both of which this test controls directly.
  */
 final class PruneRemoteCommandTest extends TestCase
