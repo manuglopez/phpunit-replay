@@ -78,7 +78,12 @@ final class RepeatRetryNotCacheableTest extends TestCase
         // --repeat=3 still writes nothing repetition-suffixed into the graph, so a third,
         // identical --repeat=3 pass has nothing to falsely replay.
         $recordAgain = $this->fixture->replay(['record', '--', '--repeat=3']);
-        self::assertSame(0, $recordAgain['exitCode'], $recordAgain['stdout'] . $recordAgain['stderr']);
+
+        // Exit 2, not 0: `record`'s only deliverable is the graph, and a degraded run writes
+        // none, so it must not look like success (see RunPipeline::degrade()). `run` above
+        // keeps PHPUnit's own exit code, because degrading to a plain suite is a legitimate
+        // fallback there.
+        self::assertSame(2, $recordAgain['exitCode'], $recordAgain['stdout'] . $recordAgain['stderr']);
         self::assertStringContainsString('phpunit-replay: --repeat/--retry requested', $recordAgain['stderr']);
 
         $afterRecordAgain = ReplayAssert::loadGraph($this->fixture);
