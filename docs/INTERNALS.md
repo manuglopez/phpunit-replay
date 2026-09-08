@@ -101,6 +101,8 @@ final class Cache\Graph
     public function link(string $testFile, string $sourceFile): void;  // abs or rel; ignores paths outside root
     /** @param array<string, list<string>> $testToFiles full replacement per test file */
     public function replaceEdges(array $testToFiles): void;
+    /** @param array<string, list<string>> $testToFiles merged into what the graph already had per test file, never replaced — GraphUpdater::apply()'s only caller, see its own docblock for why */
+    public function unionEdges(array $testToFiles): void;
     /** @param list<string> $testFiles ensure edges[rel] exists (possibly []) — "known without dependencies" */
     public function markKnownTestFiles(array $testFiles): void;
     public function knowsTest(string $testFile): bool;
@@ -439,7 +441,7 @@ final class Cache\GraphUpdater
     /**
      * Applies a run partial. $complete = the run covered everything it was asked to and was not truncated.
      * - always: merge results of test files the graph knows (or all, when $recordsEdges); recompute `key` for touched test files
-     * - when $recordsEdges: replaceEdges for executed test files, markKnownTestFiles(executed files), replaceTestTables
+     * - when $recordsEdges: unionEdges (merged into what the graph already had, never replaced — see Graph::unionEdges()) for executed test files, markKnownTestFiles(executed files), replaceTestTables
      * - when $complete && $recordsEdges: pruneStaleResults(branch, touched, keep ids), pruneMissingTestFiles, pruneResultsForMissingFiles
      * @return array{touched: list<string>, results: int, edges: int}
      */

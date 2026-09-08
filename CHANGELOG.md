@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+- Fixed: correctness — re-recording a subset of tests (`run`, `verify`, in-process replay) could silently drop a test's dependency edge instead of keeping it. A coverage driver attributes a file's declaration footprint (class/enum/const, or any top-level statement) to whichever test happened to load it first in that process, so a partial re-record whose attribution differed from a previous, complete one could make a test's content key stop including a file it still genuinely depends on — a false green: editing that file no longer changed the key, so the stale cached result kept being replayed instead of the test ever running again. `GraphUpdater::apply()` now unions a re-record's edges into the graph (`Graph::unionEdges()`) instead of replacing them (`Graph::replaceEdges()`, still used to seed/replace a graph's state directly); a genuinely stale edge is shed by the next full, fresh `record`, which always starts from an empty graph. Laravel's per-test table tracking (`replaceTestTables`) is unaffected — it comes from a live query listener re-attributed on every run, not a load-once coverage artifact.
+
 ## [0.1.0] — 2026-09-07
 
 - Remote cache, content-addressed: filesystem (`file://`), HTTP (S3/MinIO presigned, WebDAV) and a dedicated git repository backend (`GitRemoteCache`: shallow mirror, append-only objects, reset+rewrite reconciliation, `prune --remote [--keep-months] [--squash]`).

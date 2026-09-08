@@ -57,7 +57,14 @@ final class GraphUpdater
         $edgesCount = 0;
 
         if ($recordsEdges) {
-            $this->graph->replaceEdges($partial->edges);
+            // Union, not replace (Cache\Graph::unionEdges() docblock): this partial only
+            // reflects what THIS run's coverage attributed, which can under-report a test
+            // file's true dependencies (first-loader-wins, docs/SPEC.md §4.3) relative to
+            // a previous, complete recording. Table edges are unaffected by that
+            // artifact — a Laravel query listener re-attributes every table a test
+            // queries on every single run (Laravel\TableTracker), never just the first —
+            // so `replaceTestTables` below stays exact.
+            $this->graph->unionEdges($partial->edges);
             $this->graph->markKnownTestFiles($executed);
 
             if ($partial->tables !== []) {
