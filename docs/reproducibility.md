@@ -158,36 +158,63 @@ Verified while measuring: **orphans = 0** in both graphs, so the `fileId() !== n
 has an edge` complement that `ResiduePatterns` and `Select\Rules\PhpEdgeRule` partition the
 changed set with holds exactly.
 
-## Measurement caveats
+## The sequential control: worker assignment was the entire cause
 
-Two traps, both found by falling into them.
+Two **sequential** passes — no `--parallel` at all, so one process, and Paratest's work
+distribution removed as a variable:
 
-**Per-test assertion counts from `--log-junit` are not trustworthy under Paratest**, because
-worker logs are merged. The merged XML reported `assertions="3474"` for
-`NovaCustomStylesTest::every_registered_style_resolves_to_a_file_that_exists`; that method's
-body makes exactly **6** (it filters to three expected style names, two assertions each), and
-running it in isolation prints `OK (1 test, 6 assertions)`. 23 testcases in that XML carried
-more than 500 while sibling methods in the same class carried 1–5. Any per-test assertion audit
-must come from a sequential run.
+```
+pass 1:  9,056 tests · 70,241 assertions · 1,833 source files · 60,282 edges · 21m21s
+pass 2:  9,056 tests · 70,241 assertions · 1,833 source files · 60,282 edges · 21m26s
+```
+
+`files`, `edges`, `test_tables`, `not_cacheable` and `fingerprint` are **identical**. Of the
+fields on every stored result — status, assertions, message, file and **content key** — only
+the wall-clock time differs.
+
+So **every content key is identical across two sequential passes.** For a fixed execution
+shape this package's graph is reproducible, and the 14–22 residual measured under 8 workers is
+Paratest's work distribution and nothing else — not the package's logic, and not the suite.
+
+That is also what makes the single-producer approach viable: a graph recorded once, in one
+shape, and distributed with `push --graph` / `pull` gives every machine the same addresses by
+construction, without waiting for convergence.
+
+## The assertion variance: one test, and why
+
+The suite-level assertion total varied across passes — 35,387 / 35,777 / 35,897 / 36,197 /
+36,275 / 36,299 in parallel, and 70,241 sequentially, with test, skip and deprecation counts
+identical every time (9,056 / 18 / 8). Subtracting one test accounts for all of it:
+
+| pass | total | that one test | the rest |
+|---|---|---|---|
+| parallel 1 | 36,275 | 3,474 | **32,801** |
+| parallel 2 | 36,197 | 3,396 | **32,801** |
+| parallel 3 | 35,993 | 3,192 | **32,801** |
+| sequential 1 | 70,241 | 37,440 | **32,801** |
+| sequential 2 | 70,241 | 37,440 | **32,801** |
+
+The rest of the suite makes exactly 32,801 assertions in every configuration. The test is
+`NovaCustomStylesTest::every_registered_style_resolves_to_a_file_that_exists`, and the
+mechanism is in the application rather than in either the test or this package:
+`Nova::allStyles()` accumulates a registration per application boot and never de-duplicates,
+so a method whose body makes 6 assertions (it filters to three expected names, two assertions
+each) makes 6 × *boots in this process* — 6 in isolation, ~3,474 in one of eight workers,
+37,440 in a single process running all 9,056 tests.
+
+Per-test `assertions` from `--log-junit` is therefore **reliable**, including under Paratest:
+every other test's count matches exactly between the parallel and sequential passes. An
+earlier reading of this data mistook that one test's real, boot-dependent count for a
+log-merging artifact; it is not one.
+
+## Measurement caveat
 
 **A sequential record of this suite needs far more than the CLI default of 512 MB.** One
-process keeps every test's state; it exhausted 512 MB at test 6,615 of 9,056 and the run
-recorded nothing. `record` correctly reported `nothing recorded` and exited 2 rather than
-forwarding a passing exit code — but the memory limit has to be raised before a sequential
-measurement is possible at all.
-
-> **Sequential-pass control: pending.** Two sequential passes remove Paratest's work
-> distribution as a variable, which is the one experiment that separates "worker assignment is
-> the entire remaining cause" from "something else also varies".
-
-## Still open
-
-The suite-level assertion total varied across identical passes — 35,387 / 35,777 / 35,897 /
-36,197 / 36,275 / 36,299 across six passes — while the test count, skip count and deprecation
-count were identical every time (9,056 / 18 / 8). **Which tests account for that variance is
-not established**, because the per-test data that would answer it is the untrustworthy data
-described above. It is a property of the suite under measurement rather than of this package,
-and it is recorded here because it is noise anyone repeating these measurements will see.
+process keeps every test's state; it exhausted 512 MB at test 6,615 of 9,056 and recorded
+nothing. `record` correctly reported `nothing recorded` and exited 2 rather than forwarding a
+passing exit code, but the limit has to be raised before a sequential measurement is possible
+at all. `PHPUNIT_REPLAY_PHPUNIT_BIN` pointed at a shim that raises `memory_limit` does it
+without touching the project.
 
 ## Summary
 
@@ -196,5 +223,35 @@ and it is recorded here because it is noise anyone repeating these measurements 
 | the set of source files the graph knows | **solved** — identical across passes |
 | edges to generated, per-worker paths | **solved** — none recorded |
 | declaration first-loader attribution | **solved** by `static_declaration_edges`, at a documented cost |
-| once-per-worker side-effect attribution (migrations, seeders, command registration) | **inherent** to shared-process coverage; made safe by edge union, documented here |
-| which tests move the suite's assertion total | **open**, and a property of the suite |
+| reproducibility for a fixed execution shape | **solved** — two sequential passes agree on every content key |
+| once-per-worker side-effect attribution (migrations, seeders, command registration) | **inherent** to how Paratest distributes work; it is what the 14–22 residual under 8 workers is, it is made safe by edge union, and it disappears entirely when one job records the graph and the rest pull it |
+| which tests move the suite's assertion total | **solved** — one test, whose count scales with application boots per process |
+
+## What this means for sharing a cache
+
+Reproducibility is not the open problem it looked like. For a fixed execution shape the graph
+and every content key are identical, so the remaining question is not *can* addresses be
+stable but *who computes them*. Two measures, in the order they are worth taking:
+
+1. **One producer.** Let a single baseline job record edges and distribute the graph
+   (`push --graph` / `pull`); everything else gates against the pulled graph and records
+   nothing. Addresses then match by construction rather than by convergence, and the residual
+   above stops mattering. This is configuration, not a format change.
+2. **Address on what is stable, validate on what is recorded.** Today the dependency list is
+   *in* the object's address, so an address moves whenever an attribution does, and the old
+   object is not invalidated — it becomes unaddressable, an orphan reclaimed only by
+   `prune --remote` on age. Deriving the address from the structural fingerprint and the test
+   file's own content, and storing the dependency list (and the environmental fingerprint)
+   *inside* the object to be re-checked against the consumer's tree on adoption, makes the
+   address stable and the check strictly stronger than it is now: a dependency the producer
+   knew about and the consumer does not is currently never checked at all, and would be. This
+   changes the remote object format and belongs in its own release.
+
+Two hazards worth knowing while neither is done, both of which silently give one machine
+different addresses from another's:
+
+- `Cache\Fingerprint::trackedHash()` returns null for a file git does not track, so an
+  **untracked `phpunit-replay.php` or `phpunit.xml`** changes the structural fingerprint and
+  therefore every address. Commit them.
+- `prune --stale-edges` is opt-in, and it removes dependency edges. Whether a machine has run
+  it changes that machine's addresses.
