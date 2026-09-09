@@ -46,6 +46,31 @@ final class ConfigurationReaderTest extends TestCase
         return ConfigurationReader::fromXmlFile($this->xmlFile, $cliArguments);
     }
 
+    /**
+     * Rewrites the fixture's phpunit.xml (still schema-valid: `<groups>` is part of an
+     * `xs:all` group in PHPUnit's own XSD, so its position relative to `<testsuites>`/
+     * `<source>` does not matter) to exclude group "x", the way a real project quarantines
+     * tests that hit a real external service — then builds a reader from it.
+     *
+     * @param list<string> $cliArguments
+     */
+    private function buildWithGroupExcluded(array $cliArguments = []): ConfigurationReader
+    {
+        $content = file_get_contents($this->xmlFile);
+        self::assertIsString($content);
+
+        $withGroups = str_replace(
+            '</testsuites>',
+            "</testsuites>\n    <groups>\n        <exclude>\n            <group>x</group>\n        </exclude>\n    </groups>",
+            $content,
+        );
+        self::assertNotSame($content, $withGroups, 'fixture phpunit.xml no longer contains </testsuites>');
+
+        TempDir::write($this->xmlFile, $withGroups);
+
+        return $this->build($cliArguments);
+    }
+
     public function test_has_partial_selection_is_false_by_default(): void
     {
         self::assertFalse($this->build()->hasPartialSelection());
@@ -69,6 +94,30 @@ final class ConfigurationReaderTest extends TestCase
     public function test_has_partial_selection_is_true_with_a_positional_path_argument(): void
     {
         self::assertTrue($this->build(['tests/CartTest.php'])->hasPartialSelection());
+    }
+
+    /**
+     * Bug fix (rule 1): an XML `<groups><exclude>` is the project's own definition of what
+     * "the whole suite" means, not a selection — `Configuration\Merger` folds it into the
+     * merged `Configuration`'s `hasExcludeGroups()` whenever the CLI side is silent on
+     * groups, which used to make `hasPartialSelection()` report a partial selection with
+     * ZERO command-line arguments on any project whose phpunit.xml excludes a group (a
+     * common way to quarantine tests that hit a real external service).
+     */
+    public function test_has_partial_selection_is_false_with_only_an_xml_exclude_group(): void
+    {
+        self::assertFalse($this->buildWithGroupExcluded()->hasPartialSelection());
+    }
+
+    /**
+     * The same XML exclude, but with the excluded group explicitly asked for on the
+     * command line (e.g. `--group x` to deliberately run the quarantined tests): a REAL
+     * CLI selection must still be detected, exactly as it would be on a phpunit.xml with
+     * no group configuration at all.
+     */
+    public function test_has_partial_selection_is_true_with_an_xml_exclude_group_and_the_same_group_on_the_cli(): void
+    {
+        self::assertTrue($this->buildWithGroupExcluded(['--group', 'x'])->hasPartialSelection());
     }
 
     public function test_source_include_directories_are_absolute(): void

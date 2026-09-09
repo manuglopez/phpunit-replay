@@ -7,6 +7,7 @@ namespace Manuglopez\Replay\Console\Runner;
 use Manuglopez\Replay\Change\Git;
 use Manuglopez\Replay\Support\Paths;
 use PHPUnit\TextUI\CliArguments\Builder as CliArgumentsBuilder;
+use PHPUnit\TextUI\CliArguments\Configuration as CliConfiguration;
 use PHPUnit\TextUI\Configuration\Configuration;
 use PHPUnit\TextUI\Configuration\Merger;
 use PHPUnit\TextUI\XmlConfiguration\Loader as XmlConfigurationLoader;
@@ -62,11 +63,16 @@ final class ProjectLocator
     /**
      * Builds a `Configuration` from the XML file plus CLI-style arguments, in the wrapper
      * process itself, without ever touching `PHPUnit\TextUI\Configuration\Registry` (which
-     * belongs to whatever process eventually runs PHPUnit, not this one).
+     * belongs to whatever process eventually runs PHPUnit, not this one). The CLI half is
+     * returned alongside the merged result — never discarded — so the caller can build a
+     * `PHPUnit\ConfigurationReader` that answers `hasPartialSelection()` from the CLI half
+     * alone rather than from the merged object, which folds the project's own XML
+     * group/testsuite configuration in too (see that method's docblock).
      *
      * @param list<string> $cliArguments
+     * @return array{0: Configuration, 1: CliConfiguration}
      */
-    public function buildConfiguration(string $configFile, array $cliArguments): Configuration
+    public function buildConfiguration(string $configFile, array $cliArguments): array
     {
         $xml = (new XmlConfigurationLoader())->load($configFile);
 
@@ -76,7 +82,7 @@ final class ProjectLocator
             ...$cliArguments,
         ]);
 
-        return (new Merger())->merge($cli, $xml);
+        return [(new Merger())->merge($cli, $xml), $cli];
     }
 
     /** @param list<string> $phpunitArgs */

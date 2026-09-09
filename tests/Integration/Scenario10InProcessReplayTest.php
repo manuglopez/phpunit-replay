@@ -255,6 +255,79 @@ final class Scenario10InProcessReplayTest extends TestCase
         self::assertCount(35, $after->results('main'));
     }
 
+    /**
+     * The in-process side of the false-green vector: with no wrapper in front of this
+     * process, `ReplayExtension::bootstrapInProcess()` (and, through it,
+     * `ReplayState::decideMode()`/`persistInProcess()`) is the only code that ever sees
+     * this run's CLI arguments, off `PHPUnit\TextUI\Configuration\Configuration` — already
+     * merged, XML plus CLI, provenance gone. `ConfigurationReader::hasPartialSelection()`
+     * now rebuilds the CLI half from `$_SERVER['argv']` for exactly this caller
+     * (`ConfigurationReader::cliConfigurationFromArgv()`), so an XML `<groups><exclude>`
+     * still does not count as a selection (rule 1) here either, and a real CLI `--group`
+     * still gates recording (rule 2): the excluded group's real, freshly-executed result
+     * must not enter the graph at all, in-process just as much as through the wrapper
+     * ({@see \Manuglopez\Replay\Tests\Integration\RunPartialSelectionPersistsNothingTest}).
+     */
+    public function test_a_cli_selected_group_run_persists_nothing_in_process(): void
+    {
+        $fixture = $this->fixture();
+
+        $fixture->write('tests/LiveAiTest.php', <<<'PHP'
+            <?php
+
+            declare(strict_types=1);
+
+            namespace App\Tests;
+
+            use PHPUnit\Framework\Attributes\Group;
+
+            final class LiveAiTest extends TestCase
+            {
+                #[Group('live-ai')]
+                public function testCallsARealPaidApi(): void
+                {
+                    self::assertTrue(true);
+                }
+            }
+            PHP);
+
+        $xml = $fixture->read('phpunit.xml');
+        $withExclude = str_replace(
+            '</testsuites>',
+            "</testsuites>\n    <groups>\n        <exclude>\n            <group>live-ai</group>\n        </exclude>\n    </groups>",
+            $xml,
+        );
+        self::assertNotSame($xml, $withExclude);
+        $fixture->write('phpunit.xml', $withExclude);
+        $fixture->repo->commitAll('add an XML-excluded live-ai group');
+
+        $first = $this->phpunit($fixture);
+        self::assertSame(0, $first['exitCode'], $first['stdout'] . $first['stderr']);
+
+        $before = $this->graph($fixture);
+        $liveAiId = 'App\Tests\LiveAiTest::testCallsARealPaidApi';
+
+        // Rule 1: a normal, unfiltered in-process run respects the project's own XML
+        // exclude — the live-ai test never ran, and its id is nowhere in the baseline.
+        self::assertNull($before->result('main', $liveAiId));
+        $sha = $before->recordedSha('main');
+        $stats = $before->stats();
+
+        // Rule 2: a deliberate CLI selection of the excluded group. It really executes
+        // (this is not blocked)...
+        $selected = $this->phpunit($fixture, ['--group', 'live-ai']);
+        self::assertSame(0, $selected['exitCode'], $selected['stdout'] . $selected['stderr']);
+        self::assertStringContainsString('OK (1 test, 1 assertion)', $selected['stdout']);
+        self::assertSame(1, $this->setUpCount($fixture));
+
+        // ...but nothing it observed may enter the cache: no new result, no baseline sha
+        // change, no stats change — a CLI selection persists nothing at all.
+        $after = $this->graph($fixture);
+        self::assertNull($after->result('main', $liveAiId));
+        self::assertSame($sha, $after->recordedSha('main'));
+        self::assertSame($stats, $after->stats());
+    }
+
     public function test_the_wrapper_still_drives_a_suite_that_uses_the_trait(): void
     {
         $fixture = $this->fixture();

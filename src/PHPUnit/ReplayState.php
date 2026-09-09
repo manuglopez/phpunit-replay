@@ -209,7 +209,17 @@ final class ReplayState
         }
 
         $stateDir = StateDirectory::resolve($config->stateDir, $root);
-        $reader = new ConfigurationReader($configuration);
+
+        // Bug fix: no wrapper stands in front of this process, so `$configuration` here is
+        // PHPUnit's own, already-merged `Configuration` — XML plus CLI — which does not
+        // retain provenance for a group/testsuite (`Configuration\Merger` folds a project's
+        // XML `<groups>`/`defaultTestSuite` in whenever the CLI side is silent on them).
+        // `ConfigurationReader::hasPartialSelection()` must answer from the CLI half
+        // ALONE (see its own docblock), so that half is rebuilt here from the one thing
+        // this process, and the wrapper, both ultimately derive it from anyway: the real
+        // command line, `$_SERVER['argv']` — the same source of truth, one definition,
+        // instead of two notions of "the command line asked for a subset" drifting apart.
+        $reader = new ConfigurationReader($configuration, ConfigurationReader::cliConfigurationFromArgv());
         $scope = SourceScope::fromProjectRoot($root, $configuration);
         $driver = DriverDetector::detect($scope);
         $fingerprint = Fingerprint::compute($root, $driver?->name() ?? 'none', $config->staticDeclarationEdges);
@@ -489,12 +499,32 @@ final class ReplayState
             return;
         }
 
+        // Bug fix (the false-green vector): `Mode::ResultsOnly` here means `decideMode()`
+        // found a CLI selection (`ConfigurationReader::hasPartialSelection()`, now answered
+        // from the CLI half alone — see `bootInProcess()`) — "run exactly this", so nothing
+        // this pass observed may enter the cache: no edges, no results, no baseline, no
+        // pruning, no quarantine write, no remote publish. This used to still call
+        // `GraphUpdater::apply(..., recordsEdges: false, ...)` below and persist the
+        // result — `recordsEdges: false` only gates edge writing, so an already-known test
+        // file (e.g. one exercising a live third-party API the project's own suite
+        // otherwise excludes) still had its real result folded into, and persisted with,
+        // the graph, for a later unfiltered run to replay instead of re-executing.
+        if ($mode === Mode::ResultsOnly) {
+            self::closeRemote();
+
+            return;
+        }
+
         $root = self::root();
         $recorder = self::$recorder;
-        $recordsEdges = $recorder !== null && $mode !== Mode::ResultsOnly;
+        // `Mode::ResultsOnly` (the only mode `boot()` ever passes a null driver for) is
+        // handled above; `Mode::Replay` can still reach here with no recorder when no
+        // coverage driver was available at all (`decideMode()` allows replaying an
+        // existing baseline without one — only `Mode::Record` requires a driver).
+        $recordsEdges = $recorder !== null;
 
         $truncated = self::$runWriter?->isTruncated() ?? false;
-        $complete = ! $truncated && $mode !== Mode::ResultsOnly;
+        $complete = ! $truncated;
 
         $partial = new RunPartial(
             $recordsEdges && $recorder !== null ? self::relativiseMap($recorder->perTestFiles(), $root, true) : [],

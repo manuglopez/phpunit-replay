@@ -20,11 +20,14 @@ use PHPUnit\Framework\TestCase;
  * back-to-back `verify` runs claiming "would replay" of 6304 and then 9056 — each run
  * corrupting the graph the next one read.
  *
- * `verify()` now derives `recordsEdges` from `ConfigurationReader::hasPartialSelection()`,
- * exactly the guarantee {@see Scenario06FilterDoesNotTouchEdgesTest} already asserts for
- * `run`'s results-only path. This test asserts the same thing for `verify`: a `--filter`
- * touches only the one test it ran, never the graph's edges, its other cached results, or
- * the published baseline sha.
+ * Second bug fix, the false-green vector: `recordsEdges: false` (the first fix's
+ * outcome) only ever gated edge *writing* — `GraphUpdater::apply()` was still called and
+ * still merged the filtered test's own result regardless, refreshing it in place even
+ * though nothing else was touched. `verify()` now calls `apply()` at all only when
+ * `ConfigurationReader::hasPartialSelection()` is false; a CLI selection persists
+ * NOTHING — not the graph's edges, not its cached results (including the filtered test's
+ * own), not the published baseline sha — exactly the guarantee
+ * {@see Scenario06FilterDoesNotTouchEdgesTest} asserts for `run`'s results-only path.
  */
 final class VerifyFilterGraphIntegrityTest extends TestCase
 {
@@ -76,14 +79,12 @@ final class VerifyFilterGraphIntegrityTest extends TestCase
         self::assertNotNull($updated);
         self::assertSame(0, $updated['status']);
 
-        // Every other cached result (34 of the 35) must be byte-for-byte what the full
-        // record wrote — none pruned, none rewritten by a $complete that had no business
-        // being true for a partial selection.
-        unset($resultsBefore[$testId]);
-        $resultsAfter = $after->results('main');
-        unset($resultsAfter[$testId]);
-        self::assertSame($resultsBefore, $resultsAfter);
-        self::assertCount(34, $resultsAfter);
+        // Bug fix: this used to still refresh the filtered test's OWN cached result even
+        // though nothing else changed. A CLI selection now persists nothing at all: every
+        // one of the 35 cached results, including the filtered test's own, is
+        // byte-for-byte what the full `record` wrote.
+        self::assertSame($resultsBefore, $after->results('main'));
+        self::assertCount(35, $after->results('main'));
     }
 
     /** @return array<string, list<string>> test file => sorted dependencies */
