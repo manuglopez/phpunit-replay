@@ -32,6 +32,7 @@ use Manuglopez\Replay\Hermeticity\Policy;
 use Manuglopez\Replay\Hermeticity\Quarantine;
 use Manuglopez\Replay\Laravel\LaravelDetector;
 use Manuglopez\Replay\Laravel\LaravelIntegration;
+use Manuglopez\Replay\Laravel\OncePerProcessPaths;
 use Manuglopez\Replay\Laravel\ParallelIsolation;
 use Manuglopez\Replay\PHPUnit\ConfigurationReader;
 use Manuglopez\Replay\PHPUnit\ConfigurationWriter;
@@ -125,6 +126,15 @@ final class RunPipeline
      * left null when the flag is off — which is what keeps the graph byte-identical.
      */
     private ?StaticEdges $staticEdges = null;
+
+    /**
+     * The once-per-process residue collaborator (docs/reproducibility.md "Once-per-process
+     * residue"): built alongside {@see self::$staticEdges}, only when that flag is on AND
+     * the project is a detected Laravel one — null otherwise, in which case
+     * `Cache\GraphUpdater::apply()` records a migration/seeder/console-command edge exactly
+     * as before.
+     */
+    private ?OncePerProcessPaths $onceProcessPaths = null;
 
     private ?Graph $graph = null;
 
@@ -318,6 +328,10 @@ final class RunPipeline
                 SourceScope::fromProjectRoot($root, $configuration),
                 new FactsCache($this->stateDir, $root),
             );
+
+            if (LaravelDetector::enabled($root, $config)) {
+                $this->onceProcessPaths = new OncePerProcessPaths();
+            }
         }
         $this->openRemote($request, $root, $config);
 
@@ -594,7 +608,7 @@ final class RunPipeline
                     $partial = LaravelIntegration::augment($partial, $root);
                 }
 
-                $updater = new GraphUpdater($this->graph, $root, new ContentKey($root), $this->quarantine, $this->staticEdges, $this->git);
+                $updater = new GraphUpdater($this->graph, $root, new ContentKey($root), $this->quarantine, $this->staticEdges, $this->git, $this->onceProcessPaths);
                 $updater->apply($partial, $this->branch, recordsEdges: false, complete: false);
                 $this->store->save($this->graph);
                 $this->quarantine->save($this->stateDir);
@@ -661,7 +675,7 @@ final class RunPipeline
 
         $complete = ! (bool) ($partial->meta['truncated'] ?? false) && in_array($exitCode, [0, 1], true);
 
-        $updater = new GraphUpdater($graph, $root, new ContentKey($root), $this->quarantine, $this->staticEdges, $this->git);
+        $updater = new GraphUpdater($graph, $root, new ContentKey($root), $this->quarantine, $this->staticEdges, $this->git, $this->onceProcessPaths);
         $applied = $updater->apply($partial, $this->branch, recordsEdges: true, complete: $complete);
         $this->quarantine->save($this->stateDir);
 
@@ -768,7 +782,7 @@ final class RunPipeline
 
         // No quarantine passed here: divergences are detected explicitly below (reason
         // 'divergence', not the generic 'flip' GraphUpdater's own detection would use).
-        $updater = new GraphUpdater($graph, $root, new ContentKey($root), null, $this->staticEdges, $this->git);
+        $updater = new GraphUpdater($graph, $root, new ContentKey($root), null, $this->staticEdges, $this->git, $this->onceProcessPaths);
         $updater->apply($partial, $this->branch, recordsEdges: $recordsEdges, complete: $complete);
 
         if ($this->fingerprintDrifted($partial)) {
@@ -1057,7 +1071,7 @@ final class RunPipeline
         if ($runList === []) {
             if ($changed !== []) {
                 if ($this->persist && (! $this->ciMode || $request->allowCiBaseline)) {
-                    (new GraphUpdater($graph, $root, new ContentKey($root), $this->quarantine, $this->staticEdges, $this->git))
+                    (new GraphUpdater($graph, $root, new ContentKey($root), $this->quarantine, $this->staticEdges, $this->git, $this->onceProcessPaths))
                         ->finalizeBaseline($this->branch, $this->head, $this->git->branchNames());
                 }
 
@@ -1140,7 +1154,7 @@ final class RunPipeline
 
         $complete = ! (bool) ($partial->meta['truncated'] ?? false) && in_array($exitCode, [0, 1], true);
 
-        $updater = new GraphUpdater($graph, $root, new ContentKey($root), $this->quarantine, $this->staticEdges, $this->git);
+        $updater = new GraphUpdater($graph, $root, new ContentKey($root), $this->quarantine, $this->staticEdges, $this->git, $this->onceProcessPaths);
         $applied = $updater->apply($partial, $this->branch, recordsEdges: $recordsEdges, complete: $complete);
         $this->quarantine->save($this->stateDir);
 

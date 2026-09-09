@@ -127,6 +127,146 @@ edges into the graph instead of replacing them, so repeated recordings converge 
 miss in the next, never to a stale hit. That property is what makes an unavoidable residual
 acceptable rather than dangerous.
 
+Three of the five kinds above — `app/Console/Commands/*`, `database/seeders/*`,
+`database/migrations/*` — are, as of this writing, addressed rather than merely mitigated: see
+**Once-per-process residue** below. `app/Services/*` and the factory/model pair are not, and keep
+moving exactly as measured here.
+
+## Once-per-process residue
+
+The measurement above shows the shrinking-holder-set mechanism and argues the union makes it a
+cache miss rather than a stale hit — true across the passes actually recorded, but not the whole
+claim a "false green" needs, and not the property that actually decides whether this is closed.
+
+**The real acceptance test is not "two parallel passes agree."** Serial and parallel are the two
+*extremes* of first-loader attribution, not two samples of the same thing: serial (one process for
+the whole suite) makes a once-per-process body execute exactly once in the entire run, crediting
+the minimum possible — one test; parallel at 8 workers executes it once per worker, crediting up
+to eight; a fully process-isolated run (one process per test) would credit every test that triggers
+it, the complete attribution. Measured directly on the project above, **both post-fix and with the
+flag off**: a serial `record` produces 60,282 edges, an 8-worker parallel one 60,572 — **+290** —
+and **95 of the 726 test files have a different dependency set between the two shapes.** Two
+parallel passes agreeing therefore proves much less than it looks: serial is reproducible precisely
+*because* it makes one deterministic arbitrary choice every time, not because that choice is
+representative of what a test actually depends on. The property this fix has to deliver is that a
+serial and a parallel recording of the identical tree produce the identical graph —
+`tests/Integration/OnceProcessResidueParallelTest.php` pins exactly that, over a reproduction built
+by hand (a guard checked *before* ever calling into the once-per-process resource, never inside it,
+mirroring `RefreshDatabaseState::$migrated`) rather than a real `Illuminate\Console\Command`, so it
+runs without the full measured project.
+
+Paratest's work distribution is not resampled at random on every `record` either: for a fixed test
+file set and worker count, the same file lands in the same worker, in the same position, run after
+run. A test that never once happens to be the first loader in *any* of those runs never gets the
+edge to lose — the union has nothing to converge toward for it, no matter how many times the suite
+is re-recorded. That is the actual gap: not "this edge sometimes goes stale" but "this test may
+never receive it at all," for as long as the graph is willing to guess at all rather than fall
+back. This section records the fix built for it — as proposed design, in this document's own
+register: measured numbers, mechanism, cost, no salesmanship — not as a claim that the residual is
+now fully closed.
+
+### The population, precisely
+
+Of **381** shape-dependent attributions measured (serial vs. parallel, the comparison above), this
+fix's three conventions account for **223 (58.5%)**, over **16** files: 4 migrations, 7 seeders, 5
+console commands. **138 of the 726 test files (19%)** hold an edge to at least one of **141**
+distinct files under those three directories — the five console commands alone carry 129 holders
+each.
+
+The remaining **158 attributions, over 37 files**, are not covered by this fix. Most of those 37
+are declaration-only (enums, interfaces, base classes) and are already handled by
+`static_declaration_edges`'s existing static hop — counted here because they are still
+shape-dependent *without* that flag, not because this PR was expected to reach them. Two are
+genuinely uncovered and have real bodies: `app/Services/Profiles/PhoneNormalizer.php` (+17 tests)
+and `app/Services/Publisher/Publication/PublisherUnpublishService.php` (+16). Their instability
+does not have an explained mechanism as of this writing — the behavioural filter
+(`Record\Recorder::filesWithExecutedLines()`, `Analysis\FileFacts::coversAnyBodyLine()`) is built
+so that a called method's lines are shape-independent by construction, and `Analysis\StaticEdges`
+can only reach a file with a body through a test's own (equally shape-independent) name reference —
+so on a reading of this package's own code, neither file should be able to move at all. Recorded
+here as an open question rather than a claim: something about these two files or how they are
+constructed keeps them moving, and it is not one of the three conventions this fix targets.
+
+### The fix, and its cost
+
+`Cache\GraphUpdater::apply()` now refuses to record a coverage-derived edge to a file under
+`database/migrations/`, `database/seeders/` or `app/Console/Commands/`
+(`Laravel\OncePerProcessPaths`), gated on `static_declaration_edges` — the same flag that installs
+`Select\ResiduePatterns`, which is what makes refusing the edge safe rather than a new hole with
+nothing under it. The file keeps no `fileId` at all, ever, regardless of which test a worker
+process happened to credit; a change to it is then covered the same way a `config/*.php` or
+`lang/*.php` edit already is ("The cost of `static_declaration_edges`, corrected" above): **every
+test the graph knows runs**.
+
+That cost is not hypothetical, and it is not free: measured from the project's own git history,
+**318 of the last 1,530 commits (20%) touch one of the three directories** — 151 touch a migration,
+200 a console command, 9 a seeder. Roughly **one run in five** would run the whole suite instead of
+whatever the fast lane would otherwise have selected, at an expected cost of about **one minute per
+run** on a suite whose 8-worker `record` takes 5m05s. State plainly: this is the price, not a free
+correctness upgrade, and it is paid on one run in five rather than rarely.
+
+One further consequence worth stating, since it bears on this document's own question: refusing
+the edge outright, rather than recording whichever one a worker happened to produce, also removes
+these three conventions from the *content key* of every test that would otherwise have depended on
+them — a test's key is a function of its sorted dependency list, and a dependency that is never
+recorded can no longer make that list differ between machines. Before this fix, two machines
+running the same suite with different worker distributions could compute different content keys
+for the same test purely because of which one got credited with a migration; after it, neither
+does, and the key is identical by construction. That is a small amount of the reproducibility this
+whole document is about, recovered as a side effect of removing the edge rather than as its goal.
+
+### Considered and rejected: exempting the holders instead
+
+`Hermeticity\Policy`'s `never_cache` mechanism already exists and could have been pointed at the
+138 holder test files instead of touching edge recording at all. It costs the same **in
+expectation** — 19% of test files always running, the same fraction the residue trade above pays —
+but it does not produce a unique graph, because the disputed edges would still be recorded exactly
+as before: content keys keep moving with whichever worker happened to attribute a migration, and
+the remote cache stays unshareable across machines for precisely the reason "Why this decides
+whether the remote cache can work at all" above states. Refusing the edge is the lever that
+actually changes what the graph *is*; exempting the tests from caching would only have changed
+which ones run, at the same cost, while leaving the underlying non-determinism this whole document
+is about fully in place.
+
+### Deliberately not in this PR
+
+- **Hash-based invalidation, replacing the git-diff gate.** `Change\ChangedFiles::since()` decides
+  what changed from `git diff`/`git status` against a recorded sha. Comparing a content hash
+  against what the graph already stored, independent of git history, would make that decision
+  identical whether it runs on a developer's machine or in CI, and git-independent — no longer
+  contingent on git being available, configured the same way, or seeing the same history in both
+  places.
+- **Per-method granularity.** Residue is file-level: any change anywhere in a migration re-runs
+  every test the graph knows, including a comment-only edit to an unrelated method.
+  `Analysis\DeclarationScanner` already caches each declaration's body line range for
+  `static_declaration_edges`; the same ranges make "which method changed, and which tests actually
+  reach it" feasible without a new parse pass. Worth doing: the once-per-process files measured
+  here range from roughly a dozen holders (a migration or seeder) to 129 (a console command),
+  against the whole 9,056 residue currently forces regardless of which one changed.
+- **A two-part remote object.** Address from the structural fingerprint plus the test file's own
+  content, with the dependency list, the test's content and the environmental fingerprint stored
+  *inside* the object and re-checked against the consumer's tree on adoption. Today the dependency
+  list is *in* the object's address (`Cache\ContentKey::forTestFile()`), so an address moves
+  whenever an attribution does, and the object it displaces is not invalidated — it becomes an
+  orphan, reclaimed only by `prune --remote` on age. This changes the remote object format and
+  belongs in its own release; it is the same design already proposed in "What this means for
+  sharing a cache" below, repeated here because a once-per-process residue selection is exactly the
+  kind of whole-suite, address-churning event that design would make cheaper to recover from.
+
+### Two hazards that already apply here
+
+Both already recorded in "What this means for sharing a cache" below, and neither is specific to
+this fix — they govern the `fileId() !== null` / residue partition generally, for any file, and
+this fix only adds three more kinds of file that are *unconditionally* on the residue side of it:
+
+- `Cache\Fingerprint::trackedHash()` returns null for a file git does not track, so an untracked
+  `phpunit-replay.php` or `phpunit.xml` changes the structural fingerprint — and therefore whether
+  a loaded graph, and its residue set, is even the right one for the current tree. Commit them.
+- `prune --stale-edges` is opt-in and removes dependency edges; whether a given machine has run it
+  changes which files that machine's graph currently has a `fileId` for, and therefore which
+  changes `Rules\PhpEdgeRule` covers by edge versus which `Select\ResiduePatterns` covers by residue
+  on that machine.
+
 ## The cost of `static_declaration_edges`, corrected
 
 The 0.3.0 changelog gives the flag's cost as "+2.84% (1,781 edges)". That figure is the count
@@ -224,7 +364,8 @@ without touching the project.
 | edges to generated, per-worker paths | **solved** — none recorded |
 | declaration first-loader attribution | **solved** by `static_declaration_edges`, at a documented cost |
 | reproducibility for a fixed execution shape | **solved** — two sequential passes agree on every content key |
-| once-per-worker side-effect attribution (migrations, seeders, command registration) | **inherent** to how Paratest distributes work; it is what the 14–22 residual under 8 workers is, it is made safe by edge union, and it disappears entirely when one job records the graph and the rest pull it |
+| once-per-worker side-effect attribution: migrations, seeders, console commands | **addressed** — no coverage-derived edge recorded at all (`Once-per-process residue` above); a change re-runs the whole suite instead |
+| once-per-worker side-effect attribution: `app/Services/*`, a factory, a model | **inherent** — path alone cannot say "executes once per process" the way a migration's does; still made safe by edge union, and it disappears entirely when one job records the graph and the rest pull it |
 | which tests move the suite's assertion total | **solved** — one test, whose count scales with application boots per process |
 
 ## What this means for sharing a cache
