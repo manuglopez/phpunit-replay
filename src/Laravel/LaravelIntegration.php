@@ -6,15 +6,15 @@ namespace Manuglopez\Replay\Laravel;
 
 use Manuglopez\Replay\Cache\Graph;
 use Manuglopez\Replay\Config;
+use Manuglopez\Replay\Laravel\Rules\BladeRule;
+use Manuglopez\Replay\Laravel\Rules\MigrationRule;
+use Manuglopez\Replay\Laravel\Rules\SiblingRule;
+use Manuglopez\Replay\Laravel\Subscribers\ArmLaravelTrackersOnPrepared;
+use Manuglopez\Replay\Laravel\Subscribers\FlushUsesDatabaseOnExecutionFinished;
 use Manuglopez\Replay\PHPUnit\ReplayState;
-use Manuglopez\Replay\PHPUnit\Subscribers\ArmLaravelTrackersOnPrepared;
-use Manuglopez\Replay\PHPUnit\Subscribers\FlushUsesDatabaseOnExecutionFinished;
 use Manuglopez\Replay\Record\Recorder;
 use Manuglopez\Replay\Record\RunPartial;
 use Manuglopez\Replay\Select\Rule;
-use Manuglopez\Replay\Select\Rules\BladeRule;
-use Manuglopez\Replay\Select\Rules\MigrationRule;
-use Manuglopez\Replay\Select\Rules\SiblingRule;
 use PHPUnit\Event\Subscriber;
 
 /**

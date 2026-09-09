@@ -45,7 +45,7 @@ use Manuglopez\Replay\Cache\Graph;
  * a glob: `WatchPatterns::parse()` splits a key on whitespace and reads a leading `!` as an
  * exclude token, so `lang/es MX/messages.php` would otherwise never match its own file.
  *
- * `.blade.php` is excluded: {@see Rules\BladeRule} and the Laravel `resources/views/**`
+ * `.blade.php` is excluded: {@see \Manuglopez\Replay\Laravel\Rules\BladeRule} and the Laravel `resources/views/**`
  * default already own that path, and its own unmatched files already fall through to
  * `WatchRule` anyway.
  *

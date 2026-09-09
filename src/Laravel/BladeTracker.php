@@ -66,7 +66,7 @@ final class BladeTracker
      * template. `config('view.compiled')` is read fresh on every call — never cached at
      * `arm()` time — because Laravel Parallel Testing rewrites that config value per worker
      * process during its own setup, which runs after `arm()`'s once-per-Container
-     * bootstrapping ({@see \Manuglopez\Replay\PHPUnit\Subscribers\ArmLaravelTrackersOnPrepared}):
+     * bootstrapping ({@see \Manuglopez\Replay\Laravel\Subscribers\ArmLaravelTrackersOnPrepared}):
      * a value captured once could be stale for the worker that actually renders a given view,
      * or simply absent before the first worker callback has run at all.
      */

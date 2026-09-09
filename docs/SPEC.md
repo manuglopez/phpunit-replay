@@ -71,7 +71,7 @@ phpunit-replay/
 │   │   ├── Selector.php               # affected() algorithm
 │   │   ├── WatchPatterns.php          # globs → test directories
 │   │   ├── TestPaths.php              # what a test file is (phpunit.xml)
-│   │   └── Rules/                     # one class per rule (PHP edges, test file, watch, sibling, tables, blade)
+│   │   └── Rules/                     # one class per rule (PHP edges, test file, watch)
 │   ├── Hermeticity/
 │   │   ├── Quarantine.php             # flaky.json: tests that flipped with no changes
 │   │   └── Policy.php                 # NotCacheable + globs + quarantine → cacheable?
@@ -372,7 +372,7 @@ The **invariant** the flag is held to: with it on, no test loses an edge the fla
 it, unless that edge was itself first-loader noise *and* something else now covers the file —
 either the tests that call into it or name it (it has a `fileId`, so §7.2.2 selects them), or
 the whole suite (it has none, so the residue net selects everything). A changed file is never
-silently attributed to nobody. `Select\Rules\SiblingRule` therefore only consumes a path once
+silently attributed to nobody. `Laravel\Rules\SiblingRule` therefore only consumes a path once
 it has actually found a tested sibling to stand on, the way `BladeRule` does with its
 ancestors: consuming it unmatched hid it from `WatchRule`, which with the flag on is the only
 thing that would have covered it (the Laravel watch default for `app/` is `app/** !*.php` and

@@ -2,11 +2,11 @@
 
 declare(strict_types=1);
 
-namespace Manuglopez\Replay\Tests\Unit\Select\Rules;
+namespace Manuglopez\Replay\Tests\Unit\Laravel\Rules;
 
 use Manuglopez\Replay\Cache\Graph;
+use Manuglopez\Replay\Laravel\Rules\SiblingRule;
 use Manuglopez\Replay\Select\Context;
-use Manuglopez\Replay\Select\Rules\SiblingRule;
 use Manuglopez\Replay\Select\Selection;
 use Manuglopez\Replay\Select\TestPaths;
 use Manuglopez\Replay\Select\WatchPatterns;
