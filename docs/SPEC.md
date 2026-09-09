@@ -398,6 +398,47 @@ are not comparable, so flipping it in either direction is structural drift and f
 record. Adding the key unconditionally would have invalidated every existing cache
 everywhere; leaving it out when off is what makes the feature shippable.
 
+**Once-per-process residue.** A body running is not always the declaration/first-loader shape
+above — a Laravel migration, seeder or console command (`app/Console/Commands/`) has real method
+bodies, so neither half above skips it, but that body executes **once per worker process**,
+guarded by the framework's own testing lifecycle (`RefreshDatabase`/`DatabaseMigrations` migrate
+and seed a worker's database once, not once per test): the same first-loader shape as a
+declaration, one level down the call stack. Coverage still credits it to whichever test happened
+to trigger it first in that worker, and the holder set measured on the project above **shrinks
+rather than swaps** across re-recordings (see [reproducibility.md](reproducibility.md)
+"Once-per-process residue" for the mechanism and the numbers) — `Graph::unionEdges()` cannot
+repair that the way it repairs an ordinary partial re-record, because a test that never once
+happened to be the first loader in any worker distribution never gets the edge to lose. With the
+flag on, `Cache\GraphUpdater::apply()` refuses to record a **coverage-derived** edge to a file
+under `database/migrations/`, `database/seeders/` or `app/Console/Commands/`
+(`Laravel\OncePerProcessPaths`, autodetected the same way as the rest of the Laravel integration,
+§10) — the file keeps no `fileId`, which is exactly the residue bucket two paragraphs up, so a
+change to it re-runs everything the graph knows rather than only whichever test happened to be
+credited. The **static** hop (above) is deliberately untouched: a test whose own source names one
+of these files still gets the edge from it, because a name reference is order-independent
+evidence and coverage attribution is the only half of the two that is not — only
+`Graph::unionEdges()`'s coverage-derived write is refused, never `Analysis\StaticEdges::expand()`'s.
+Gated on `static_declaration_edges` exactly like everything else on this page: with the flag off
+there is no residue net to catch a refused edge (`Select\RunListBuilder::build()` only installs
+`Select\ResiduePatterns` when the flag is on), so the coverage-derived edge is recorded exactly as
+it always was — refusing it with no net would be a strictly worse false green than the one this
+closes.
+
+This closes the gap for the three conventions the measured suite actually moved on. Two shapes in
+that same measurement are **not** covered and keep moving: an `app/Services/*` class and a
+factory/model pair. Nothing about their path says "executes once per process" the way a
+migration's does — a service might be a request-scoped singleton or might not be, and guessing
+wrong in the "still gets an edge" direction reintroduces the bug. Nor is a live Illuminate
+container ever consulted to find out (e.g. asking the booted application for its configured
+migration paths): `Cache\GraphUpdater::apply()` runs both from the wrapper, with nothing loaded,
+and in-process, with Laravel already booted (§6.1) — an answer that depends on which of those
+handled a given recording pass would be the same process-shape-dependent non-determinism this fix
+removes, one level up. A project with an unconventional migration layout
+(`Modules/*/Database/Migrations`) is therefore unknown to `OncePerProcessPaths` for the same
+reason, and keeps today's behaviour. No configuration governs any of this, deliberately, matching
+§7.3's own precedent: extending or narrowing the convention list is a code change, not a project
+setting.
+
 ### 4.4 ContentHash (normalization)
 
 - `.php` (not `.blade.php`): `token_get_all`, drop `T_WHITESPACE`, `T_COMMENT`, `T_DOC_COMMENT`, concatenate the `text` of each token, `hash('xxh128', ...)`. If the tokenizer returns empty → hash the raw content.
@@ -597,6 +638,7 @@ Post-processing: if any source `.php` file changed and **no driver is available*
 - Partial / truncated / results-only run: only merges results for already-known test files; no sha, no pruning, no edges.
 - Always: recompute `k` for each touched test file and, if there's a remote, `put(objects/<k>.json)`.
 - **No edge to a file `git check-ignore` matches.** `Cache\GraphUpdater::apply()` and `Analysis\StaticEdges::expand()` are the only two places an edge is ever written into the graph, and both refuse one whose source is ignored — batched once per `apply()` call over stdin (`Change\Git::ignored()`, shared with `ChangedFiles::since()` itself), never once per file or per writer. Deliberately **IGNORED, not UNTRACKED**: an ignored path can never appear in `ChangedFiles::since()` (§7.1 step 4), so such an edge could never trigger a rerun — it is pure content-key pollution (measured cause: a Laravel compiled Blade view under `bootstrap/cache/`, whose path additionally carries a per-paratest-worker token, so which worker ran a test changed that test's dependency set between two otherwise-identical `record` passes). An **untracked-but-not-ignored** file is the opposite and keeps its edge: it *does* appear in `ChangedFiles::since()` (§7.1 step 3, `--untracked-files=all`), so refusing it would leave `Graph::fileId()` null and `PhpEdgeRule` (§7.2 step 2) skipping it until the next full fresh `record`. Fails open (no git, not a repository, a subprocess error or a timeout) exactly like `Fingerprint::isTrackedByGit()`: the edge is recorded, not discarded, when the check itself cannot run. No configuration governs this — `.gitignore` (and `.git/info/exclude`, the global excludes file) is the one mechanism, matching `Select\ResiduePatterns`' own stated principle that an allowlist of source paths is unsafe by construction.
+- **No coverage-derived edge to a Laravel migration, seeder or console command (§4.3.1 "Once-per-process residue"), only when `static_declaration_edges` is on.** `Cache\GraphUpdater::apply()` refuses a `Graph::unionEdges()` write whose source matches `Laravel\OncePerProcessPaths` (`database/migrations/`, `database/seeders/`, `app/Console/Commands/`), leaving the file with no `fileId` — the residue bucket `Select\ResiduePatterns` owns, so a change re-runs everything the graph knows instead of only whichever test a worker process happened to credit. `Analysis\StaticEdges::expand()`'s write is untouched: a test whose own source names one of these files still gets the edge. With the flag off there is no residue net, so the edge is recorded exactly as before — this fix is a no-op with the flag off, by construction, not by convention.
 
 ---
 

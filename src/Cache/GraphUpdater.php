@@ -8,6 +8,7 @@ use Manuglopez\Replay\Analysis\StaticEdges;
 use Manuglopez\Replay\Change\Git;
 use Manuglopez\Replay\Console\Runner\Warnings;
 use Manuglopez\Replay\Hermeticity\Quarantine;
+use Manuglopez\Replay\Laravel\OncePerProcessPaths;
 use Manuglopez\Replay\Record\RunPartial;
 
 /**
@@ -36,6 +37,13 @@ final class GraphUpdater
      * default, and every existing caller — leaves {@see self::apply()} recording exactly
      * the edges the coverage driver reported, byte for byte.
      *
+     * `$onceProcessPaths` is the once-per-process residue fix (docs/reproducibility.md
+     * "Once-per-process residue"): non-null only when the caller ALSO built `$staticEdges`
+     * (`Console\Runner\RunPipeline`, `PHPUnit\ReplayState` construct both together, gated on
+     * `static_declaration_edges` AND a detected Laravel project). {@see self::apply()}
+     * re-checks `$staticEdges !== null` itself before ever consulting it — see the comment
+     * there for why that second check is not redundant.
+     *
      * `$git` defaults to a fresh `Change\Git` scoped to `$projectRoot`, matching the same
      * "inject or construct" convention as `Change\ChangedFiles`. A caller that already has
      * one (`Console\Runner\RunPipeline`, `PHPUnit\ReplayState`) passes it through instead of
@@ -48,6 +56,7 @@ final class GraphUpdater
         private readonly ?Quarantine $quarantine = null,
         private readonly ?StaticEdges $staticEdges = null,
         ?Git $git = null,
+        private readonly ?OncePerProcessPaths $onceProcessPaths = null,
     ) {
         $this->git = $git ?? new Git($projectRoot);
     }
@@ -94,6 +103,34 @@ final class GraphUpdater
                 self::debugExcluded($partial->edges, $ignored);
             }
 
+            // Once-per-process Laravel sources (docs/reproducibility.md "Once-per-process
+            // residue"): a migration, seeder or console command whose body a coverage driver
+            // saw executed is credited to whichever test happened to trigger it first in
+            // this worker process — every OTHER test that also depends on it never gets the
+            // edge, no matter how many times the suite is re-recorded. `$edgesToRecord` is
+            // therefore a SEPARATE variable from `$filteredEdges`, not a reassignment of it:
+            // `$filteredEdges` still feeds `behaviouralEdges()` below unfiltered, because the
+            // static hop's "the test's own source names it" case must still be free to link
+            // one of these files (a name reference is order-independent evidence, the good
+            // half — docs/reproducibility.md). Only the COVERAGE-derived edge computed here
+            // is refused.
+            //
+            // Gated on `$this->staticEdges !== null` — re-checked here even though
+            // `$onceProcessPaths` is itself only ever constructed alongside it
+            // (`Console\Runner\RunPipeline`, `PHPUnit\ReplayState`, both gated on
+            // `static_declaration_edges` — deliberately, so this can never engage with the
+            // flag off even if a future caller gets that construction site wrong. With the
+            // flag off, `Select\RunListBuilder::build()` never installs the
+            // `Select\ResiduePatterns` fallback, so a refused edge would leave NOTHING
+            // selecting the file at all — a new, strictly worse false green than the one
+            // this exists to close. Do not remove this check as a "simplification": it is
+            // the one invariant that keeps this fix from becoming the bug it removes.
+            $edgesToRecord = $filteredEdges;
+
+            if ($this->staticEdges !== null && $this->onceProcessPaths !== null) {
+                $edgesToRecord = self::withoutOnceProcessSources($edgesToRecord, $this->onceProcessPaths);
+            }
+
             // Union, not replace (Cache\Graph::unionEdges() docblock): this partial only
             // reflects what THIS run's coverage attributed, which can under-report a test
             // file's true dependencies (first-loader-wins, docs/SPEC.md §4.3) relative to
@@ -101,14 +138,14 @@ final class GraphUpdater
             // artifact — a Laravel query listener re-attributes every table a test
             // queries on every single run (Laravel\TableTracker), never just the first —
             // so `replaceTestTables` below stays exact.
-            $this->graph->unionEdges($filteredEdges);
+            $this->graph->unionEdges($edgesToRecord);
             $this->graph->markKnownTestFiles($executed);
 
             if ($partial->tables !== []) {
                 $this->graph->replaceTestTables($partial->tables);
             }
 
-            foreach ($filteredEdges as $sources) {
+            foreach ($edgesToRecord as $sources) {
                 $edgesCount += count($sources);
             }
 
@@ -118,6 +155,9 @@ final class GraphUpdater
             // then final) dependency list. $ignored is passed through so this writer refuses
             // the same paths the one above does — it is the OTHER of the two edge writers the
             // "no edge to an ignored file" rule has to reach (docs/SPEC.md, "edge recording").
+            // Hop sources come from $filteredEdges (NOT $edgesToRecord): see the once-process
+            // comment above for why a once-per-process file must still be usable as a hop
+            // source, and reachable through the test's own name reference.
             if ($this->staticEdges !== null) {
                 $edgesCount += $this->staticEdges->expand($this->graph, self::behaviouralEdges($filteredEdges, $executed), $ignored);
             }
@@ -200,6 +240,29 @@ final class GraphUpdater
             $out[$testFile] = array_values(array_filter(
                 $sources,
                 static fn (string $source): bool => ! isset($ignored[$source]),
+            ));
+        }
+
+        return $out;
+    }
+
+    /**
+     * The other filter over the coverage-derived edges, in the same shape as
+     * {@see self::withoutIgnored()}: drops any source matching {@see OncePerProcessPaths}
+     * from every test's edge list, never the test's own key (a test that only ever
+     * depended on such a file still needs `markKnownTestFiles()` to know about it).
+     *
+     * @param array<string, list<string>> $edges
+     * @return array<string, list<string>>
+     */
+    private static function withoutOnceProcessSources(array $edges, OncePerProcessPaths $onceProcessPaths): array
+    {
+        $out = [];
+
+        foreach ($edges as $testFile => $sources) {
+            $out[$testFile] = array_values(array_filter(
+                $sources,
+                static fn (string $source): bool => ! $onceProcessPaths->matches($source),
             ));
         }
 

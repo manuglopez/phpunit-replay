@@ -27,6 +27,7 @@ use Manuglopez\Replay\Hermeticity\Policy;
 use Manuglopez\Replay\Hermeticity\Quarantine;
 use Manuglopez\Replay\Laravel\LaravelDetector;
 use Manuglopez\Replay\Laravel\LaravelIntegration;
+use Manuglopez\Replay\Laravel\OncePerProcessPaths;
 use Manuglopez\Replay\PHPUnit\Decision\Decision;
 use Manuglopez\Replay\PHPUnit\Decision\ReplayIncomplete;
 use Manuglopez\Replay\PHPUnit\Decision\ReplayPass;
@@ -102,6 +103,13 @@ final class ReplayState
 
     /** The `static_declaration_edges` collaborator (SPEC.md §4.3.1); null when the flag is off. */
     private static ?StaticEdges $staticEdges = null;
+
+    /**
+     * The once-per-process residue collaborator (docs/reproducibility.md "Once-per-process
+     * residue"); built alongside {@see self::$staticEdges} in {@see self::bootInProcess()},
+     * only when that flag is on AND the project is a detected Laravel one.
+     */
+    private static ?OncePerProcessPaths $onceProcessPaths = null;
 
     private static ?Git $git = null;
 
@@ -209,6 +217,10 @@ final class ReplayState
 
         if ($facts !== null) {
             self::$staticEdges = new StaticEdges($root, $scope, $facts);
+
+            if (LaravelDetector::enabled($root, $config)) {
+                self::$onceProcessPaths = new OncePerProcessPaths();
+            }
         }
 
         $branch = $git->currentBranch();
@@ -498,7 +510,7 @@ final class ReplayState
         }
 
         $git = self::$git ?? new Git($root);
-        $updater = new GraphUpdater($graph, $root, new ContentKey($root), self::$quarantine, self::$staticEdges, $git);
+        $updater = new GraphUpdater($graph, $root, new ContentKey($root), self::$quarantine, self::$staticEdges, $git, self::$onceProcessPaths);
         $applied = $updater->apply($partial, self::$branch, recordsEdges: $recordsEdges, complete: $complete);
         self::$excludedEdges = $applied['excludedEdges'];
 
@@ -654,6 +666,7 @@ final class ReplayState
         self::$reader = null;
         self::$quarantine = null;
         self::$staticEdges = null;
+        self::$onceProcessPaths = null;
         self::$git = null;
         self::$excludedEdges = 0;
         self::$branch = 'HEAD';

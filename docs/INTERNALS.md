@@ -988,3 +988,98 @@ pollution left in a graph recorded before this shipped; rendered beside the `edg
 No configuration: an allowlist design (`source_paths`) was considered and rejected — `.gitignore`
 is the one exclusion lever, matching `Select\ResiduePatterns`'s own stated principle that an
 allowlist omitting a real source root is an unsafe default.
+
+### Once-per-process residue (SPEC §4.3.1, §7.3) — `src/Laravel/OncePerProcessPaths.php`
+
+Root cause (measured on the same 9056-test Laravel project, two identical `record --parallel=8`
+passes with `static_declaration_edges` on, each from an empty graph): 22 of 726 test files' edge
+sets still moved. Classified with this package's own `Analysis\DeclarationScanner`: all 22 have
+function bodies, none is declaration-only — not the first-loader problem the flag already fixes.
+`app/Console/Commands/*` (5), `database/seeders/*` (7) and `database/migrations/*` (4) are Laravel
+conventions whose body genuinely executes once per worker process (a migration/seeder guarded by
+`RefreshDatabase`'s own once-per-worker migrate+seed; a command's registration once per Kernel
+boot), so coverage credits whichever test triggered it first in that worker, same shape as a
+declaration one level down the call stack. Holder identities, not just counts, were extracted from
+the graphs to confirm the mechanism: the set **shrinks rather than swaps** pass to pass (e.g.
+`app/Console/Commands/BackfillRecoveryLeads.php` 129 → 128 → 128 holders) — `Graph::unionEdges()`
+cannot repair this the way it repairs an ordinary partial re-record, because a test that never once
+happened to be the first loader in any of Paratest's worker distributions never gets the edge to
+lose in the first place. See [reproducibility.md](reproducibility.md) "Once-per-process residue"
+for the full measurement; `app/Services/*` (2) and a factory/model pair (2) moved too and are
+**not** covered by this fix (see "What this does not cover" below).
+
+```php
+final class Laravel\OncePerProcessPaths
+{
+    // database/migrations/, database/seeders/, app/Console/Commands/ — exact-case prefix match,
+    // no filesystem access, no Illuminate, no application boot.
+    public function matches(string $relative): bool;
+}
+```
+
+Wiring: a new optional `Cache\GraphUpdater` constructor parameter,
+`?Laravel\OncePerProcessPaths $onceProcessPaths = null` (last positional slot, after the existing
+`?Change\Git $git = null`). `Console\Runner\RunPipeline` and `PHPUnit\ReplayState::bootInProcess()`
+each build one alongside their `?Analysis\StaticEdges`, both inside the same
+`if ($config->staticDeclarationEdges)` block, gated additionally on `Laravel\LaravelDetector::enabled()`
+— threaded through every `new GraphUpdater(...)` call site exactly as `$staticEdges` already is (7
+sites total: 1 in `ReplayState.php`, 6 in `RunPipeline.php`, one of which never calls `apply()` at
+all — `finalizeBaseline()` — and still receives it for constructor-shape consistency).
+
+`Cache\GraphUpdater::apply()` computes a **second**, separate filtered edge map — `$edgesToRecord`
+— from `$filteredEdges` (the existing git-ignore-filtered map), stripping any source
+`$onceProcessPaths->matches()` accepts, but only when **both** `$staticEdges !== null` **and**
+`$onceProcessPaths !== null`: the flag re-check is deliberate and redundant with the constructor
+sites above on purpose, so a future caller that builds `$onceProcessPaths` without also building
+`$staticEdges` cannot silently make this fire with the flag off, which would refuse an edge with no
+`Select\ResiduePatterns` net underneath it — a strictly worse false green than the one this closes.
+`$edgesToRecord` (not `$filteredEdges`) is what reaches `Graph::unionEdges()` and the `edges`
+counter; `$filteredEdges` — unfiltered for once-process sources — is still what reaches
+`Analysis\StaticEdges::expand()`'s hop-source argument (`behaviouralEdges()`), which is *why* a
+test that names one of these files in its own source still gets the edge (`expand()`'s `anyShape`
+hop) even though the coverage-derived one to the same file was refused. The two edge writers this
+package has (`Cache\GraphUpdater::apply()`'s `unionEdges()` call and `Analysis\StaticEdges::expand()`'s
+`Graph::link()` call, per the git-ignore fix above) are therefore treated asymmetrically here on
+purpose, unlike the git-ignore filter, which refuses both identically.
+
+No fingerprint change: unlike `static_declaration_edges` itself, this does not change what an edge
+*means* (a refused edge simply is not one), only which edges get recorded, and that is already a
+function of `static_declaration_edges` and of the project being a detected Laravel one — both
+already fingerprinted or file-detected — so no new structural key is needed.
+
+**What this does not cover.** `app/Services/*`, a factory and a model also moved in the same
+measurement and are deliberately left alone: nothing about their path says "executes once per
+process" the way a migration's does, and guessing wrong in the "still gets an edge" direction
+would silently reintroduce this same bug. No live Illuminate container is consulted either (e.g.
+asking a booted application for its configured migration paths, which would also resolve an
+unconventional `Modules/*/Database/Migrations` layout) — considered and rejected, because
+`Cache\GraphUpdater::apply()` runs both from the wrapper process (nothing loaded) and in-process
+(Laravel already booted, `ReplayState::persistInProcess()`), and an answer that depends on which of
+those handled a given recording pass reintroduces process-shape-dependent non-determinism one level
+up from the bug this removes. No configuration: extending or narrowing the three convention paths
+is a code change to `OncePerProcessPaths`, not a project setting, matching the git-ignore fix's own
+"no allowlist" precedent above.
+
+**Also considered and rejected**: pointing `Hermeticity\Policy`'s existing `never_cache` at the
+holder test files instead of touching edge recording. Same cost in expectation (the same tests
+always run), but the disputed edges stay recorded, so content keys keep moving between machines and
+the remote cache stays exactly as unshareable as before — it changes which tests run, not what the
+graph *is* (reproducibility.md "Considered and rejected: exempting the holders instead").
+
+**Acceptance test.** `tests/Integration/OnceProcessResidueParallelTest.php` records the same
+fixture serially and with `-p 4` and asserts the two graphs are byte-identical once resolved to
+`test file -> dependency path` pairs (never compares raw file ids — the intern table's numbering
+is not the contract). This is the property that actually matters, and it is stronger than two
+parallel passes agreeing (`tests/Integration/StaticDeclarationEdgesTest.php`'s own
+`..._sequentially_and_in_parallel` test, which pins the declaration/first-loader case): serial and
+parallel are the two extremes of first-loader attribution, so only comparing them exercises both
+ends. The fixture adds a hand-written `app/Console/Commands/OnceProcessDemo.php` guarded from the
+*caller* side (`if (! $class::$triggered) { ...; (new $class())->run(); }`, never inside `run()`
+itself — the same place `RefreshDatabaseState::$migrated` sits in Laravel's own `RefreshDatabase`
+trait) to eight new `tests/Feature/OnceProcess*Test.php` files, all built at runtime via
+`FixtureProject::write()` rather than committed to the shared `laravel-lite` fixture, so no
+existing test's hardcoded test/file counts move. The class name is assembled from
+backslash-free string fragments (`implode('\\', ['App', 'Console', 'Commands', 'OnceProcessDemo'])`)
+specifically so `Analysis\FactsVisitor` cannot parse it as a name reference — a literal `use`
+statement would let the static hop supply the same edge regardless of shape and the test would
+pass unfixed, proving nothing.
