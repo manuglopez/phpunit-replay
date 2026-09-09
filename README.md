@@ -350,13 +350,25 @@ There are two different things a machine can publish, and they are not governed 
 
 ### The setup to run: CI writes, everyone reads
 
+Keep `phpunit-replay.php` free of any guess about where it is running:
+
 ```php
-'remote_push' => getenv('CI') ? 'objects' : 'off',
+'remote_push' => 'off',   // the safe default: read the cache, never write to it
 ```
 
-Give the cache a write credential that lives only in CI, keep the team on read access, and add `push --graph` to the job that records the baseline after a merge. That's the whole configuration.
+Then let each CI job **declare** its own role through the environment, which every CI system can do:
 
-**Nothing needs `all`.** `push --graph` publishes the branch baseline on the strength of its own flag and isn't gated by `remote_push`, so the baseline job's explicit `push --graph` is what writes `graph/**` — one job, by name. Setting `all` instead makes *every* CI job publish a branch graph automatically, and `--allow-ci-baseline` does not prevent it (that flag guards the *local* baseline only).
+| job | environment | also runs |
+|---|---|---|
+| a developer's machine | *nothing* | — |
+| PR / branch job | `PHPUNIT_REPLAY_REMOTE_PUSH=objects` | — |
+| baseline job, after a merge | `PHPUNIT_REPLAY_REMOTE_PUSH=objects` | `phpunit-replay push --graph` |
+
+Give the cache a write credential that lives only in CI and keep the team on read access. That's the whole configuration, and it works the same on GitHub Actions, GitLab CI, Bitbucket, Jenkins, Buildkite or anything else — see [CI outside GitHub](#ci-outside-github).
+
+Declaring beats detecting. `'remote_push' => getenv('CI') ? … : …` also works and reads nicely, but it depends on the host setting `CI`, which Jenkins and TeamCity do not do by default — and it fails *open*: any environment that happens to export `CI` starts publishing. An explicit variable per job fails closed.
+
+**Nothing needs `all`.** `push --graph` publishes the branch baseline on the strength of its own flag and isn't gated by `remote_push` at all, so one named job does that one thing. `all` would also work — a CI-detected run refuses to publish a branch graph unless you pass `--allow-ci-baseline`, so PR jobs don't quietly publish graphs — but it puts the decision in a config file instead of in the job that means it.
 
 **Developers still get everything.** They read the graph and every object. A test one of them writes executes for real on their machine, because it's new to the graph — which is what you want for a test you just wrote. The PR job then runs it and publishes its result, so from that moment the whole team replays it, without waiting for the merge. The graph catches up at the next baseline run.
 
@@ -389,6 +401,31 @@ The fast `run` lane is for quick feedback, not for merging — at least until yo
 You'll need: a checkout deep enough that the baseline commit is an ancestor of `HEAD` (`fetch-depth: 0`), pcov or Xdebug on the runner, and a configured remote so state survives between jobs.
 
 Working examples for all three jobs plus a monthly GC job: **[.github/workflows/examples/](.github/workflows/examples/)**.
+
+### CI outside GitHub
+
+Nothing in this package talks to GitHub. No API call, no `gh`, no provider-specific code — the git backend shells out to `git`, the HTTP backend speaks GET/PUT/HEAD. The example workflows are GitHub Actions because they have to be written in *something*; the three jobs they describe are ordinary jobs anywhere.
+
+One thing does need saying, because it is silent when it's wrong. **The only signal phpunit-replay has for "I am CI" is the `CI` environment variable** — anything other than empty, `0` or `false`. GitHub Actions, GitLab CI, Bitbucket Pipelines, CircleCI, Buildkite, Drone and Travis all set it. **Jenkins and TeamCity do not**, unless you tell them to. On those, phpunit-replay believes it is on a developer's laptop, which means:
+
+- a run can publish a branch baseline without anyone passing `--allow-ci-baseline`, because that gate only applies once CI is detected;
+- and any `getenv('CI') ? … : …` in your config file takes the developer branch.
+
+The fix is one line in the job: export `CI=true`. Do that on any runner whose CI system doesn't set it, and everything else here applies unchanged.
+
+The write credential looks the same everywhere, because a git cache repo needs only an SSH key:
+
+| platform | the write credential | where the job reads it from |
+|---|---|---|
+| GitHub Actions | a repository deploy key, write enabled | Actions secret |
+| GitLab CI | a deploy key, or a project access token | masked CI/CD variable |
+| Bitbucket Pipelines | a repository access key | repository variable |
+| Jenkins | an SSH key in the credentials store | `sshagent` / `withCredentials` |
+| Gitea, Forgejo, self-hosted git | a deploy key | whatever your runner uses |
+
+Give the whole team read access and hold the write key in CI only.
+
+And if you would rather express the boundary in the store itself — the team writes `objects/**`, only CI writes `graph/**` — use the **HTTP backend** against S3, MinIO or any bucket, where a prefix-scoped policy says exactly that. A git backend cannot: git permissions are per repository, never per path.
 
 ## Laravel
 

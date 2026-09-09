@@ -64,16 +64,31 @@ deliberate and it is where most of the sharing value comes from: a test one deve
 replays. Content addressing makes it safe from anywhere, since two writers of the same key are a
 no-op rather than a conflict.
 
-**The recommended setup is CI-writes-everyone-reads:**
+**The recommended setup is CI-writes-everyone-reads.** Keep the config file free of any guess
+about where it is running:
 
 ```php
-'remote_push' => getenv('CI') ? 'objects' : 'off',
+'remote_push' => 'off',
 ```
 
-`all` is not needed anywhere. `push --graph` publishes the branch baseline on its own flag and is
-**not** gated by `remote_push`, so the baseline job's explicit `push --graph` is what writes
-`graph/**`. Setting `all` instead makes every CI job publish a branch graph automatically, and
-`--allow-ci-baseline` does not guard that — it guards the *local* baseline only.
+and let each CI job declare its own role through the environment, which every CI system can do:
+
+| job | environment | also runs |
+|---|---|---|
+| a developer's machine | *nothing* | — |
+| PR / branch job | `PHPUNIT_REPLAY_REMOTE_PUSH=objects` | — |
+| baseline job, after a merge | `PHPUNIT_REPLAY_REMOTE_PUSH=objects` | `push --graph` |
+
+`'remote_push' => getenv('CI') ? 'objects' : 'off'` also works and reads nicely, but it depends on
+the host exporting `CI`, which Jenkins and TeamCity do not do by default, and it fails *open* —
+anything that happens to set `CI` starts publishing. An explicit variable per job fails closed.
+
+`all` is needed nowhere. `push --graph` publishes the branch baseline on the strength of its own
+flag and is not gated by `remote_push`, so one named job does that one thing. `all` is not unsafe
+— a CI-detected run refuses to publish a branch graph unless `--allow-ci-baseline` is passed
+(`RunPipeline.php:1436`), so PR jobs do not quietly publish graphs — but it puts the decision in a
+config file rather than in the job that means it. Note that the `--allow-ci-baseline` gate only
+engages once `CI` is detected: on a runner that does not export `CI`, it does not apply at all.
 
 Developers lose nothing by `off`: they read the graph and every object, a new test of theirs
 executes for real locally (it is new to the graph), the PR job publishes its result, and from then

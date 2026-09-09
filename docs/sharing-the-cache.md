@@ -17,7 +17,8 @@ starts costing more than it's worth.
 |---|---|---|---|---|---|
 | Prerequisites | none | a mounted path all machines can reach (NFS, `rclone mount`, a shared volume) | an HTTP endpoint with GET/PUT/HEAD (S3 presigned URLs, MinIO, nginx with `dav_methods`) | an empty git repo + a deploy key for CI | none — built into GitHub Actions |
 | What's shared | nothing | `objects/**` and, from CI, `graph/**` | same | same, versioned in git history | the whole state directory, keyed by branch |
-| Who writes what (`remote_push`) | — | whoever mounts it; `remote_push` still governs objects-only vs. objects+graph | same, gated by the bearer token | CI (`remote_push: all`) publishes baselines; everyone else defaults to `objects` (objects-only) | the job that ran `record`/`verify` |
+| Who writes what (`remote_push`) | — | whoever mounts it; directory permissions are the only enforcement | whoever holds the bearer token; a prefix-scoped policy can split `objects/**` from `graph/**` | whoever holds a write key — per repository, never per path, so give write to CI only | the job that ran `record`/`verify` |
+| Recommended | n/a | developers `off`, CI `objects`, baseline job also `push --graph` | same | same | n/a |
 | Failure behaviour | n/a | remote unreachable → warning to stderr, run continues local-only | same | same — an offline mirror still serves what it has | cache miss → that job does a fresh record |
 | Size / GC | one `graph.json` per machine, no GC needed | grows unbounded; you delete under the mount by hand | same, or use your object store's lifecycle rules | ≈ 1–20 KB per test file per content version, monthly shards; `prune --remote --keep-months=N [--squash]` | governed by GitHub's own cache size/eviction limits |
 | Best for | solo projects, evaluating the package | one office/VPN, or a CI runner class with a persistent disk | teams already running object storage | teams with git/GitHub but no object storage — no infrastructure to run | GitHub-only projects that want zero extra infrastructure |
@@ -133,22 +134,34 @@ constantly with real commits.
    <?php
    return [
        'remote' => 'git@github.com:org/project-replay-cache.git',
-       'remote_push' => getenv('CI') ? 'objects' : 'off',
+       'remote_push' => 'off',            // CI jobs override with PHPUNIT_REPLAY_REMOTE_PUSH=objects
        'remote_branch' => 'main',
        'baseline_branches' => ['develop', 'main'],
    ];
    ```
 
-   **Nothing here needs `all`.** `push --graph` publishes the branch baseline on the strength of
-   its own flag and is not gated by `remote_push` at all, so the baseline job's explicit
-   `push --graph` is what writes `graph/**` — an operator action, in one job, by name. Setting
-   `all` instead would make *every* CI job publish a branch graph automatically, because the
-   automatic graph publish checks `remote_push` and `--allow-ci-baseline` does **not** guard it
-   (that flag guards the *local* baseline only).
+   The file itself guesses nothing about where it is running. Each CI job declares its own role
+   through the environment instead, which every CI system can do:
 
-   So the three roles come out as: developers `off`; every CI job `objects`, which publishes
-   `objects/<month>/<k>.json` — test-file results keyed by content — and can never publish a
-   graph; and the baseline job additionally running `push --graph`.
+   | job | environment | also runs |
+   |---|---|---|
+   | a developer's machine | *nothing* | — |
+   | PR / branch job | `PHPUNIT_REPLAY_REMOTE_PUSH=objects` | — |
+   | baseline job, after a merge | `PHPUNIT_REPLAY_REMOTE_PUSH=objects` | `push --graph` |
+
+   `'remote_push' => getenv('CI') ? 'objects' : 'off'` also works, but it depends on the host
+   exporting `CI` — which Jenkins and TeamCity do not do by default — and it fails *open*: any
+   environment that happens to set `CI` starts publishing. An explicit variable per job fails
+   closed.
+
+   **`all` is needed nowhere.** `push --graph` publishes the branch baseline on the strength of
+   its own flag and is not gated by `remote_push` at all, so the baseline job's explicit
+   `push --graph` is what writes `graph/**` — an operator action, in one job, by name. `all` is
+   not unsafe: the automatic graph publish refuses to run on a CI-detected pass unless
+   `--allow-ci-baseline` is given (`RunPipeline.php:1436`), so a PR job does not quietly publish
+   a graph. It simply puts the decision in a config file instead of in the job that means it. Be
+   aware that this gate engages only once `CI` is detected — on a runner that does not export
+   `CI`, it does not apply.
 
    This is the flow that makes a read-only team work. A developer writes a new test and runs it
    locally, where it executes for real because it is new to the graph — which is what you want for
