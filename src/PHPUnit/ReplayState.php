@@ -13,6 +13,7 @@ use Manuglopez\Replay\Cache\Fingerprint;
 use Manuglopez\Replay\Cache\Graph;
 use Manuglopez\Replay\Cache\GraphStore;
 use Manuglopez\Replay\Cache\GraphUpdater;
+use Manuglopez\Replay\Cache\OnceProcessClassifier;
 use Manuglopez\Replay\Cache\ProjectKey;
 use Manuglopez\Replay\Cache\Remote\ObjectStore;
 use Manuglopez\Replay\Cache\Remote\RemoteCacheFactory;
@@ -109,7 +110,7 @@ final class ReplayState
      * residue"); built alongside {@see self::$staticEdges} in {@see self::bootInProcess()},
      * only when that flag is on AND the project is a detected Laravel one.
      */
-    private static ?OncePerProcessPaths $onceProcessPaths = null;
+    private static ?OnceProcessClassifier $onceProcessPaths = null;
 
     private static ?Git $git = null;
 

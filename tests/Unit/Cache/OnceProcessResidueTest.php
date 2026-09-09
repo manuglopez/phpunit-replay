@@ -9,6 +9,7 @@ use Manuglopez\Replay\Analysis\StaticEdges;
 use Manuglopez\Replay\Cache\ContentKey;
 use Manuglopez\Replay\Cache\Graph;
 use Manuglopez\Replay\Cache\GraphUpdater;
+use Manuglopez\Replay\Cache\OnceProcessClassifier;
 use Manuglopez\Replay\Config;
 use Manuglopez\Replay\Hermeticity\Policy;
 use Manuglopez\Replay\Hermeticity\Quarantine;
@@ -239,6 +240,55 @@ final class OnceProcessResidueTest extends TestCase
 
         self::assertContains('database/seeders/TeamSeeder.php', $graph->dependenciesOf('tests/NamesOnlyTest.php'));
         self::assertNotNull($graph->fileId('database/seeders/TeamSeeder.php'));
+    }
+
+    /**
+     * The acceptance property of the `Cache\OnceProcessClassifier` seam itself, not merely
+     * a rename: `GraphUpdater`'s constructor and `withoutOnceProcessSources()` must accept
+     * ANY implementation of the interface, not only `Laravel\OncePerProcessPaths` — proving
+     * `src/Cache/` depends on the abstraction rather than importing `src/Laravel/` (a
+     * generic core class must not depend on a framework adapter). The double below
+     * implements {@see \Manuglopez\Replay\Cache\OnceProcessClassifier} directly and never
+     * references the Laravel class at all; it is refused an edge exactly the way the real
+     * Laravel implementation is in
+     * {@see self::test_the_property_to_pin_hardest_no_edge_but_still_selected_via_residue()},
+     * which is what proves the seam is real rather than a rename with the same one caller
+     * still hardcoded underneath.
+     */
+    public function test_a_hand_written_non_laravel_classifier_is_honoured_identically(): void
+    {
+        $this->write('tests/Feature/UserModelTest.php');
+        $this->write('resources/generated/OnceWidget.php');
+
+        $graph = new Graph($this->root);
+        $partial = new RunPartial(
+            edges: ['tests/Feature/UserModelTest.php' => ['resources/generated/OnceWidget.php']],
+            results: ['Tests\Feature\UserModelTest::test_it_persists_a_user' => $this->makeResult('tests/Feature/UserModelTest.php')],
+            tables: [],
+            meta: [],
+        );
+
+        $classifier = new class () implements OnceProcessClassifier {
+            public function matches(string $relative): bool
+            {
+                return $relative === 'resources/generated/OnceWidget.php';
+            }
+        };
+
+        $updater = new GraphUpdater(
+            $graph,
+            $this->root,
+            new ContentKey($this->root),
+            null,
+            $this->staticEdges(),
+            null,
+            $classifier,
+        );
+        $updater->apply($partial, 'main', recordsEdges: true, complete: true);
+
+        self::assertNull($graph->fileId('resources/generated/OnceWidget.php'), 'a non-Laravel Cache\OnceProcessClassifier implementation must be honoured exactly like OncePerProcessPaths');
+        self::assertSame([], $graph->dependenciesOf('tests/Feature/UserModelTest.php'));
+        self::assertTrue($graph->knowsTest('tests/Feature/UserModelTest.php'));
     }
 
     private function write(string $relative, string $content = "<?php\n"): void

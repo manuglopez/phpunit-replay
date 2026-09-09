@@ -8,7 +8,6 @@ use Manuglopez\Replay\Analysis\StaticEdges;
 use Manuglopez\Replay\Change\Git;
 use Manuglopez\Replay\Console\Runner\Warnings;
 use Manuglopez\Replay\Hermeticity\Quarantine;
-use Manuglopez\Replay\Laravel\OncePerProcessPaths;
 use Manuglopez\Replay\Record\RunPartial;
 
 /**
@@ -38,11 +37,14 @@ final class GraphUpdater
      * the edges the coverage driver reported, byte for byte.
      *
      * `$onceProcessPaths` is the once-per-process residue fix (docs/reproducibility.md
-     * "Once-per-process residue"): non-null only when the caller ALSO built `$staticEdges`
-     * (`Console\Runner\RunPipeline`, `PHPUnit\ReplayState` construct both together, gated on
-     * `static_declaration_edges` AND a detected Laravel project). {@see self::apply()}
-     * re-checks `$staticEdges !== null` itself before ever consulting it — see the comment
-     * there for why that second check is not redundant.
+     * "Once-per-process residue"), typed against the {@see OnceProcessClassifier} interface
+     * so this generic class depends on that abstraction rather than importing
+     * `Laravel\OncePerProcessPaths` directly: non-null only when the caller ALSO built
+     * `$staticEdges` (`Console\Runner\RunPipeline`, `PHPUnit\ReplayState` construct both
+     * together, gated on `static_declaration_edges` AND a detected Laravel project — the
+     * only shipped implementation is Laravel-specific, even though this class itself is
+     * not). {@see self::apply()} re-checks `$staticEdges !== null` itself before ever
+     * consulting it — see the comment there for why that second check is not redundant.
      *
      * `$git` defaults to a fresh `Change\Git` scoped to `$projectRoot`, matching the same
      * "inject or construct" convention as `Change\ChangedFiles`. A caller that already has
@@ -56,7 +58,7 @@ final class GraphUpdater
         private readonly ?Quarantine $quarantine = null,
         private readonly ?StaticEdges $staticEdges = null,
         ?Git $git = null,
-        private readonly ?OncePerProcessPaths $onceProcessPaths = null,
+        private readonly ?OnceProcessClassifier $onceProcessPaths = null,
     ) {
         $this->git = $git ?? new Git($projectRoot);
     }
@@ -103,11 +105,12 @@ final class GraphUpdater
                 self::debugExcluded($partial->edges, $ignored);
             }
 
-            // Once-per-process Laravel sources (docs/reproducibility.md "Once-per-process
-            // residue"): a migration, seeder or console command whose body a coverage driver
-            // saw executed is credited to whichever test happened to trigger it first in
-            // this worker process — every OTHER test that also depends on it never gets the
-            // edge, no matter how many times the suite is re-recorded. `$edgesToRecord` is
+            // Once-per-process residue sources ({@see OnceProcessClassifier},
+            // docs/reproducibility.md "Once-per-process residue"): a migration, seeder or
+            // console command whose body a coverage driver saw executed is credited to
+            // whichever test happened to trigger it first in this worker process — every
+            // OTHER test that also depends on it never gets the edge, no matter how many
+            // times the suite is re-recorded. `$edgesToRecord` is
             // therefore a SEPARATE variable from `$filteredEdges`, not a reassignment of it:
             // `$filteredEdges` still feeds `behaviouralEdges()` below unfiltered, because the
             // static hop's "the test's own source names it" case must still be free to link
@@ -248,14 +251,14 @@ final class GraphUpdater
 
     /**
      * The other filter over the coverage-derived edges, in the same shape as
-     * {@see self::withoutIgnored()}: drops any source matching {@see OncePerProcessPaths}
+     * {@see self::withoutIgnored()}: drops any source matching {@see OnceProcessClassifier}
      * from every test's edge list, never the test's own key (a test that only ever
      * depended on such a file still needs `markKnownTestFiles()` to know about it).
      *
      * @param array<string, list<string>> $edges
      * @return array<string, list<string>>
      */
-    private static function withoutOnceProcessSources(array $edges, OncePerProcessPaths $onceProcessPaths): array
+    private static function withoutOnceProcessSources(array $edges, OnceProcessClassifier $onceProcessPaths): array
     {
         $out = [];
 

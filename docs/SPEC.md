@@ -50,6 +50,7 @@ phpunit-replay/
 │   │   ├── ContentHash.php            # xxh128 normalized per file type
 │   │   ├── Fingerprint.php            # structural / environmental invalidation
 │   │   ├── ProjectKey.php             # project key derived from the git remote
+│   │   ├── OnceProcessClassifier.php  # once-per-process residue classifier interface
 │   │   └── Remote/
 │   │       ├── RemoteCache.php        # get/put/has interface
 │   │       ├── NullRemoteCache.php
@@ -411,8 +412,9 @@ repair that the way it repairs an ordinary partial re-record, because a test tha
 happened to be the first loader in any worker distribution never gets the edge to lose. With the
 flag on, `Cache\GraphUpdater::apply()` refuses to record a **coverage-derived** edge to a file
 under `database/migrations/`, `database/seeders/` or `app/Console/Commands/`
-(`Laravel\OncePerProcessPaths`, autodetected the same way as the rest of the Laravel integration,
-§10) — the file keeps no `fileId`, which is exactly the residue bucket two paragraphs up, so a
+(`Cache\OnceProcessClassifier`, implemented by `Laravel\OncePerProcessPaths` and autodetected
+the same way as the rest of the Laravel integration, §10) — the file keeps no `fileId`, which is
+exactly the residue bucket two paragraphs up, so a
 change to it re-runs everything the graph knows rather than only whichever test happened to be
 credited. The **static** hop (above) is deliberately untouched: a test whose own source names one
 of these files still gets the edge from it, because a name reference is order-independent
@@ -638,7 +640,7 @@ Post-processing: if any source `.php` file changed and **no driver is available*
 - Partial / truncated / results-only run: only merges results for already-known test files; no sha, no pruning, no edges.
 - Always: recompute `k` for each touched test file and, if there's a remote, `put(objects/<k>.json)`.
 - **No edge to a file `git check-ignore` matches.** `Cache\GraphUpdater::apply()` and `Analysis\StaticEdges::expand()` are the only two places an edge is ever written into the graph, and both refuse one whose source is ignored — batched once per `apply()` call over stdin (`Change\Git::ignored()`, shared with `ChangedFiles::since()` itself), never once per file or per writer. Deliberately **IGNORED, not UNTRACKED**: an ignored path can never appear in `ChangedFiles::since()` (§7.1 step 4), so such an edge could never trigger a rerun — it is pure content-key pollution (measured cause: a Laravel compiled Blade view under `bootstrap/cache/`, whose path additionally carries a per-paratest-worker token, so which worker ran a test changed that test's dependency set between two otherwise-identical `record` passes). An **untracked-but-not-ignored** file is the opposite and keeps its edge: it *does* appear in `ChangedFiles::since()` (§7.1 step 3, `--untracked-files=all`), so refusing it would leave `Graph::fileId()` null and `PhpEdgeRule` (§7.2 step 2) skipping it until the next full fresh `record`. Fails open (no git, not a repository, a subprocess error or a timeout) exactly like `Fingerprint::isTrackedByGit()`: the edge is recorded, not discarded, when the check itself cannot run. No configuration governs this — `.gitignore` (and `.git/info/exclude`, the global excludes file) is the one mechanism, matching `Select\ResiduePatterns`' own stated principle that an allowlist of source paths is unsafe by construction.
-- **No coverage-derived edge to a Laravel migration, seeder or console command (§4.3.1 "Once-per-process residue"), only when `static_declaration_edges` is on.** `Cache\GraphUpdater::apply()` refuses a `Graph::unionEdges()` write whose source matches `Laravel\OncePerProcessPaths` (`database/migrations/`, `database/seeders/`, `app/Console/Commands/`), leaving the file with no `fileId` — the residue bucket `Select\ResiduePatterns` owns, so a change re-runs everything the graph knows instead of only whichever test a worker process happened to credit. `Analysis\StaticEdges::expand()`'s write is untouched: a test whose own source names one of these files still gets the edge. With the flag off there is no residue net, so the edge is recorded exactly as before — this fix is a no-op with the flag off, by construction, not by convention.
+- **No coverage-derived edge to a Laravel migration, seeder or console command (§4.3.1 "Once-per-process residue"), only when `static_declaration_edges` is on.** `Cache\GraphUpdater::apply()` refuses a `Graph::unionEdges()` write whose source matches `Cache\OnceProcessClassifier` (implemented by `Laravel\OncePerProcessPaths`: `database/migrations/`, `database/seeders/`, `app/Console/Commands/`), leaving the file with no `fileId` — the residue bucket `Select\ResiduePatterns` owns, so a change re-runs everything the graph knows instead of only whichever test a worker process happened to credit. `Analysis\StaticEdges::expand()`'s write is untouched: a test whose own source names one of these files still gets the edge. With the flag off there is no residue net, so the edge is recorded exactly as before — this fix is a no-op with the flag off, by construction, not by convention.
 
 ---
 
