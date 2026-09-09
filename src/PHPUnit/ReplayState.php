@@ -545,6 +545,11 @@ final class ReplayState
      * remote pull-only; `CI=true` publishes objects but never the graph (in-process mode has
      * no `--allow-ci-baseline` override to check, unlike the wrapper).
      *
+     * Bug fix: this only stages objects with the remote (`ObjectStore::putObject()`); their
+     * local "already published" markers are confirmed later, in {@see self::closeRemote()},
+     * only once `end()` has actually confirmed the push succeeded — see
+     * `ObjectStore::confirmPublished()`.
+     *
      * @param list<string> $executedTestFiles project-relative, from GraphUpdater::apply()['touched']
      */
     private static function pushAfterRun(Graph $graph, array $executedTestFiles, bool $complete): void
@@ -559,7 +564,6 @@ final class ReplayState
         $branch = self::$branch;
         $contentKey = new ContentKey(self::root());
         $own = $graph->ownResults($branch);
-        $pushed = 0;
 
         foreach ($executedTestFiles as $file) {
             if ($graph->isNotCacheable($file)) {
@@ -580,12 +584,10 @@ final class ReplayState
                 }
             }
 
-            if ($results !== [] && $objects->putObject($key, $file, $results)) {
-                $pushed++;
+            if ($results !== []) {
+                $objects->putObject($key, $file, $results);
             }
         }
-
-        Warnings::debug('remote: ' . $pushed . ' object(s) published');
 
         if ($config->remotePush !== 'all' || ! $complete || ! self::$persist) {
             return;
@@ -994,7 +996,18 @@ final class ReplayState
         }
 
         self::$remoteOpen = false;
-        self::$objects?->remote()->end();
+        $objects = self::$objects;
+        $objects?->remote()->end();
+
+        // Bug fix (mirrored from Console\Runner\RunPipeline::closeRemote()): the local
+        // "already published" markers are written only now, after end() —
+        // ObjectStore::confirmPublished() is itself a no-op when end()'s push failed, so a
+        // transient failure here can never turn into a permanently skipped object later.
+        $confirmed = $objects?->confirmPublished() ?? 0;
+
+        if ($confirmed > 0) {
+            Warnings::debug('remote: ' . $confirmed . ' object(s) published');
+        }
     }
 
     /**
