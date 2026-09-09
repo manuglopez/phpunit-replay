@@ -51,13 +51,25 @@ Full setup guide, per backend: [sharing-the-cache.md](sharing-the-cache.md).
 |---|---|---|
 | `remote` | `null` | Backend URL. `file://` for a mounted path, `https://` for an S3/MinIO/WebDAV endpoint with GET/PUT/HEAD, or an SSH/HTTPS git URL for a dedicated cache repository. |
 | `remote_token` | `null` | Bearer token, HTTP backend only. |
-| `remote_push` | `'objects'` | What this machine may publish. `objects` — only its own test-file results, keyed by content; safe from anywhere and never conflicts. `all` — also the branch baseline under `graph/**`, which is what everyone else's cold start reads; for the one CI job that owns the branch. `off` — pull only. |
+| `remote_push` | `'objects'` | What this machine may publish. `off` — pull only, never writes. `objects` — its own test-file results, keyed by content; safe from anywhere and never conflicts, but it *is* a write. `all` — also the branch baseline under `graph/**`, which is what everyone else's cold start reads; for the one CI job that owns the branch. **See the note below before leaving this at its default on a write-restricted cache.** |
 | `remote_branch` | `'main'` | Git backend: which branch of the cache repo holds the objects. |
 | `remote_refresh_seconds` | `300` | Git backend: how stale the local mirror may get before it re-fetches. |
 | `remote_timeout` | `60` | Git backend: total seconds a push may take before giving up. Giving up is a warning, never a failure. |
 
 A remote that is unreachable, unauthenticated or misconfigured always degrades to a warning on
 stderr and a local-only pass. It cannot break a test run.
+
+**If only CI is allowed to write** — a deploy key or scoped token held solely by CI, with the whole
+team on read access — then developers need `remote_push` set to `off`, not left at its default:
+
+```php
+'remote_push' => getenv('CI') ? 'all' : 'off',
+```
+
+The default is `objects`, which is a *write*. Leave it in place on a read-only cache and every
+developer run attempts a push it is not allowed to make, and prints a warning for it. The run still
+succeeds — the warning is the only symptom — but the warning is per run, for everyone. Nothing is
+lost by `off`: whatever a laptop would have published, the baseline job republishes anyway.
 
 ### Baselines
 

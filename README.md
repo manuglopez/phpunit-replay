@@ -311,23 +311,43 @@ By default every machine keeps its own `graph.json` and re-records from scratch 
 
 ```mermaid
 flowchart LR
-    L1["your laptop"] <-->|"objects"| R[("remote cache<br/>content-addressed")]
-    L2["a teammate"] <-->|"objects"| R
-    P["PR CI job"] <-->|"objects"| R
-    BJ["baseline job<br/>on the default branch"] -->|"objects + graph"| R
+    L1["your laptop"] -->|"read"| R[("remote cache<br/>content-addressed")]
+    L2["a teammate"] -->|"read"| R
+    P["PR CI job"] -->|"read"| R
+    BJ["baseline job<br/>on the default branch"] ==>|"WRITE<br/>objects + graph"| R
     R -->|"pull"| N["a fresh checkout,<br/>0 tests executed"]
 ```
 
 The address of a result is a hash of what went into producing it, so two machines that share inputs share results, and nobody can overwrite anybody.
+
+### Who is allowed to write
+
+`remote_push` decides this, and it has three settings, not two:
+
+| `remote_push` | publishes its own results | publishes the branch baseline (`graph/**`) | for |
+|---|---|---|---|
+| `off` | no | no | **developers and PR jobs, when the cache is write-restricted** |
+| `objects` *(the current default)* | yes | no | developers, when everyone may write results |
+| `all` | yes | yes | the one CI job that owns the branch baseline |
+
+**The recommended setup is the one drawn above: only CI writes.** Give the cache a write credential that lives solely in CI — a deploy key on a git backend, a scoped token on HTTP — leave the whole team on read access, and set:
+
+```php
+'remote_push' => getenv('CI') ? 'all' : 'off',
+```
+
+That way a developer's machine reads the cache and never tries to publish to it. Nothing is lost by it: what a laptop would have published, CI republishes on the next baseline run anyway.
+
+Note the default is `objects`, **not** `off`. It is safe — a result's address is a hash of its inputs, so concurrent writers of the same key are a no-op rather than a conflict — but it does mean that out of the box, a developer's machine publishes its own results. If your cache is read-only for the team and you leave the default in place, every developer run will attempt a push it isn't allowed to make and print a warning. The run still succeeds; the warning is the only symptom, and `remote_push: 'off'` is the fix.
+
+Only `all` ever writes `graph/**`, the branch baseline everyone else's cold start reads. Keep that on one job.
 
 | | Local only | Shared folder | HTTP (S3/MinIO) | Dedicated git repo | CI artifacts |
 |---|---|---|---|---|---|
 | Needs | nothing | a mounted path | an endpoint with GET/PUT/HEAD | an empty repo + a deploy key | nothing, on GitHub |
 | Good for | solo work, evaluating | one office or VPN | teams already on object storage | teams with git and nothing else | GitHub-only, zero infra |
 
-`remote_push` decides who publishes what. Laptops and PR jobs default to `objects` — their own results, keyed by content, safe from anywhere. Only the job that owns the branch baseline uses `all`, and that's what everyone's cold start reads.
-
-An unreachable or misconfigured remote is always a warning on stderr and a local-only pass. It can never break a test run.
+An unreachable, unauthorised or misconfigured remote is always a warning on stderr and a local-only pass. It can never break a test run.
 
 Setup for each backend, plus troubleshooting: **[docs/sharing-the-cache.md](docs/sharing-the-cache.md)**.
 
