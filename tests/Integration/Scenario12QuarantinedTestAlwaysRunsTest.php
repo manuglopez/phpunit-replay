@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Manuglopez\Replay\Tests\Integration;
 
+use Manuglopez\Replay\Hermeticity\Quarantine;
 use Manuglopez\Replay\Tests\Support\FixtureProject;
 use Manuglopez\Replay\Tests\Support\ReplayAssert;
 use PHPUnit\Framework\TestCase;
@@ -29,6 +30,14 @@ use PHPUnit\Framework\TestCase;
  * full-suite pass with no CLI selection at all, is the one this package still lets
  * observe and quarantine a flake (its OWN divergence detection, `reason: 'divergence'`,
  * not the generic `'flip'` a CLI-selected results-only merge used to write).
+ *
+ * `FlakyTest` is also `#[NotCacheable]` now (added for
+ * {@see QuarantineFlipDetectionThroughAPlainRunTest}'s sake, so a genuine `'flip'` stays
+ * reachable through a plain, unfiltered `run` too) — a separate, permanent reason it
+ * always executes, independent of quarantine. That is why the final assertion here
+ * checks `Quarantine::isQuarantined()` directly rather than the summary's
+ * "executed"/"quarantined" counts the way it used to: those counts can no longer tell
+ * "still quarantined" apart from "not cacheable regardless."
  */
 final class Scenario12QuarantinedTestAlwaysRunsTest extends TestCase
 {
@@ -96,15 +105,27 @@ final class Scenario12QuarantinedTestAlwaysRunsTest extends TestCase
         self::assertSame(1, ReplayAssert::executedCount($again['stdout']));
         self::assertGreaterThanOrEqual(1, ReplayAssert::quarantinedCount($again['stdout']));
 
-        // `prune --flaky` releases it: the next unchanged run replays everything.
+        self::assertTrue(Quarantine::load($stateDir)->isQuarantined(self::FLAKY_ID));
+
+        // `prune --flaky` releases it from the QUARANTINE table specifically. It is
+        // verified here through `Quarantine::load()` directly, not through the summary's
+        // "executed"/"quarantined" counts the way this test used to: this fixture's
+        // `#[NotCacheable]` (added for `QuarantineFlipDetectionThroughAPlainRunTest`'s
+        // sake, see FlakyTest.flaky.php) is a separate, permanent property that keeps
+        // forcing FlakyTest to execute regardless of whether it is quarantined — so
+        // those counts can no longer distinguish "still quarantined" from "not cacheable
+        // anyway," only the quarantine table itself can.
         $pruned = $this->fixture->replay(['prune', '--flaky']);
         self::assertSame(0, $pruned['exitCode'], $pruned['stdout'] . $pruned['stderr']);
         self::assertStringContainsString('quarantine cleared', $pruned['stdout']);
 
+        self::assertFalse(Quarantine::load($stateDir)->isQuarantined(self::FLAKY_ID));
+
+        // FlakyTest itself keeps executing every pass regardless — `#[NotCacheable]`,
+        // not the (now-cleared) quarantine.
         $final = $this->fixture->replay([]);
         self::assertSame(0, $final['exitCode'], $final['stdout'] . $final['stderr']);
-        self::assertSame(0, ReplayAssert::executedCount($final['stdout']));
-        self::assertSame(0, ReplayAssert::quarantinedCount($final['stdout']));
+        self::assertSame(1, ReplayAssert::executedCount($final['stdout']));
     }
 
     /** @return array<string, array{firstSeen:int, flips:int, stable:int, lastKey:string, reason:string}> */
