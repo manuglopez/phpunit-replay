@@ -343,12 +343,24 @@ is built from two order-independent sources instead:
    the asymmetry the same project gains **1,781 edges, +2.84%**, median dependencies per test
    82 → 84, and those five files contribute exactly zero.
 
+   That figure is the *additive* half of the flag, and is easy to misread as its total cost.
+   The body filter's removal is the larger half by a factor of twenty: measured on the same
+   project, turning the flag on takes the graph from 61,278 edges to 21,706 — **−64.6%**,
+   removing 41,488 coverage edges while adding 1,916. See
+   [reproducibility.md](reproducibility.md) for that measurement and for what the removed
+   edges were.
+
 Everything neither source reaches — `lang/` and `config/` files and Blade templates (they
 declare no name), a file php-parser cannot read (nothing about it is known, so its edges fall
 back to the Pest heuristic), a brand-new `.php` file — is **residue**, and residue is covered
 conservatively rather than dropped: `Select\RunListBuilder` registers the changed path itself
 as a watch pattern onto every test directory *and* every `<testsuite><file>` entry (§7.2.6),
-so `WatchRule` selects everything the graph knows. The pattern key is the changed path
+so `WatchRule` selects everything the graph knows. Worth stating plainly what that costs in
+practice, because it is the flag's second and less obvious price: with the flag on, `config/`
+and `lang/` files leave the graph's `files` table entirely (55 `config/*.php`,
+`bootstrap/app.php` and 4 `lang/*.php` on the measured project), so **editing any one of them
+re-runs the whole suite** — 9,056 tests where the flag off would have run the ~700 those files
+held edges to. The pattern key is the changed path
 verbatim, so `WatchPatterns` compares a key to the path for equality before parsing it as a
 glob — otherwise a path containing whitespace, or starting with `!`, would never match its own
 file. That net is deliberately wider than necessary and deliberately not
