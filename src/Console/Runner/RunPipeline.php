@@ -1740,17 +1740,17 @@ final class RunPipeline
         $root = $this->root ?? $cwd;
         $paratestBin = $root . '/vendor/bin/paratest';
 
-        $laravelParallelIsolation = false;
+        $workerIsolation = null;
 
         if (ParallelIsolation::enabled($root, $this->config)) {
             if (ParallelIsolation::applicationResolvable($root)) {
-                $laravelParallelIsolation = true;
+                $workerIsolation = new ParallelIsolation();
             } else {
                 Warnings::warn('Laravel detected but no bootstrap/app.php or Tests\\CreatesApplication was found; running --parallel without per-worker database isolation');
             }
         }
 
-        return (new ParatestProcess())->run($paratestBin, $this->phpunitBin, $configFile, $iniFlags, $phpunitArgs, $appendNoCoverage, $env, $cwd, $this->request->parallel, $laravelParallelIsolation);
+        return (new ParatestProcess())->run($paratestBin, $this->phpunitBin, $configFile, $iniFlags, $phpunitArgs, $appendNoCoverage, $env, $cwd, $this->request->parallel, $workerIsolation);
     }
 
     private function degrade(RunRequest $request, string $reason): int
