@@ -25,12 +25,17 @@ use Symfony\Component\Process\Process;
  * does not exist (the caller always passes `<root>/vendor/bin/paratest`, missing whenever
  * Paratest was not installed as a dev dependency).
  *
- * `$laravelParallelIsolation` (the gate decided by {@see \Manuglopez\Replay\Laravel\ParallelIsolation::enabled()},
- * called from `RunPipeline`) wires up Laravel's own per-worker database isolation: a single
- * `--runner=\Illuminate\Testing\ParallelRunner` argv token (never split across two array
- * entries the way `--processes`/`--passthru-php` are — the `=` form is deliberate, SPEC.md
- * §13) plus `LARAVEL_PARALLEL_TESTING=1` in the environment. Without both, every worker
- * migrates the SAME database instead of a per-token one.
+ * `$workerIsolation` ({@see WorkerIsolation}, constructed by the caller only once its own
+ * gate says yes — for Laravel, {@see \Manuglopez\Replay\Laravel\ParallelIsolation::enabled()}
+ * and {@see \Manuglopez\Replay\Laravel\ParallelIsolation::applicationResolvable()}, both
+ * called from `RunPipeline` — never by this class) wires up whatever per-worker isolation
+ * the collaborator's {@see WorkerIsolation::runnerClass()} names: a single `--runner=<class>`
+ * argv token (never split across two array entries the way `--processes`/`--passthru-php`
+ * are — the `=` form is deliberate, SPEC.md §13) plus `LARAVEL_PARALLEL_TESTING=1` in the
+ * environment, both gated on that same non-null return so they can never disagree. A `null`
+ * collaborator — no framework has one to contribute, or none was even constructed — makes
+ * both a no-op: a plain `vendor/bin/paratest --processes=N` invocation, exactly today's
+ * behaviour for a non-Laravel project or one that opted out.
  */
 final class ParatestProcess
 {
@@ -51,7 +56,7 @@ final class ParatestProcess
         array $env,
         string $cwd,
         int $parallel,
-        bool $laravelParallelIsolation = false,
+        ?WorkerIsolation $workerIsolation = null,
     ): int {
         if (! is_file($paratestBin)) {
             Warnings::warn('--parallel requested but vendor/bin/paratest is missing; running PHPUnit sequentially');
@@ -59,9 +64,9 @@ final class ParatestProcess
             return (new PhpunitProcess())->run($phpunitBin, $configFile, $iniFlags, $phpunitArgs, $appendNoCoverage, $env, $cwd);
         }
 
-        $command = $this->buildCommand($configFile, $iniFlags, $phpunitArgs, $appendNoCoverage, $paratestBin, $parallel, $laravelParallelIsolation);
+        $command = $this->buildCommand($configFile, $iniFlags, $phpunitArgs, $appendNoCoverage, $paratestBin, $parallel, $workerIsolation);
 
-        if ($laravelParallelIsolation) {
+        if ($workerIsolation?->runnerClass() !== null) {
             $env['LARAVEL_PARALLEL_TESTING'] = '1';
         }
 
@@ -92,7 +97,7 @@ final class ParatestProcess
         bool $appendNoCoverage,
         string $paratestBin,
         int $parallel,
-        bool $laravelParallelIsolation = false,
+        ?WorkerIsolation $workerIsolation = null,
     ): array {
         $command = [PHP_BINARY, ...$iniFlags, $paratestBin];
 
@@ -106,8 +111,10 @@ final class ParatestProcess
             $command[] = (string) $parallel;
         }
 
-        if ($laravelParallelIsolation) {
-            $command[] = '--runner=\Illuminate\Testing\ParallelRunner';
+        $runnerClass = $workerIsolation?->runnerClass();
+
+        if ($runnerClass !== null) {
+            $command[] = '--runner=' . $runnerClass;
         }
 
         $passthruPhp = self::passthruPhp($iniFlags);

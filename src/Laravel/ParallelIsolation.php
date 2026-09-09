@@ -6,6 +6,7 @@ namespace Manuglopez\Replay\Laravel;
 
 use Manuglopez\Replay\Config;
 use Manuglopez\Replay\Console\Runner\Warnings;
+use Manuglopez\Replay\Console\Runner\WorkerIsolation;
 use Symfony\Component\Process\Process;
 
 /**
@@ -27,8 +28,15 @@ use Symfony\Component\Process\Process;
  * — so passing `--runner` unconditionally on a non-Laravel project, or a Laravel project
  * without Paratest, would make Paratest fail outright trying to instantiate a class that was
  * never declared.
+ *
+ * Implements {@see \Manuglopez\Replay\Console\Runner\WorkerIsolation} so that
+ * `Console\Runner\ParatestProcess` — a generic, framework-agnostic class — depends on that
+ * abstraction instead of naming this Laravel-specific class, or its
+ * `Illuminate\Testing\ParallelRunner` literal, directly: the same seam `Select\WatchDefault`,
+ * `Record\CoverageDriver` and `Cache\OnceProcessClassifier` already give the core for other
+ * framework- and driver-specific concerns. See {@see self::runnerClass()}.
  */
-final class ParallelIsolation
+final class ParallelIsolation implements WorkerIsolation
 {
     /**
      * The full gate for `RunPipeline::runPhpunit()`: the config opt-out, then three
@@ -99,6 +107,23 @@ final class ParallelIsolation
         $root = rtrim($projectRoot, '/');
 
         return is_file($root . '/bootstrap/app.php') || is_file($root . '/tests/CreatesApplication.php');
+    }
+
+    /**
+     * {@see \Manuglopez\Replay\Console\Runner\WorkerIsolation} contract: the FQCN Paratest's
+     * `--runner` flag should load. Unconditional — whether THIS project should receive an
+     * instance of this class at all is entirely {@see self::enabled()} and
+     * {@see self::applicationResolvable()}'s job, decided by the caller
+     * ({@see \Manuglopez\Replay\Console\Runner\RunPipeline::runPhpunit()}) before it ever
+     * constructs one, the same division `Cache\OnceProcessClassifier`'s one implementation
+     * uses. Narrows the interface's `?string` to a plain `string`, deliberately: this
+     * implementation never has a `null` to return — Laravel's own per-worker isolation
+     * runner is the only thing this class ever contributes — and PHP's covariant return
+     * types allow an implementation to be more specific than the interface it satisfies.
+     */
+    public function runnerClass(): string
+    {
+        return '\Illuminate\Testing\ParallelRunner';
     }
 
     /**

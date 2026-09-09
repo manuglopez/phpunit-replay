@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Manuglopez\Replay\Tests\Unit\Console\Runner;
 
 use Manuglopez\Replay\Console\Runner\ParatestProcess;
+use Manuglopez\Replay\Console\Runner\WorkerIsolation;
+use Manuglopez\Replay\Laravel\ParallelIsolation;
 use Manuglopez\Replay\Tests\Support\TempDir;
 use PHPUnit\Framework\Attributes\Test;
 use PHPUnit\Framework\TestCase;
@@ -155,6 +157,8 @@ final class ParatestProcessTest extends TestCase
     #[Test]
     public function adds_the_runner_flag_as_a_single_token_when_laravel_parallel_isolation_is_requested(): void
     {
+        // ParatestProcess no longer knows the FQCN itself (see WorkerIsolation); the real
+        // Laravel adapter is what supplies it now, so this test injects it instead of a bool.
         $command = (new ParatestProcess())->buildCommand(
             null,
             [],
@@ -162,7 +166,7 @@ final class ParatestProcessTest extends TestCase
             false,
             $this->fakeBin('paratest.php'),
             2,
-            true,
+            new ParallelIsolation(),
         );
 
         self::assertContains('--runner=\Illuminate\Testing\ParallelRunner', $command);
@@ -185,11 +189,51 @@ final class ParatestProcessTest extends TestCase
         }
     }
 
+    /**
+     * Proves the seam is real, not a rename: a hand-rolled {@see WorkerIsolation} that never
+     * references Laravel or Illuminate still gets its FQCN onto the command line verbatim
+     * (ParatestProcess cannot be secretly reading it from somewhere Laravel-specific), and a
+     * collaborator whose own {@see WorkerIsolation::runnerClass()} returns `null` produces the
+     * exact same command line as passing no collaborator at all — i.e. the same output as
+     * {@see self::omits_the_runner_flag_when_laravel_parallel_isolation_is_not_requested()},
+     * today's Laravel-absent shape.
+     */
+    #[Test]
+    public function honours_a_hand_written_worker_isolation_and_a_null_runner_class_matches_laravel_absent(): void
+    {
+        $paratestBin = $this->fakeBin('paratest.php');
+
+        $customIsolation = new class () implements WorkerIsolation {
+            public function runnerClass(): ?string
+            {
+                return '\Fixture\CustomWorkerRunner';
+            }
+        };
+
+        $commandWithCustomRunner = (new ParatestProcess())->buildCommand(null, [], [], false, $paratestBin, 2, $customIsolation);
+
+        self::assertContains('--runner=\Fixture\CustomWorkerRunner', $commandWithCustomRunner);
+
+        $contributingNothing = new class () implements WorkerIsolation {
+            public function runnerClass(): ?string
+            {
+                return null;
+            }
+        };
+
+        $commandWithNullCollaborator = (new ParatestProcess())->buildCommand(null, [], [], false, $paratestBin, 2, $contributingNothing);
+        $commandWithNoCollaboratorAtAll = (new ParatestProcess())->buildCommand(null, [], [], false, $paratestBin, 2, null);
+
+        self::assertSame($commandWithNoCollaboratorAtAll, $commandWithNullCollaborator);
+    }
+
     #[Test]
     public function sets_laravel_parallel_testing_in_the_environment_when_requested(): void
     {
         $capture = $this->dir . '/captured-env.json';
 
+        // Same reasoning as adds_the_runner_flag_as_a_single_token_...() above: the bool is
+        // gone, so requesting isolation means injecting the collaborator that contributes it.
         (new ParatestProcess())->run(
             $this->fakeEnvCapturingBin('paratest-env-on.php', 'LARAVEL_PARALLEL_TESTING'),
             $this->fakeBin('never-called.php'),
@@ -200,7 +244,7 @@ final class ParatestProcessTest extends TestCase
             ['CAPTURE_FILE' => $capture],
             $this->dir,
             1,
-            true,
+            new ParallelIsolation(),
         );
 
         self::assertSame("'1'", (string) file_get_contents($capture));
