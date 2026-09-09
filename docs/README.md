@@ -1,11 +1,12 @@
 # Documentation index
 
 Start with the project [README](../README.md) for what phpunit-replay does and how to use it.
-This directory holds the material behind that: the original specification, implementation
-contracts, deep dives, and development history.
+This directory holds the full reference material, plus what is behind it: the original
+specification, implementation contracts, deep dives, and development history.
 
 | Document | What it's for |
 |---|---|
+| [configuration.md](configuration.md) | Complete reference: every `phpunit-replay.php` key, every environment variable, every extension parameter, and every command option. The README covers the handful you are likely to set; this covers all of them. |
 | [SPEC.md](SPEC.md) | The original technical specification the package was built from — behaviour, data formats, and CLI surface as originally designed. |
 | [INTERNALS.md](INTERNALS.md) | Working contract between components: class names, method signatures, and data shapes, for anyone modifying the package itself. Wins over SPEC.md on signatures; SPEC.md wins on behaviour. |
 | [sharing-the-cache.md](sharing-the-cache.md) | Full guide to the remote cache: comparison of the five backends (local, shared folder, HTTP, dedicated git repository, CI artifacts), setup steps for each, `baseline_branches` for git-flow branching, and troubleshooting. |
