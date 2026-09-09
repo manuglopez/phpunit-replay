@@ -10,9 +10,9 @@ inherent to shared-process coverage attribution and is therefore documented rath
 and what is still open.
 
 Every figure below was measured on one real project: a Laravel 13 application, 9,056 tests in
-726 test files, 2,115 recorded source files, pcov, 8 Paratest workers. Each pass recorded from
-an **empty** state directory with Laravel's compiled-view cache cleared first, on an unchanged
-working tree at a fixed commit.
+726 test files, pcov, 8 Paratest workers. Each pass recorded from an **empty** state directory
+with Laravel's compiled-view cache cleared first, on an unchanged working tree at a fixed
+commit.
 
 ## The measurement
 
@@ -25,10 +25,26 @@ a random difference from a systematic one.
 | before the fixes (2 passes) | **189** | 2,115 / 2,082 | 61,278 / 61,280 |
 | with the ignored-edge fix (3 passes) | **78 / 64 / 67** | 1,834 / 1,834 / 1,834 | 60,572 / 60,569 / 60,569 |
 | plus `static_declaration_edges` (3 passes) | **22 / 15 / 14** | 1,799 / 1,799 / 1,799 | 21,706 / 21,688 / 21,687 |
+| v0.5.0 shipped: serial vs `-p 8` (3 passes) | **31 / 30 / 11** | 1,672 / 1,672 / 1,672 | 20,691 / 20,721 / 20,724 |
 
 Read the `files` column first. Before the fixes the set of source files the graph even knew
 about moved between passes. After, it is identical every time. That is the difference between
 a graph that describes the tree and one that describes the run that happened to produce it.
+
+The fourth row was measured later, against the release that actually shipped, and needs two
+caveats read alongside it. First, it is on a different commit of the same project than the three
+rows above, so its absolute `files`/`edges` counts are not directly comparable to them — what
+*is* comparable is the pairwise disagreement. Second, it is the first row that measures serial
+against parallel, and the two are not two samples of the same thing but the two *extremes* of
+first-loader attribution: a serial recording credits one test per file, the minimum possible; 8
+workers credit up to eight; full process isolation would credit every test that triggers the
+shared body. So **serial is reproducibly poor, not correct** — worth saying plainly, because a
+reader who has only seen the rows above would otherwise assume serial is the reference answer.
+The **11** for parallel-vs-parallel is the like-for-like figure, comparable in kind to the rows
+above. v0.6.0 changed nothing about attribution — its changes were the remote push-marker fix
+and a type-level interface seam (`Cache\OnceProcessClassifier`, see "Once-per-process residue"
+below) — so these figures stand for v0.6.0 too, though v0.6.0 itself was not separately measured.
+For reference, the serial pass took 22m27s; the two parallel passes took 5m15s and 5m16s.
 
 ## Why this decides whether the remote cache can work at all
 
@@ -176,7 +192,7 @@ each.
 The remaining **158 attributions, over 37 files**, are not covered by this fix. Most of those 37
 are declaration-only (enums, interfaces, base classes) and are already handled by
 `static_declaration_edges`'s existing static hop — counted here because they are still
-shape-dependent *without* that flag, not because this PR was expected to reach them. Two are
+shape-dependent *without* that flag, not because this fix was ever intended to reach them. Two are
 genuinely uncovered and have real bodies: `app/Services/Profiles/PhoneNormalizer.php` (+17 tests)
 and `app/Services/Publisher/Publication/PublisherUnpublishService.php` (+16). Their instability
 does not have an explained mechanism as of this writing — the behavioural filter
@@ -190,8 +206,9 @@ constructed keeps them moving, and it is not one of the three conventions this f
 ### The fix, and its cost
 
 `Cache\GraphUpdater::apply()` now refuses to record a coverage-derived edge to a file under
-`database/migrations/`, `database/seeders/` or `app/Console/Commands/`
-(`Laravel\OncePerProcessPaths`), gated on `static_declaration_edges` — the same flag that installs
+`database/migrations/`, `database/seeders/` or `app/Console/Commands/` (matched via the
+`Cache\OnceProcessClassifier` interface, implemented by `Laravel\OncePerProcessPaths`), gated on
+`static_declaration_edges` — the same flag that installs
 `Select\ResiduePatterns`, which is what makes refusing the edge safe rather than a new hole with
 nothing under it. The file keeps no `fileId` at all, ever, regardless of which test a worker
 process happened to credit; a change to it is then covered the same way a `config/*.php` or
@@ -228,7 +245,7 @@ actually changes what the graph *is*; exempting the tests from caching would onl
 which ones run, at the same cost, while leaving the underlying non-determinism this whole document
 is about fully in place.
 
-### Deliberately not in this PR
+### Open work
 
 - **Hash-based invalidation, replacing the git-diff gate.** `Change\ChangedFiles::since()` decides
   what changed from `git diff`/`git status` against a recorded sha. Comparing a content hash
@@ -396,3 +413,22 @@ different addresses from another's:
   therefore every address. Commit them.
 - `prune --stale-edges` is opt-in, and it removes dependency edges. Whether a machine has run
   it changes that machine's addresses.
+
+A third hazard is the opposite shape: not one machine computing a different address from
+another's, but two different machines computing the *same* address for content that should not
+be interchangeable. A content key is built from the **structural** fingerprint only — verified
+at `src/Cache/ContentKey.php:46`, `Fingerprint::canonicalStructural($fingerprint) . $testHash .
+implode('', $parts)`. The environmental bucket (PHP `MAJOR.MINOR`, coverage driver, OS family) is
+deliberately excluded. And remote adoption does not re-check it: `RunPipeline::replayFromRemote()`
+(the loop around `src/Console/Runner/RunPipeline.php:1341-1345`) computes the key, fetches the
+object, and tests only whether the object exists and whether it holds a status that must be
+re-run. So **an object recorded under PHP 8.2 + Xdebug is findable and replayable by a machine on
+PHP 8.4 + pcov.** Local recordings are protected, because environmental drift discards the
+machine's own cached results; that protection does not extend to what is adopted from a remote.
+
+This is exactly what item 2 above ("Address on what is stable, validate on what is recorded")
+already proposes to fix, by storing the environmental fingerprint inside the object — so treat it
+as one problem already on that list, not a second proposal. The mitigation available today with
+no code change is the same "one producer" measure already listed as item 1: when a single job
+records and everyone else pulls, every object came off one image and the question does not
+arise.
