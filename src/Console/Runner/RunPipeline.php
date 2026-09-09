@@ -14,6 +14,7 @@ use Manuglopez\Replay\Cache\Fingerprint;
 use Manuglopez\Replay\Cache\Graph;
 use Manuglopez\Replay\Cache\GraphStore;
 use Manuglopez\Replay\Cache\GraphUpdater;
+use Manuglopez\Replay\Cache\OnceProcessClassifier;
 use Manuglopez\Replay\Cache\ProjectKey;
 use Manuglopez\Replay\Cache\Remote\NullRemoteCache;
 use Manuglopez\Replay\Cache\Remote\ObjectStore;
@@ -134,7 +135,7 @@ final class RunPipeline
      * `Cache\GraphUpdater::apply()` records a migration/seeder/console-command edge exactly
      * as before.
      */
-    private ?OncePerProcessPaths $onceProcessPaths = null;
+    private ?OnceProcessClassifier $onceProcessPaths = null;
 
     private ?Graph $graph = null;
 

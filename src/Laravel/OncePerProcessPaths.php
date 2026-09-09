@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Manuglopez\Replay\Laravel;
 
+use Manuglopez\Replay\Cache\OnceProcessClassifier;
+
 /**
  * Laravel conventions whose *bodies* genuinely execute at most once per worker process,
  * as opposed to once per test (docs/reproducibility.md "Once-per-process residue").
@@ -64,7 +66,7 @@ namespace Manuglopez\Replay\Laravel;
  * No user-facing configuration key exists for any of this, deliberately: extending or
  * narrowing the convention list is a code change, not a project setting (docs/reproducibility.md).
  */
-final class OncePerProcessPaths
+final class OncePerProcessPaths implements OnceProcessClassifier
 {
     /**
      * Project-relative directory prefixes, each trailing with `/` so a sibling like

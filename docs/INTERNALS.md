@@ -1033,7 +1033,7 @@ final class Laravel\OncePerProcessPaths
 ```
 
 Wiring: a new optional `Cache\GraphUpdater` constructor parameter,
-`?Laravel\OncePerProcessPaths $onceProcessPaths = null` (last positional slot, after the existing
+`?Cache\OnceProcessClassifier $onceProcessPaths = null` (last positional slot, after the existing
 `?Change\Git $git = null`). `Console\Runner\RunPipeline` and `PHPUnit\ReplayState::bootInProcess()`
 each build one alongside their `?Analysis\StaticEdges`, both inside the same
 `if ($config->staticDeclarationEdges)` block, gated additionally on `Laravel\LaravelDetector::enabled()`
