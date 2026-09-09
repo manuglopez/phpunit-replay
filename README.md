@@ -158,6 +158,20 @@ Each rule consumes what earlier ones didn't claim. The Laravel ones do nothing o
 
 Two more categories always run, regardless of rules: **test files new to the graph**, and any cached result that **must be re-checked** — a failure or error always re-runs; a risky, incomplete or skipped result re-runs only if your PHPUnit config would actually surface it.
 
+### Framework defaults
+
+`WatchRule`'s built-in patterns, and how each framework is detected. Nothing here needs configuring; your own `watch` entries are merged on top.
+
+| Framework | Detected by | Patterns |
+|---|---|---|
+| Generic | always on | `.env*`, `phpunit.xml*`, `docker-compose*.y*ml`, `tests/**/Fixtures/**`, `tests/**/__snapshots__/**` |
+| Laravel | `artisan` exists | `config/**`, `routes/**`, `database/migrations/**`, `resources/views/**`, `lang/**`, `resources/lang/**`, `app/** !*.php`, `bootstrap/*.php` |
+| Symfony | `config/bundles.php` exists | `config/**`, `migrations/**`, `templates/**`, `translations/**` |
+
+On a project that is neither, the generic row is all that applies — and the graph does the rest of the work, since a recorded edge doesn't care what framework produced it.
+
+Laravel additionally gets runtime tracking (tables, Blade views, migration-aware tests — [see below](#laravel)). Symfony gets detection and watch patterns only; there is no Symfony equivalent of that deeper tracking yet. Said plainly rather than implied: the framework depth is uneven, and Laravel is the one that has it.
+
 ### What counts as "changed"
 
 Two filters narrow the git diff before selection sees it:
@@ -311,36 +325,44 @@ By default every machine keeps its own `graph.json` and re-records from scratch 
 
 ```mermaid
 flowchart LR
-    L1["your laptop"] -->|"read"| R[("remote cache<br/>content-addressed")]
-    L2["a teammate"] -->|"read"| R
-    P["PR CI job"] -->|"read"| R
-    BJ["baseline job<br/>on the default branch"] ==>|"WRITE<br/>objects + graph"| R
-    R -->|"pull"| N["a fresh checkout,<br/>0 tests executed"]
+    L1["your laptop"] -->|"its own results"| R[("remote cache<br/>content-addressed")]
+    L2["a teammate"] -->|"its own results"| R
+    P["PR CI job"] -->|"its own results"| R
+    BJ["baseline job<br/>on the default branch"] ==>|"results <b>and</b> the branch graph"| R
+    R -->|"a cold start reads both"| N["a fresh checkout,<br/>0 tests executed"]
 ```
 
 The address of a result is a hash of what went into producing it, so two machines that share inputs share results, and nobody can overwrite anybody.
 
-### Who is allowed to write
+### Who writes what
 
-`remote_push` decides this, and it has three settings, not two:
+There are two different things a machine can publish, and they are not governed the same way.
 
-| `remote_push` | publishes its own results | publishes the branch baseline (`graph/**`) | for |
+**Results** — a single test file's outcomes, addressed by content. Everyone publishes these, by default. That's the point: a test your laptop ran, your teammate replays, and neither of you had to wait for CI.
+
+**The branch graph** (`graph/**`) — the one authoritative baseline per branch, and what every cold start reads. Only a job with `remote_push: 'all'` publishes it, and it should be exactly one CI job per branch. A `run` that detects CI won't publish a baseline at all without `--allow-ci-baseline`.
+
+| `remote_push` | its own results | the branch graph | who it's for |
 |---|---|---|---|
-| `off` | no | no | **developers and PR jobs, when the cache is write-restricted** |
-| `objects` *(the current default)* | yes | no | developers, when everyone may write results |
-| `all` | yes | yes | the one CI job that owns the branch baseline |
+| `off` | no | no | developers |
+| `objects` *(default)* | yes | no | CI jobs |
+| `all` | yes | yes | nobody needs this — see below |
 
-**The recommended setup is the one drawn above: only CI writes.** Give the cache a write credential that lives solely in CI — a deploy key on a git backend, a scoped token on HTTP — leave the whole team on read access, and set:
+### The setup to run: CI writes, everyone reads
 
 ```php
-'remote_push' => getenv('CI') ? 'all' : 'off',
+'remote_push' => getenv('CI') ? 'objects' : 'off',
 ```
 
-That way a developer's machine reads the cache and never tries to publish to it. Nothing is lost by it: what a laptop would have published, CI republishes on the next baseline run anyway.
+Give the cache a write credential that lives only in CI, keep the team on read access, and add `push --graph` to the job that records the baseline after a merge. That's the whole configuration.
 
-Note the default is `objects`, **not** `off`. It is safe — a result's address is a hash of its inputs, so concurrent writers of the same key are a no-op rather than a conflict — but it does mean that out of the box, a developer's machine publishes its own results. If your cache is read-only for the team and you leave the default in place, every developer run will attempt a push it isn't allowed to make and print a warning. The run still succeeds; the warning is the only symptom, and `remote_push: 'off'` is the fix.
+**Nothing needs `all`.** `push --graph` publishes the branch baseline on the strength of its own flag and isn't gated by `remote_push`, so the baseline job's explicit `push --graph` is what writes `graph/**` — one job, by name. Setting `all` instead makes *every* CI job publish a branch graph automatically, and `--allow-ci-baseline` does not prevent it (that flag guards the *local* baseline only).
 
-Only `all` ever writes `graph/**`, the branch baseline everyone else's cold start reads. Keep that on one job.
+**Developers still get everything.** They read the graph and every object. A test one of them writes executes for real on their machine, because it's new to the graph — which is what you want for a test you just wrote. The PR job then runs it and publishes its result, so from that moment the whole team replays it, without waiting for the merge. The graph catches up at the next baseline run.
+
+**And this is the setting that keeps replay honest, not just tidy.** A result's content key is built from the *structural* fingerprint only — `composer.lock`, `phpunit.xml`, file content hashes. The PHP version, the coverage driver and the OS are deliberately **not** in it, and a remote object is adopted on a key match without re-checking them. So an object recorded on PHP 8.2 with Xdebug is findable, and replayable, by a machine on PHP 8.4 with pcov. Locally that can't bite you — environmental drift throws your own cached results away — but that protection does not extend to what you adopt from a remote. When only CI writes, every object in the cache came off the same image, and the question never arises. When developer machines write too, the cache mixes environments and nothing checks it.
+
+So: let developers publish results only if their environment matches CI's. It's safe in the sense that concurrent writers of one key are a no-op rather than a conflict — a result's address is a hash of its inputs, and no machine can overwrite another's work — but "safe to write" is not the same as "safe to adopt".
 
 | | Local only | Shared folder | HTTP (S3/MinIO) | Dedicated git repo | CI artifacts |
 |---|---|---|---|---|---|
@@ -456,6 +478,7 @@ phpunit-replay sits closest to **testmon** and **Ekstazi**: coverage-based selec
 - **The HTTP backend has no listing endpoint**, so `prune --remote` needs the filesystem or git backend.
 - **Coverage snapshots only exist** for test files recorded with `--coverage-php` active.
 - **A rebase invalidates a commit-based baseline** and forces a fresh recording — but content-addressed replay still works, so a test file whose content is unchanged replays anyway.
+- **A remote object carries no record of the environment it was made on.** The content key is built from the structural fingerprint only, so PHP's version, the coverage driver and the OS are not part of a result's address and are not re-checked when an object is adopted from a remote. A cache written by machines with different environments can therefore serve a result across that difference. Local recordings are protected — environmental drift discards them — but remote adoption is not, so keep the writers homogeneous ([see above](#the-setup-to-run-ci-writes-everyone-reads)).
 - **Graph attribution is order-dependent at the margin.** Which test gets credited for a file that only executes once per process depends on run shape. Measured, mostly fixed, and the residual is a cache miss rather than a wrong answer — the full measurement is in [docs/reproducibility.md](docs/reproducibility.md).
 
 ## Trying it on your project

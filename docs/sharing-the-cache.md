@@ -117,25 +117,44 @@ constantly with real commits.
    [`webfactory/ssh-agent`](https://github.com/webfactory/ssh-agent) — see the deploy-key step in
    `.github/workflows/examples/tia-baseline.yml`, `examples/ci.yml`, and `examples/tia-gc.yml`.
 3. **Developers use their own SSH access** — nothing extra to configure locally beyond whatever
-   git setup already lets them clone/push other repos on the same host. Give them read access to
-   the cache repo (or write, if you don't want to restrict who can push baselines — `remote_push`
-   is what actually gates that, not repo permissions).
+   git setup already lets them clone/push other repos on the same host. Give them **read** access
+   to the cache repo.
+
+   Be clear about what enforces what: **`remote_push` is client-side self-restraint, not access
+   control.** It is a value in a config file the developer controls, so anyone holding a write
+   credential can publish whatever their client is configured to publish. Repo permissions are the
+   only thing that actually enforces the boundary. And on a git backend those permissions are
+   per-repository, never per-path, so "may write `objects/**` but not `graph/**`" is not
+   expressible — that distinction only exists on the HTTP backend (prefix-scoped bucket policies)
+   or the filesystem backend (directory permissions).
 4. **`phpunit-replay.php`:**
 
    ```php
    <?php
    return [
        'remote' => 'git@github.com:org/project-replay-cache.git',
-       'remote_push' => getenv('CI') ? 'all' : 'objects',
+       'remote_push' => getenv('CI') ? 'objects' : 'off',
        'remote_branch' => 'main',
        'baseline_branches' => ['develop', 'main'],
    ];
    ```
 
-   `remote_push: 'objects'` (the default) means a developer's machine only ever publishes
-   `objects/<month>/<k>.json` — test-file results keyed by content, never a branch's baseline
-   graph. Only the CI job on `main`/`develop` (`remote_push: 'all'`) publishes `graph/**`, which is
-   what everyone else's `pull`/cold start reads.
+   **Nothing here needs `all`.** `push --graph` publishes the branch baseline on the strength of
+   its own flag and is not gated by `remote_push` at all, so the baseline job's explicit
+   `push --graph` is what writes `graph/**` — an operator action, in one job, by name. Setting
+   `all` instead would make *every* CI job publish a branch graph automatically, because the
+   automatic graph publish checks `remote_push` and `--allow-ci-baseline` does **not** guard it
+   (that flag guards the *local* baseline only).
+
+   So the three roles come out as: developers `off`; every CI job `objects`, which publishes
+   `objects/<month>/<k>.json` — test-file results keyed by content — and can never publish a
+   graph; and the baseline job additionally running `push --graph`.
+
+   This is the flow that makes a read-only team work. A developer writes a new test and runs it
+   locally, where it executes for real because it is new to the graph — which is what you want for
+   a test you just wrote. The PR job then runs it and publishes its object, so from that point the
+   whole team replays it, without waiting for the merge. The graph catches up at the next baseline
+   run.
 
 5. **First `push --graph` from CI.** The very first time the baseline workflow
    (`tia-baseline.yml`) runs `phpunit-replay run --allow-ci-baseline` followed by

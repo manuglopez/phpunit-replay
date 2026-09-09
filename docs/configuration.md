@@ -59,17 +59,33 @@ Full setup guide, per backend: [sharing-the-cache.md](sharing-the-cache.md).
 A remote that is unreachable, unauthenticated or misconfigured always degrades to a warning on
 stderr and a local-only pass. It cannot break a test run.
 
-**If only CI is allowed to write** — a deploy key or scoped token held solely by CI, with the whole
-team on read access — then developers need `remote_push` set to `off`, not left at its default:
+The default, `objects`, is a *write* — every machine publishes its own test-file results. That is
+deliberate and it is where most of the sharing value comes from: a test one developer ran, the next
+replays. Content addressing makes it safe from anywhere, since two writers of the same key are a
+no-op rather than a conflict.
+
+**The recommended setup is CI-writes-everyone-reads:**
 
 ```php
-'remote_push' => getenv('CI') ? 'all' : 'off',
+'remote_push' => getenv('CI') ? 'objects' : 'off',
 ```
 
-The default is `objects`, which is a *write*. Leave it in place on a read-only cache and every
-developer run attempts a push it is not allowed to make, and prints a warning for it. The run still
-succeeds — the warning is the only symptom — but the warning is per run, for everyone. Nothing is
-lost by `off`: whatever a laptop would have published, the baseline job republishes anyway.
+`all` is not needed anywhere. `push --graph` publishes the branch baseline on its own flag and is
+**not** gated by `remote_push`, so the baseline job's explicit `push --graph` is what writes
+`graph/**`. Setting `all` instead makes every CI job publish a branch graph automatically, and
+`--allow-ci-baseline` does not guard that — it guards the *local* baseline only.
+
+Developers lose nothing by `off`: they read the graph and every object, a new test of theirs
+executes for real locally (it is new to the graph), the PR job publishes its result, and from then
+on the team replays it.
+
+**Why homogeneous writers matter.** A content key is built from the *structural* fingerprint only.
+PHP's version, the coverage driver and the OS live in the *environmental* bucket, which is
+deliberately excluded from the key — and a remote object is adopted on a key match without
+re-checking them. So an object recorded under PHP 8.2 + Xdebug is replayable by a machine on
+PHP 8.4 + pcov. Local recordings are safe (environmental drift discards them), but that protection
+does not reach remote adoption. Let developer machines publish only when their environment matches
+CI's.
 
 ### Baselines
 
