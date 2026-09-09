@@ -70,7 +70,7 @@ final class OnceProcessResidueTest extends TestCase
      * halves, in one test.
      *
      * `database/seeders/` is used rather than `database/migrations/` deliberately: a
-     * migration path is ALSO handled by `Select\Rules\MigrationRule` (a completely
+     * migration path is ALSO handled by `Laravel\Rules\MigrationRule` (a completely
      * separate, table-based selection mechanism unaffected by this fix), which would
      * select the test regardless of whether the residue mechanism engaged at all —
      * making a migration-based test ambiguous about which mechanism actually fired.

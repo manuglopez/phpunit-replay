@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace Manuglopez\Replay\Select\Rules;
+namespace Manuglopez\Replay\Laravel\Rules;
 
 use Manuglopez\Replay\Laravel\BladeReferences;
 use Manuglopez\Replay\Select\Context;

@@ -97,7 +97,7 @@ final class FactsCache
      * would classify it as declaration-only and let `Record\Recorder` drop the edge
      * `Laravel\BladeTracker` linked by hand (`Recorder::linkSource()`). Blade has its own
      * reference walker (`Laravel\BladeReferences`) and its own selection rule
-     * (`Select\Rules\BladeRule`); neither wants an opinion from here.
+     * (`Laravel\Rules\BladeRule`); neither wants an opinion from here.
      */
     public function for(string $absoluteFile): FileFacts
     {

@@ -78,7 +78,7 @@ final class OncePerProcessPathsTest extends TestCase
         self::assertFalse($this->paths->matches('app/Console/CommandsLegacy/Foo.php'));
     }
 
-    /** Matching is exact-case, like every other convention path this package hardcodes (Select\Rules\MigrationRule). */
+    /** Matching is exact-case, like every other convention path this package hardcodes (Laravel\Rules\MigrationRule). */
     public function test_matching_is_case_sensitive(): void
     {
         self::assertFalse($this->paths->matches('Database/Migrations/2024_01_01_000000_create_users_table.php'));

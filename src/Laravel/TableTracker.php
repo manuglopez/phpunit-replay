@@ -11,7 +11,7 @@ use Manuglopez\Replay\Record\Recorder;
  *
  * Deviation from Pest: `arm()` takes the already-resolved Illuminate application container
  * (`$app`) instead of resolving `Container::getInstance()` itself — the "once per Container
- * instance" bookkeeping lives in `PHPUnit\Subscribers\ArmLaravelTrackersOnPrepared` (SPEC.md
+ * instance" bookkeeping lives in `Laravel\Subscribers\ArmLaravelTrackersOnPrepared` (SPEC.md
  * §10). `$app` is untyped `object` on purpose: the package must not depend on `illuminate/*`,
  * so every call into it is dynamic and reflection-guarded.
  */

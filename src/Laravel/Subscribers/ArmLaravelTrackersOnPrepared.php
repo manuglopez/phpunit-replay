@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace Manuglopez\Replay\PHPUnit\Subscribers;
+namespace Manuglopez\Replay\Laravel\Subscribers;
 
 use Manuglopez\Replay\Laravel\BladeTracker;
 use Manuglopez\Replay\Laravel\MigrationTables;
