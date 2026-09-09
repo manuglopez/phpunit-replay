@@ -216,8 +216,10 @@ process happened to credit; a change to it is then covered the same way a `confi
 test the graph knows runs**.
 
 That cost is not hypothetical, and it is not free: measured from the project's own git history,
-**318 of the last 1,530 commits (20%) touch one of the three directories** — 151 touch a migration,
-200 a console command, 9 a seeder. Roughly **one run in five** would run the whole suite instead of
+**318 of the last 1,530 commits (21%) touch one of the three directories** — 151 touch a
+migration, 200 a console command, 9 a seeder. Those three add up to 360, not 318, because a
+single commit can touch more than one of the three directories: 318 counts distinct commits,
+360 counts directory-touches. Roughly **one run in five** would run the whole suite instead of
 whatever the fast lane would otherwise have selected, at an expected cost of about **one minute per
 run** on a suite whose 8-worker `record` takes 5m05s. State plainly: this is the price, not a free
 correctness upgrade, and it is paid on one run in five rather than rarely.
@@ -307,6 +309,15 @@ claims them and `Select\Rules\WatchRule` turns that into "run everything the gra
 **with the flag on, editing any `config/` or `lang/` file re-runs the whole suite**; with it
 off those files carry edges to roughly 700 test files each and only those run. On this suite
 that is the difference between 700 tests and 9,056.
+
+That 60-file dropout (55 + 1 + 4) is the **gross** count leaving the `files` table when the flag
+turns on. It is not the same figure as the **net** change already shown in the measurement table
+above — `files` per pass there drops from 1,834 ("with the ignored-edge fix") to 1,799 ("plus
+`static_declaration_edges`"), a difference of 35. Both are true at once: the body filter drops 60
+files, and the static hop must be adding some files to the table that the coverage-only graph did
+not have, or the net change could not be smaller than the gross dropout. This document does not
+measure how many files the static hop adds to the table — only that the two figures are
+consistent with each other, not contradictory.
 
 That behaviour is safe and deliberate — `ResiduePatterns` exists to refuse to guess rather than
 drop an edge — but it is a real cost, and turning the flag on is a trade, not an upgrade.
