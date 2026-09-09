@@ -23,11 +23,20 @@ use ReflectionClass;
  * This corpus is what made the splitter's rewrite safe: `splitPassthrough()` no longer
  * consults five hand-maintained constants (`COMMAND_NAMES`, `OWN_LONG_OPTIONS`,
  * `GLOBAL_LONG_OPTIONS`, `GLOBAL_SHORT_OPTIONS`, `PARALLEL_SHORTCUT_COMMANDS`) — it derives
- * ownership from the live Symfony `InputDefinition` objects instead — and every case here
- * passes, byte-for-byte, against BOTH implementations.
+ * ownership from the live Symfony `InputDefinition` objects instead.
  *
- * PINNED, DISCLOSED GAPS (today's actual behaviour, deliberately not fixed by this corpus
- * or by the rewrite it made safe — behavioural equivalence was the bar):
+ * Almost every case here passes, byte-for-byte, against BOTH implementations. Three do not
+ * — {@see self::cases()}'s `-p=2` cases (run/record/verify) — because a second look at the
+ * previous implementation's answer for them, requested during review, concluded it was a
+ * bug rather than behaviour worth preserving: see "FIXED, NOT PINNED" below. Every other
+ * case, including `-p4`/`-p10`, is unchanged from the original corpus and still passes
+ * against both implementations — those two were never actually removed from real Symfony
+ * parity, only from a bespoke regex a first pass at this rewrite mistakenly failed to
+ * replace with an equally general rule; see `Application::splitPassthrough()`'s docblock.
+ *
+ * PINNED, DISCLOSED GAPS (today's actual behaviour, deliberately not fixed here —
+ * behavioural equivalence is the bar for these two; both are reported as likely defects,
+ * out of scope, follow-up work):
  *
  * - `--log-junit`/`--keep-months` are recognised ONLY in their `--option=value` form. The
  *   bare form — `--log-junit result.xml` as two tokens — is NOT recognised: the first token
@@ -35,19 +44,33 @@ use ReflectionClass;
  *   `ArgvInput::addLongOption()` would peek the next token as the value for a bare
  *   `VALUE_REQUIRED` option exactly the way it does for `--parallel`, so this asymmetry
  *   looks like a genuine defect rather than a deliberate choice — reported as such, pinned
- *   as-is here.
- * - `-p=2` (short form, literal `=`) is NOT recognised, even though `-p`, `-p 2` (two
- *   tokens), `--parallel`, `--parallel 2` and `--parallel=2` all are, and both SPEC.md and
- *   README document the option as `-p[=N]`. This looks like a second, independent instance
- *   of the same class of defect — reported separately, pinned as-is here.
- * - `-p4` / `-p10` (a process count glued directly onto the shortcut, no `=`) WAS
- *   recognised by the previous implementation, via a regex (`/^p\d*$/`) the rewrite
- *   deliberately does not reproduce (see `Application::splitPassthrough()`'s docblock): it
- *   was never part of this corpus for exactly that reason — it was expected to change, not
- *   pinned, and now does not recognise these tokens (see the dedicated regression cases at
- *   the bottom of {@see self::cases()}, added once the rewrite landed).
- * - Clustering (`-xyz`) is not implemented; a clustered token is simply not recognised
- *   (goes to passthrough, tripping the latch like any other unrecognised token).
+ *   as-is here. This is a genuinely separate rule (a long-option next-token peek) from the
+ *   short-option fix below, and out of scope for this change.
+ *
+ * FIXED, NOT PINNED (the exceptions to "byte-for-byte against both implementations" above):
+ *
+ * - `-p=2` (short form, literal `=`) used to NOT be recognised, even though `-p`, `-p 2`
+ *   (two tokens), `--parallel`, `--parallel 2` and `--parallel=2` all were — despite both
+ *   SPEC.md and README documenting the option as `-p[=N]`. Confirmed empirically (not
+ *   assumed) that real Symfony's own `ArgvInput` does not strip the `=` itself either
+ *   (`-p=2` parses to the literal option value `"=2"`, which then fails
+ *   `RunRequest::parseParallel()`'s `is_numeric()` check and silently falls back to
+ *   Paratest's auto-detected count) — so recognising the token alone would not have been
+ *   enough to make the documented form actually mean "2 processes"; `-p=2` is now rewritten
+ *   to `-p2` at the point this splitter emits it (`Application::emit()`), which real Symfony
+ *   does parse correctly, the same way `=` already works for the long form. These three
+ *   cases are the ONLY ones in this file whose expected value changed from the original
+ *   corpus (was: `[$command, '--', '-p=2']`; now: `[$command, '-p2']`) — see the commit that
+ *   made this change for the full justification.
+ * - `-p4` / `-p10` (a process count glued directly onto the shortcut, no `=`) is recognised
+ *   by a general rule now (`Application::resolveShortToken()`: any own or global shortcut
+ *   that `acceptValue()`s owns the whole token, whatever follows it), not a name-specific
+ *   regex — so it did not need to be dropped to remove the regex, and is not a narrowing.
+ * - Clustering (`-xyz`) is genuinely not implemented; a clustered token — more than one
+ *   character after a shortcut that does NOT accept a value — is simply not recognised
+ *   (goes to passthrough, tripping the latch like any other unrecognised token). Unlike the
+ *   two points above, this really is a scope boundary, not a fixable gap: `-p` is the only
+ *   own shortcut anywhere in this CLI, so there is nothing for it to cluster *with*.
  */
 final class ApplicationArgvSplitTest extends TestCase
 {
@@ -140,14 +163,16 @@ final class ApplicationArgvSplitTest extends TestCase
         yield 'push --graph (bare)' => [['push', '--graph'], ['push', '--graph']];
 
         // --- --parallel/-p in every documented form, on each of the three commands that
-        // declare it. `-p=2` is the pinned gap described in the class docblock: SPEC.md and
-        // README document `-p[=N]`, but this form is not actually recognised today.
+        // declare it. `-p=2` is one of the FIXED, NOT PINNED cases in the class docblock:
+        // it is now recognised and rewritten to `-p2` (Application::emit()), the one form
+        // real Symfony's own ArgvInput does correctly parse — matching what SPEC.md/README
+        // document (`-p[=N]`), which the previous implementation never actually delivered.
         foreach (['run', 'record', 'verify'] as $command) {
             yield "$command -p (bare)" => [[$command, '-p'], [$command, '-p']];
             yield "$command -p 2 (two tokens, peeked value)" => [[$command, '-p', '2'], [$command, '-p', '2']];
-            yield "$command -p=2 (pinned gap: NOT recognised)" => [
+            yield "$command -p=2 (FIXED: now recognised, rewritten to -p2 so Symfony parses \"2\" not the literal \"=2\")" => [
                 [$command, '-p=2'],
-                [$command, '--', '-p=2'],
+                [$command, '-p2'],
             ];
             yield "$command --parallel (bare)" => [[$command, '--parallel'], [$command, '--parallel']];
             yield "$command --parallel 2 (two tokens, peeked value)" => [
@@ -348,9 +373,10 @@ final class ApplicationArgvSplitTest extends TestCase
 
         // ---------------------------------------------------------------------------
         // NEW cases below, added once the derivation-based rewrite landed: these
-        // document behaviour that CHANGED, not behaviour pinned from before it. They
-        // were never part of the frozen corpus above (which passes unchanged against
-        // both implementations) — see the class docblock's "PINNED, DISCLOSED GAPS".
+        // document behaviour that is now DIFFERENT from before the rewrite (fixed bugs,
+        // in every case below — nothing here is a narrowing). They were never part of
+        // the original frozen corpus above — see the class docblock's "FIXED, NOT
+        // PINNED".
         // ---------------------------------------------------------------------------
 
         // `--silent` is a real global option (Symfony 8.1's own `getDefaultInputDefinition()`)
@@ -363,20 +389,44 @@ final class ApplicationArgvSplitTest extends TestCase
             ['run', '--silent'],
         ];
 
-        // `-p4`/`-p10` (a process count glued directly onto the shortcut) used to be
-        // recognised via a regex (`/^p\d*$/`) this rewrite deliberately does not reproduce:
-        // short-option recognition is now exact-shortcut-string-match only. Neither SPEC.md
-        // nor README document this attached form (only `-p`, `-p 2` and `--parallel[=N]`
-        // are), so this is treated as a disclosed narrowing rather than a regression.
+        // `-p4`/`-p10` (a process count glued directly onto the shortcut, no `=`): still
+        // recognised, exactly as before the rewrite — NOT a narrowing. `resolveShortToken()`
+        // owns the whole token whenever the shortcut it starts with `acceptValue()`s,
+        // whatever follows it (`4`, `10`, anything), the same general rule that also fixes
+        // `-p=2` above; it just happens to reproduce the old regex's answer for these two
+        // because `parallel` is a `VALUE_OPTIONAL` option and `4`/`10` don't start with `-`.
+        // These cases exist so a future change to that rule cannot silently narrow this
+        // again without a test noticing.
         foreach (['run', 'record', 'verify'] as $command) {
-            yield "$command -p4 (CHANGED: previously recognised via regex, now NOT — disclosed narrowing)" => [
+            yield "$command -p4 (glued value via the general acceptValue() rule, not a regex — unchanged)" => [
                 [$command, '-p4'],
-                [$command, '--', '-p4'],
+                [$command, '-p4'],
             ];
-            yield "$command -p10 (CHANGED: previously recognised via regex, now NOT — disclosed narrowing)" => [
+            yield "$command -p10 (glued value via the general acceptValue() rule, not a regex — unchanged)" => [
                 [$command, '-p10'],
-                [$command, '--', '-p10'],
+                [$command, '-p10'],
             ];
         }
+
+        // `-p=4`/`-p=10` on the other two commands that declare `-p`, and a couple of
+        // adjacent shapes the general short-option rule must get right without special-
+        // casing: a cluster attempt against the one shortcut that does NOT accept a value
+        // (still unrecognised — clustering is genuinely unimplemented, not a bug), and a
+        // value-accepting shortcut's glued value that itself starts with `-` (still owned
+        // whole, since it is the option's value, not a separate token to reclassify).
+        foreach (['record', 'verify'] as $command) {
+            yield "$command -p=10 (FIXED, same as -p=2: rewritten to -p10)" => [
+                [$command, '-p=10'],
+                [$command, '-p10'],
+            ];
+        }
+        yield 'run -h4 (cluster attempt against a shortcut that does NOT accept a value: still unrecognised)' => [
+            ['run', '-h4'],
+            ['run', '--', '-h4'],
+        ];
+        yield 'run -p-weird (a glued value that itself starts with "-": still owned whole, not reclassified)' => [
+            ['run', '-p-weird'],
+            ['run', '-p-weird'],
+        ];
     }
 }
