@@ -11,8 +11,10 @@ use PHPUnit\Framework\TestCase;
 
 /**
  * SPEC.md §15 scenario 6 / §16 acceptance criterion 6: `--filter` (forwarded to PHPUnit
- * after `--`) runs only what was asked, in results-only mode, and never touches the
- * graph's edges or recorded baseline sha (docs/INTERNALS.md step 7).
+ * after `--`) runs only what was asked, in results-only mode, and persists nothing at all
+ * — not the graph's edges, not the recorded baseline sha, and (bug fix: this used to
+ * still refresh the filtered test's own cached result — the false-green vector rule 2
+ * closes) not even the filtered test's own result (docs/INTERNALS.md step 7).
  */
 final class Scenario06FilterDoesNotTouchEdgesTest extends TestCase
 {
@@ -53,13 +55,12 @@ final class Scenario06FilterDoesNotTouchEdgesTest extends TestCase
         self::assertNotNull($updated);
         self::assertSame(0, $updated['status']);
 
-        // Every other known result is untouched (the filtered test's own `time` is the
-        // only field allowed to differ between the two passes).
-        $beforeResults = $before->results('main');
-        unset($beforeResults[$testId]);
-        $afterResults = $after->results('main');
-        unset($afterResults[$testId]);
-        self::assertSame($beforeResults, $afterResults);
+        // Bug fix: this used to still refresh the filtered test's OWN cached result (its
+        // `time`, specifically) even though nothing else changed — `recordsEdges: false`
+        // only ever gated edge writing, never result merging. A CLI selection now
+        // persists nothing at all: every result, including the filtered test's own, is
+        // byte-for-byte what the full `record` above wrote.
+        self::assertSame($before->results('main'), $after->results('main'));
     }
 
     /** @return array<string, list<string>> test file => sorted dependencies */

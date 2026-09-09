@@ -5,22 +5,35 @@ declare(strict_types=1);
 namespace Manuglopez\Replay\PHPUnit;
 
 use PHPUnit\TextUI\CliArguments\Builder as CliArgumentsBuilder;
+use PHPUnit\TextUI\CliArguments\Configuration as CliConfiguration;
 use PHPUnit\TextUI\Configuration\Configuration;
 use PHPUnit\TextUI\Configuration\Merger;
 use PHPUnit\TextUI\Configuration\SourceMapper;
 use PHPUnit\TextUI\XmlConfiguration\Loader as XmlConfigurationLoader;
 use SebastianBergmann\CodeCoverage\Filter;
+use Throwable;
 
 /**
  * Thin, version-tolerant reads of a PHPUnit `Configuration` object: everything that
- * differs between PHPUnit 11.5, 12 and 13 (e.g. the test suite name getters, singular-only
- * in 11.5, both in 12, plural-only in 13) is abstracted here behind `method_exists` checks,
- * per docs/INTERNALS.md.
+ * differs between PHPUnit 11.5, 12 and 13 (e.g. `--repeat`/`--retry`, absent before 13.3)
+ * is abstracted here behind `method_exists` checks, per docs/INTERNALS.md.
  */
 final readonly class ConfigurationReader
 {
-    public function __construct(private Configuration $configuration)
-    {
+    /**
+     * `$cliConfiguration` is the CLI-only half `Configuration\Merger` merges with the XML
+     * half into `$configuration` — kept separately so {@see self::hasPartialSelection()}
+     * can answer "did the command line ask for a subset" without the merged object's own
+     * contamination (see that method's docblock). Null on the one path that has no CLI
+     * half to hand it (an in-process boot that could not reliably reconstruct one from
+     * `$_SERVER['argv']` — {@see self::cliConfigurationFromArgv()}); every OTHER read here
+     * (`shouldRerun()`, `sourceIncludeDirectories()`, `repeatOrRetryRequested()`, ...) is
+     * unaffected either way, since none of them consult it.
+     */
+    public function __construct(
+        private Configuration $configuration,
+        private ?CliConfiguration $cliConfiguration = null,
+    ) {
     }
 
     /**
@@ -48,25 +61,92 @@ final readonly class ConfigurationReader
 
         $configuration = (new Merger())->merge($cli, $xml);
 
-        return new self($configuration);
+        return new self($configuration, $cli);
     }
 
     /**
-     * True when the user asked PHPUnit to run something narrower than the full suite
-     * (`--filter`, `--exclude-filter`, `--group`, `--exclude-group`, `--testsuite`,
-     * `--exclude-testsuite`, or an explicit path/file argument). SPEC.md §3.1.
+     * The CLI half alone, reconstructed from the REAL invocation (`$_SERVER['argv']`) with
+     * the same `CliArguments\Builder` {@see self::fromXmlFile()} uses — for the one caller
+     * that has no wrapper in front of it and therefore no already-known argument list to
+     * build from: `PHPUnit\ReplayState::bootInProcess()`, which is handed PHPUnit's own
+     * already-MERGED `Configuration` and cannot recover which half a group/testsuite came
+     * from out of it (`Configuration\Merger` does not retain that provenance).
+     *
+     * Null on argv being absent/empty or on any parse failure — both left for the caller to
+     * treat as "cannot determine the CLI half", which {@see self::hasPartialSelection()}
+     * then answers the only safe way: as if a selection WERE present. Never silently
+     * degrades to "no selection", which would let e.g. a Paratest worker whose own
+     * argv does not resemble the user's invocation replay (or record into) the cache for a
+     * run the user asked to narrow.
+     */
+    public static function cliConfigurationFromArgv(): ?CliConfiguration
+    {
+        $argv = $_SERVER['argv'] ?? null;
+
+        if (! is_array($argv) || $argv === []) {
+            return null;
+        }
+
+        /** @var list<string> $arguments */
+        $arguments = array_values(array_filter($argv, 'is_string'));
+
+        if ($arguments === []) {
+            return null;
+        }
+
+        try {
+            return (new CliArgumentsBuilder())->fromParameters($arguments);
+        } catch (Throwable) {
+            return null;
+        }
+    }
+
+    /**
+     * True when the COMMAND LINE alone asked PHPUnit to run something narrower than the
+     * full suite (`--filter`, `--exclude-filter`, `--group`, `--exclude-group`,
+     * `--testsuite`, `--exclude-testsuite`, or an explicit path/file argument). SPEC.md
+     * §3.1. Gates recording (`Console\Runner\RunPipeline`, `PHPUnit\ReplayState`): a CLI
+     * selection means "run exactly this", so nothing observed under it may enter the cache.
+     *
+     * Bug fix: this used to read `hasFilter()`/`hasGroups()`/`hasExcludeGroups()`/
+     * `includeTestSuites()`/`excludeTestSuites()` off `$this->configuration` — the MERGED
+     * configuration, XML plus CLI. `Configuration\Merger` folds a project's own
+     * `<groups><include>/<exclude>` and its `defaultTestSuite` into that merged object
+     * whenever the CLI side is silent on them (`$groups = $cliConfiguration->hasGroups() ?
+     * $cliConfiguration->groups() : $xmlConfiguration->groups()->include()->...`, and the
+     * same shape for excludeGroups/includeTestSuite) — so a project whose `phpunit.xml`
+     * excludes a group (a common way to quarantine tests that hit real external services)
+     * reported a partial selection with ZERO command-line arguments: `record` refused
+     * outright, and `run` never recorded a single edge, on every ordinary invocation.
+     * XML-declared group/testsuite configuration is the project's own definition of what
+     * "the whole suite" means, not a selection — SPEC.md §3.1 (and this method) mean the
+     * COMMAND LINE specifically. `hasFilter()`/`hasExcludeFilter()`/`hasCliArguments()`
+     * were never affected (PHPUnit's XML schema has no `<filter>` equivalent, and
+     * `cliArguments()` is always `$cliConfiguration->arguments()` verbatim), so those three
+     * are read from `$cliConfiguration` too, for the same reason, not because they needed
+     * fixing.
+     *
+     * `$this->cliConfiguration === null` means the caller could not reliably determine the
+     * CLI half at all (see {@see self::cliConfigurationFromArgv()}) — failed CLOSED, as a
+     * selection, never open: the wrong direction would let an unrecognised context (a
+     * Paratest worker's own internally-generated argv, an unparseable one, ...) replay or
+     * record into the cache for what may be a deliberately narrowed run.
      */
     public function hasPartialSelection(): bool
     {
-        $configuration = $this->configuration;
+        $cli = $this->cliConfiguration;
 
-        return $configuration->hasFilter()
-            || $configuration->hasExcludeFilter()
-            || $configuration->hasGroups()
-            || $configuration->hasExcludeGroups()
-            || $this->includeTestSuites() !== []
-            || $this->excludeTestSuites() !== []
-            || $configuration->hasCliArguments();
+        if ($cli === null) {
+            return true;
+        }
+
+        return $cli->hasFilter()
+            || $cli->hasExcludeFilter()
+            || $cli->hasGroups()
+            || $cli->hasExcludeGroups()
+            || $cli->hasTestSuite()
+            || $cli->hasExcludedTestSuite()
+            || $cli->arguments() !== [];
     }
 
     /**
@@ -157,70 +237,23 @@ final readonly class ConfigurationReader
      * `Configuration::repeat()`/`retry()` do not exist at all before 13.3 (there is nothing
      * to be true here on 11.5, 12 or 13.0-13.2, and calling either directly would be a fatal
      * `Call to undefined method` on those installs) — guarded the same way, and for the same
-     * PHPStan reason, as {@see self::testSuiteNames()}.
+     * PHPStan reason, as {@see self::intOption()}.
      */
     public function repeatOrRetryRequested(): bool
     {
         return $this->intOption('repeat') > 1 || $this->intOption('retry') > 1;
     }
 
-    /** @return list<string> */
-    private function includeTestSuites(): array
-    {
-        return $this->testSuiteNames('includeTestSuite', 'includeTestSuites');
-    }
-
-    /** @return list<string> */
-    private function excludeTestSuites(): array
-    {
-        return $this->testSuiteNames('excludeTestSuite', 'excludeTestSuites');
-    }
-
     /**
-     * The three supported PHPUnit majors expose the configured test suite names differently:
-     * 11.5 has only the singular, comma-joined `includeTestSuite()` / `excludeTestSuite()`;
-     * 12 adds the plural, list-returning `includeTestSuites()` / `excludeTestSuites()` while
-     * keeping the singular ones as deprecated aliases; 13 removed the singular ones, so calling
-     * them there is a fatal `Call to undefined method`. In 12 the plural methods are implemented
-     * as `$value === '' ? [] : explode(',', $value)` over that same string, so preferring the
-     * plural when present and splitting the singular ourselves otherwise yields the identical
-     * result on all three.
-     *
-     * The dispatch goes through variable method names on purpose, and both names are received
-     * as plain, non-literal `string` parameters (never built from a literal via concatenation,
-     * and never narrowed by a `@param 'a'|'b'` union): PHPStan's method-existence check for a
-     * dynamic `$obj->{$var}()` call only fires when it can resolve `$var` to a literal string
-     * (or a union of them) at analysis time. A literal `method_exists($this->configuration,
-     * 'includeTestSuites')` guard — or a literal-typed parameter that lets PHPStan reconstruct
-     * one via concatenation — is exactly that: PHPStan then evaluates the check itself against
-     * whichever version happens to be installed and flags whichever of the two branches is
-     * dead code (or, if it instead trusts the branch that's live, flags the call to the method
-     * absent from the installed version as `method.notFound` — verified: it's the latter
-     * against PHPUnit 13, where the singular methods no longer exist at all). Keeping both
-     * parameters as opaque strings denies PHPStan that literal to resolve against, so the
-     * dynamic call is (correctly) treated as unverifiable rather than statically checked
-     * against only the one version installed at analysis time.
-     *
-     * @return list<string>
-     */
-    private function testSuiteNames(string $singular, string $plural): array
-    {
-        $getter = method_exists($this->configuration, $plural) ? $plural : $singular;
-
-        /** @var list<string>|string $value */
-        $value = $this->configuration->{$getter}();
-
-        return is_array($value) ? array_values($value) : self::splitTestSuiteNames($value);
-    }
-
-    /**
-     * `$getter` is received as a plain, non-literal `string` parameter for the same reason
-     * documented on {@see self::testSuiteNames()}: {@see self::repeatOrRetryRequested()}
-     * calls this with a literal ('repeat', 'retry'), but this method's own body only ever
-     * sees the widened `string` type, so PHPStan cannot resolve the dynamic
-     * `$this->configuration->{$getter}()` call against whichever PHPUnit version happens to
-     * be installed and treats it as unverifiable — exactly what a method absent before 13.3
-     * needs.
+     * `$getter` is received as a plain, non-literal `string` parameter on purpose:
+     * {@see self::repeatOrRetryRequested()} calls this with a literal ('repeat', 'retry'),
+     * but this method's own body only ever sees the widened `string` type, so PHPStan
+     * cannot resolve the dynamic `$this->configuration->{$getter}()` call against whichever
+     * PHPUnit version happens to be installed (its method-existence check for a dynamic
+     * `$obj->{$var}()` call only fires when it can resolve `$var` to a literal string at
+     * analysis time) and treats it as unverifiable — exactly what a method absent before
+     * 13.3 needs: a literal-typed parameter would let PHPStan reconstruct the literal and
+     * flag the call as `method.notFound` against an installed version that lacks it.
      */
     private function intOption(string $getter): int
     {
@@ -231,11 +264,5 @@ final readonly class ConfigurationReader
         $value = $this->configuration->{$getter}();
 
         return is_int($value) ? $value : 1;
-    }
-
-    /** @return list<string> */
-    private static function splitTestSuiteNames(string $value): array
-    {
-        return $value === '' ? [] : explode(',', $value);
     }
 }

@@ -60,7 +60,7 @@ final class ExplainCommand extends Command
         $configFile = $locator->resolveConfigFile($root, []);
 
         $testPaths = $configFile !== null
-            ? TestPaths::fromConfiguration($locator->buildConfiguration($configFile, []), $root)
+            ? TestPaths::fromConfiguration($locator->buildConfiguration($configFile, [])[0], $root)
             : new TestPaths(['tests'], [], ['Test.php']);
 
         $watch = new WatchPatterns();

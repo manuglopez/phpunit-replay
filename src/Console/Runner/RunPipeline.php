@@ -277,8 +277,8 @@ final class RunPipeline
             default => [],
         };
 
-        $configuration = $locator->buildConfiguration($configFile, $request->phpunitArgs);
-        $this->reader = new ConfigurationReader($configuration);
+        [$configuration, $cliConfiguration] = $locator->buildConfiguration($configFile, $request->phpunitArgs);
+        $this->reader = new ConfigurationReader($configuration, $cliConfiguration);
 
         if ($this->reader->repeatOrRetryRequested()) {
             return '--repeat/--retry requested: the test id it changes results on is not stable across runs, degrading to a plain PHPUnit run';
@@ -566,19 +566,30 @@ final class RunPipeline
      * Unlike {@see self::runRecord()} and {@see self::verify()}, this method never checks
      * `$this->driverName` for a missing coverage driver, deliberately: it always calls
      * {@see self::runPhpunit()} with `$iniFlags = []` — no `pcov.enabled=1`/
-     * `xdebug.mode=coverage`, regardless of whether a driver is actually loaded — and
-     * always calls `GraphUpdater::apply(..., recordsEdges: false, ...)` below, so no
-     * coverage data is ever collected or required; the extension itself skips its own
+     * `xdebug.mode=coverage`, regardless of whether a driver is actually loaded — since no
+     * coverage data is ever collected or required here; the extension itself skips its own
      * driver-detection block entirely for `Mode::ResultsOnly`
-     * ({@see \Manuglopez\Replay\PHPUnit\ReplayExtension::bootstrap()}). Results-only mode
-     * only merges pass/fail/time/assertions for test files the graph already knows about,
-     * sourced from PHPUnit's own event subscribers, never from coverage. That is precisely
+     * ({@see \Manuglopez\Replay\PHPUnit\ReplayExtension::bootstrap()}). That is precisely
      * what makes `run --filter` (and `--group`/`--testsuite`/an explicit path) keep working
      * driver-agnostically, per SPEC.md §16 acceptance criterion 7 ("Without pcov or Xdebug
      * the package disables itself with a warning and PHPUnit works normally") — degrading
      * here for a missing driver would instead break acceptance criterion 6 for every
      * `run --filter` on a machine with no driver at all, for no correctness gain: there is
      * no edge or baseline this path could have recorded either way.
+     *
+     * Bug fix (the false-green vector): this used to still call `GraphUpdater::apply($partial,
+     * $this->branch, recordsEdges: false, complete: false)` and then persist the result
+     * (`$this->store->save($this->graph)`, `$this->quarantine->save(...)`) whenever a graph
+     * was already loaded. `recordsEdges: false` only gates the EDGE-recording half of
+     * `apply()` — it still unconditionally merges (and, for an already-known test file,
+     * quarantine-checks) every result the partial carries, `--filter`/`--group`/etc.
+     * notwithstanding. A CLI selection means "run exactly this": nothing this pass observes
+     * may enter the cache at all, not "edges off, results on" — so `apply()` (and every
+     * downstream persist) is no longer called here, full stop. This is also what closes a
+     * concrete false-green: a group a project's own `phpunit.xml` excludes (e.g. tests that
+     * hit a real, paid third-party API, quarantined out of the ordinary suite) had no
+     * business entering the cache just because someone ran `run --group <that-group>` once —
+     * a later, ordinary run would then replay that cached result instead of re-executing it.
      */
     private function runResultsOnly(RunRequest $request): int
     {
@@ -601,7 +612,10 @@ final class RunPipeline
         $runId = self::newRunId();
         $this->runDir = $this->stateDir . '/runs/' . $runId;
 
-        $exitCode = $this->runPhpunit(
+        // Nothing below this point: a CLI selection persists nothing at all (see the
+        // docblock above) — the user's own selection simply runs, for real, and PHPUnit's
+        // own exit code is returned untouched.
+        return $this->runPhpunit(
             $xml,
             [],
             $request->phpunitArgs,
@@ -609,25 +623,6 @@ final class RunPipeline
             $this->baseEnv('results-only', $runId),
             $this->root ?? $request->cwd,
         );
-
-        if ($this->graph !== null) {
-            $partial = RunPartial::load($this->runDir);
-
-            if ($partial !== null) {
-                $root = $this->root ?? '';
-
-                if (LaravelDetector::enabled($root, $this->config)) {
-                    $partial = LaravelIntegration::augment($partial, $root);
-                }
-
-                $updater = new GraphUpdater($this->graph, $root, new ContentKey($root), $this->quarantine, $this->staticEdges, $this->git, $this->onceProcessPaths);
-                $updater->apply($partial, $this->branch, recordsEdges: false, complete: false);
-                $this->store->save($this->graph);
-                $this->quarantine->save($this->stateDir);
-            }
-        }
-
-        return $exitCode;
     }
 
     /** Step 8: full suite, recording. */
@@ -774,28 +769,54 @@ final class RunPipeline
             $partial = LaravelIntegration::augment($partial, $root);
         }
 
-        // Bug fix: this used to pass `recordsEdges: true` (and a `$complete` derived from
-        // the run alone) whatever the user asked PHPUnit to run, so a `verify` carrying a
-        // partial CLI selection — `--filter`, `--group`, `--testsuite`, an explicit path —
-        // rewrote the graph from a run that never covered the suite. SPEC.md §15 scenario 6
-        // forbids exactly that for `run` ({@see self::runResultsOnly()}, results-only mode);
-        // `verify` is the same full-suite recording pass and owes the graph the same
-        // guarantee. Three things went wrong without it: the executed test file's edges were
-        // replaced by whatever coverage the narrower selection attributed to it (a file
-        // autoloaded once per process is credited to whichever test loaded it first, so the
-        // dependency set — and therefore the file's content key — depends on the selection);
-        // `$complete` then pruned the sibling results the filter excluded, silently deleting
-        // cached results; and it published a baseline sha for a partial run.
-        $recordsEdges = ! $this->reader->hasPartialSelection();
+        // Bug fix (the false-green vector): a `verify` carrying a CLI selection —
+        // `--filter`, `--group`, `--testsuite`, an explicit path — used to still call
+        // `GraphUpdater::apply($partial, $this->branch, recordsEdges: false, complete:
+        // false)` below, whatever the user asked PHPUnit to run. `recordsEdges: false`
+        // only gates edge writing — `apply()` still unconditionally merges every result
+        // the partial carries for a test file the graph already knows about — so a
+        // narrower-than-the-suite pass could still write a fresh, persisted result into
+        // the graph, the same false-green vector {@see self::runResultsOnly()} closes for
+        // `run`. `verify`'s whole measurement (`would replay`/divergences) assumes a
+        // full-suite pass anyway (SPEC.md §12.2): a narrowed one cannot honestly compare
+        // "new" results against the baseline without first (mis)recording them, so this
+        // reports what actually happened — PHPUnit's own exit code, and a `would replay`
+        // still worth printing (a pure, read-only figure off the baseline as it already
+        // was, from `$replaySet`, computed before this pass touched anything) — without
+        // touching the graph, the quarantine table, the baseline sha, or the divergence
+        // log's lifetime counters at all.
+        if ($this->reader->hasPartialSelection()) {
+            $wouldReplay = 0;
 
-        $complete = $recordsEdges
-            && ! (bool) ($partial->meta['truncated'] ?? false)
-            && in_array($exitCode, [0, 1], true);
+            foreach (array_keys($partial->results) as $testId) {
+                if ($replaySet->has($testId)) {
+                    $wouldReplay++;
+                }
+            }
+
+            $lifetime = DivergenceLog::read($this->stateDir);
+
+            $summary = new VerifySummary(
+                count($partial->results),
+                $wouldReplay,
+                0,
+                $wouldReplay,
+                count($lifetime['entries']),
+                $lifetime['runs'],
+                $exitCode === 0,
+            );
+
+            fwrite(STDOUT, $summary->format() . PHP_EOL);
+
+            return $exitCode;
+        }
+
+        $complete = ! (bool) ($partial->meta['truncated'] ?? false) && in_array($exitCode, [0, 1], true);
 
         // No quarantine passed here: divergences are detected explicitly below (reason
         // 'divergence', not the generic 'flip' GraphUpdater's own detection would use).
         $updater = new GraphUpdater($graph, $root, new ContentKey($root), null, $this->staticEdges, $this->git, $this->onceProcessPaths);
-        $updater->apply($partial, $this->branch, recordsEdges: $recordsEdges, complete: $complete);
+        $updater->apply($partial, $this->branch, recordsEdges: true, complete: $complete);
 
         if ($this->fingerprintDrifted($partial)) {
             return $exitCode;
