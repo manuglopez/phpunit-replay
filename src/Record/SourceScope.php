@@ -78,6 +78,30 @@ final class SourceScope
         return new self($includes, $excludes);
     }
 
+    /**
+     * True when $absoluteFile lies inside one of the fixed directories this class always
+     * excludes (`bootstrap/cache`, `storage/framework`, `storage/logs`), resolved under
+     * $projectRoot, regardless of any PHPUnit `<source>` configuration or `<source>
+     * <exclude>` entries. A narrow, dependency-free check for a caller that has a project
+     * root but no reason to construct (and thread through) a full scope instance — see
+     * `Laravel\BladeTracker`'s belt-and-braces fallback for when `config('view.compiled')`
+     * cannot be read: it needs "is this the framework's own noise directory", not the full
+     * includes/excludes decision {@see self::contains()} makes.
+     */
+    public static function isNestedNoisePath(string $projectRoot, string $absoluteFile): bool
+    {
+        $real = @realpath($absoluteFile);
+        $candidate = self::normalise($real === false ? $absoluteFile : $real);
+
+        foreach (self::nestedNoiseDirs($projectRoot) as $dir) {
+            if ($candidate === $dir || str_starts_with($candidate, $dir . DIRECTORY_SEPARATOR)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     public function contains(string $absoluteFile): bool
     {
         if (isset($this->containsCache[$absoluteFile])) {

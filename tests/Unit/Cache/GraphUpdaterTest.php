@@ -9,6 +9,7 @@ use Manuglopez\Replay\Cache\Graph;
 use Manuglopez\Replay\Cache\GraphUpdater;
 use Manuglopez\Replay\Hermeticity\Quarantine;
 use Manuglopez\Replay\Record\RunPartial;
+use Manuglopez\Replay\Tests\Support\GitRepo;
 use Manuglopez\Replay\Tests\Support\TempDir;
 use PHPUnit\Framework\TestCase;
 
@@ -618,5 +619,88 @@ final class GraphUpdaterTest extends TestCase
 
         self::assertSame(['src/New.php'], $fresh->dependenciesOf('tests/ATest.php'));
         self::assertNotContains('src/Old.php', $fresh->dependenciesOf('tests/ATest.php'));
+    }
+
+    // -- no edge to a file git ignores (SPEC.md §7.3) ---------------------------------
+    //
+    // Every test above uses a plain TempDir root (TempDir::make() places it under the
+    // system temp dir, never inside a git working tree — tests/Support/TempDir.php), so
+    // `git check-ignore` fails "not a git repository" for every one of them and the new
+    // filter fails open: nothing is excluded, and those ~20 tests above are the proof this
+    // fix changes nothing for a non-git (or not-yet-initialised) project. The two tests
+    // below need the OTHER half — a real repository with a real .gitignore — so they build
+    // their own via GitRepo::init() instead of $this->root.
+
+    /**
+     * The half that makes this a net: an edge whose source `git check-ignore` matches is
+     * dropped before it ever reaches the graph, because an ignored path can never appear in
+     * Change\ChangedFiles::since() (tests/Unit/Change/ChangedFilesTest.php::
+     * test_ignored_file_is_not_listed) — such an edge could never trigger a rerun, it would
+     * only pollute the content key with something that moves between paratest workers
+     * (a compiled Laravel Blade view under bootstrap/cache/, measured on a real project).
+     */
+    public function test_an_edge_to_a_gitignored_file_is_dropped(): void
+    {
+        $repo = GitRepo::init();
+        $repo->write('.gitignore', "/bootstrap/cache/\n");
+        $repo->write('tests/FooTest.php', "<?php\n");
+        $repo->write('src/Kept.php', "<?php\n");
+        $repo->write('bootstrap/cache/views/test_3/3a1f9c2b8e0d7a6c.php', "<?php\n");
+        $repo->commitAll('initial');
+
+        $graph = new Graph($repo->root);
+        $partial = new RunPartial(
+            edges: ['tests/FooTest.php' => ['src/Kept.php', 'bootstrap/cache/views/test_3/3a1f9c2b8e0d7a6c.php']],
+            results: ['Foo::test_it' => $this->makeResult(file: 'tests/FooTest.php')],
+            tables: [],
+            meta: [],
+        );
+
+        $updater = new GraphUpdater($graph, $repo->root, new ContentKey($repo->root));
+        $summary = $updater->apply($partial, 'main', recordsEdges: true, complete: false);
+
+        self::assertSame(['src/Kept.php'], $graph->dependenciesOf('tests/FooTest.php'));
+        self::assertSame(1, $summary['edges']);
+        self::assertSame(1, $summary['excludedEdges']);
+
+        $repo->destroy();
+    }
+
+    /**
+     * The other half of the safety argument, and the reason this is IGNORED rather than
+     * UNTRACKED: a brand-new source file that was never `git add`ed but is NOT matched by
+     * any `.gitignore` rule still appears in `Change\ChangedFiles::since()`
+     * (ChangedFilesTest::test_untracked_new_file_is_listed) — so refusing its edge would
+     * leave `Graph::fileId()` null for it, and `Select\Rules\PhpEdgeRule` skips a null
+     * fileId, silently under-selecting on every future change to that file until the next
+     * full fresh `record`. This must keep its edge exactly like before this fix.
+     */
+    public function test_an_edge_to_an_untracked_but_not_ignored_file_is_kept(): void
+    {
+        $repo = GitRepo::init();
+        $repo->write('tests/FooTest.php', "<?php\n");
+        $repo->commitAll('initial');
+
+        // A brand-new file, deliberately never `git add`ed, and matched by no .gitignore
+        // rule at all (there isn't even a .gitignore in this repository).
+        $repo->write('src/BrandNew.php', "<?php\n");
+
+        $graph = new Graph($repo->root);
+        $partial = new RunPartial(
+            edges: ['tests/FooTest.php' => ['src/BrandNew.php']],
+            results: ['Foo::test_it' => $this->makeResult(file: 'tests/FooTest.php')],
+            tables: [],
+            meta: [],
+        );
+
+        $updater = new GraphUpdater($graph, $repo->root, new ContentKey($repo->root));
+        $summary = $updater->apply($partial, 'main', recordsEdges: true, complete: false);
+
+        self::assertSame(['src/BrandNew.php'], $graph->dependenciesOf('tests/FooTest.php'));
+        self::assertNotNull($graph->fileId('src/BrandNew.php'));
+        self::assertSame(1, $summary['edges']);
+        self::assertSame(0, $summary['excludedEdges']);
+
+        $repo->destroy();
     }
 }

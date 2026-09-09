@@ -181,25 +181,14 @@ final readonly class ChangedFiles
             return $candidates;
         }
 
-        $result = $this->git->result(
-            ['check-ignore', '--no-index', '-z', '--stdin'],
-            implode("\x00", array_keys($candidates)),
-        );
+        $ignored = $this->git->ignored(array_keys($candidates));
 
-        if ($result['exitCode'] !== 0 && $result['exitCode'] !== 1) {
+        if ($ignored === null) {
             return null;
         }
 
-        $output = $result['output'];
-
-        if ($output === '') {
-            return $candidates;
-        }
-
-        foreach (explode("\x00", rtrim($output, "\x00")) as $ignored) {
-            if ($ignored !== '') {
-                unset($candidates[$ignored]);
-            }
+        foreach (array_keys($ignored) as $path) {
+            unset($candidates[$path]);
         }
 
         return $candidates;

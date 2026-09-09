@@ -138,6 +138,7 @@ final class SummaryTest extends TestCase
             testFiles: 42,
             sourceFiles: 318,
             edges: 3120,
+            excludedEdges: 0,
             graphBytes: 215040,
             seconds: 252.0,
             branch: 'main',
@@ -158,6 +159,7 @@ final class SummaryTest extends TestCase
             testFiles: 1,
             sourceFiles: 1,
             edges: 1,
+            excludedEdges: 0,
             graphBytes: 2202009,
             seconds: 1.0,
             branch: null,
@@ -166,6 +168,42 @@ final class SummaryTest extends TestCase
 
         self::assertStringContainsString('graph.json 2.1 MB', $recordSummary->format());
         self::assertStringNotContainsString('baseline', $recordSummary->format());
+    }
+
+    /**
+     * Visibility for the no-edges-to-ignored-files fix: a run that dropped some
+     * git-ignored dependency (a compiled Laravel Blade view, typically) says so on the
+     * summary line, right after the edges count.
+     */
+    public function testRecordedFormatShowsExcludedEdgesOnlyWhenPositive(): void
+    {
+        $withExclusions = Summary::recorded(
+            tests: 10,
+            testFiles: 2,
+            sourceFiles: 5,
+            edges: 20,
+            excludedEdges: 3,
+            graphBytes: 1024,
+            seconds: 1.0,
+            branch: null,
+            sha: null,
+        );
+
+        self::assertStringContainsString('20 edges · 3 excluded (gitignored) · graph.json', $withExclusions->format());
+
+        $withoutExclusions = Summary::recorded(
+            tests: 10,
+            testFiles: 2,
+            sourceFiles: 5,
+            edges: 20,
+            excludedEdges: 0,
+            graphBytes: 1024,
+            seconds: 1.0,
+            branch: null,
+            sha: null,
+        );
+
+        self::assertStringNotContainsString('excluded', $withoutExclusions->format());
     }
 
     private function summary(

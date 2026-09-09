@@ -463,8 +463,8 @@ final class Analysis\StaticEdges
     public function __construct(string $projectRoot, Record\SourceScope $scope, FactsCache $facts, int $maxFiles = self::MAX_FILES);
     /** @return array<string, list<string>> lowercased FQ name => declaring files (relative) */
     public function index(): array;   // MAX_FILES only warns; giving up removed edges without adding any
-    /** @param array<string, list<string>> $behaviouralEdges test (rel) => this run's coverage edges, one entry per executed test @return int edges added */
-    public function expand(Cache\Graph $graph, array $behaviouralEdges): int;
+    /** @param array<string, list<string>> $behaviouralEdges test (rel) => this run's coverage edges, one entry per executed test; $ignored declaring files (rel) to refuse linking (no-edges-to-ignored-files fix), empty by default @return int edges added */
+    public function expand(Cache\Graph $graph, array $behaviouralEdges, array $ignored = []): int;
 }
 ```
 
@@ -689,7 +689,7 @@ final class Hermeticity\Policy
 final class Laravel\LaravelDetector { public static function enabled(string $projectRoot, Config $config): bool; }  // config.laravel: 'on' | 'off' | 'auto' → class_exists(\Illuminate\Container\Container::class) && is_file(root/artisan)
 final class Laravel\TableExtractor  // port of Pest TableExtractor: fromSql(string $sql): list<string>, fromMigrationSource(string $php): list<string>
 final class Laravel\TableTracker    // arm(object $app, Recorder $recorder): void — $app['db']->listen(fn (QueryExecuted $q) => foreach TableExtractor::fromSql($q->sql) as $t → $recorder->linkTable($t))
-final class Laravel\BladeTracker    // arm(object $app, Recorder $recorder): void — $app['view']->composer('*', fn ($view) => $recorder->linkSource($view->getPath()))
+final class Laravel\BladeTracker    // arm(object $app, Recorder $recorder, string $projectRoot): void — $app['view']->composer('*', fn ($view) => ...) links $view->getPath() UNLESS it is inside config('view.compiled') (read fresh per render, never cached at arm() time) or, as a fallback, SourceScope::isNestedNoisePath($projectRoot, $path) — see "No edges to files git ignores" below
 final class Laravel\MigrationTables // tablesOf(string $projectRoot): list<string> (all tables of database/migrations/**/*.php via TableExtractor::fromMigrationSource); usesDatabase(string $className): bool (RefreshDatabase|DatabaseMigrations|DatabaseTransactions traits, recursively)
 final class Laravel\BladeReferences // ancestorsOf(string $bladeRel, string $projectRoot): list<string> — static @include/@extends/@component/view('x')/<x-name> walk (port of Pest Graph::bladeAncestorsFor and helpers)
 final readonly class PHPUnit\Subscribers\ArmLaravelTrackersOnPrepared implements PreparedSubscriber  // once per Container instance: binding marker 'phpunit-replay.armed'
@@ -868,3 +868,69 @@ remote fallback and only ever reports `source: 'own'|'local'`, never `'remote'`.
 contrast, resolves through the same real, remote-aware `BaselineResolver` a normal `run` does
 (`RunPipeline::resolveBaseline()`, `$this->objects`). `status` is a read-only, offline-safe report of
 what the local graph already knows, never a network call.
+
+### No edges to files git ignores (SPEC §7.3, §4.5, §10)
+
+Root cause (measured on a real 9056-test Laravel project, two identical `record --parallel=8`
+passes from an empty graph): `Laravel\BladeTracker::arm()` linked `$view->getPath()`
+unconditionally. For an ordinary template that path is the source file — correct — but for
+`Blade::render($string)` and inline/anonymous components, Laravel writes the raw string into
+`config('view.compiled')` itself (`Illuminate\View\Component::createBladeViewFromString()`,
+content-hashed, under the `__components::` namespace) and `$view->getPath()` for that view is
+that disposable path — additionally carrying a per-paratest-worker token under Laravel Parallel
+Testing (`view.compiled` rewritten per worker), so which worker ran a test changed its recorded
+dependency set. 189 of 726 tests' dependency sets differed between the two passes; 421 distinct
+files moved; every one of the 281 `bootstrap/cache/views/test_<N>/*.blade.php` paths involved was
+confirmed `git check-ignore`d and zero were tracked.
+
+Two layers, both required (the second is a net for any writer, not only `BladeTracker`):
+
+```php
+final class Laravel\BladeTracker
+{
+    public static function arm(object $app, Recorder $recorder, string $projectRoot): void;
+    // composer('*', ...) still links an ordinary template; refuses a path under
+    // config('view.compiled') (read inside the closure, every call — never captured at
+    // arm() time) or, when that config cannot be read, under
+    // Record\SourceScope::isNestedNoisePath($projectRoot, $path).
+}
+final class Record\SourceScope
+{
+    // ...existing API...
+    /** bootstrap/cache | storage/framework | storage/logs, resolved under $projectRoot */
+    public static function isNestedNoisePath(string $projectRoot, string $absoluteFile): bool;
+}
+final class Change\Git
+{
+    // ...existing API...
+    /** Batched `check-ignore --no-index -z --stdin`; null only when git itself failed. */
+    public function ignored(array $paths): ?array;
+}
+```
+
+`Cache\GraphUpdater::apply()` collects every candidate dependency this call could write — every
+source across `$partial->edges`, plus (when `static_declaration_edges` is on) every file in
+`Analysis\StaticEdges::index()` — into ONE `Change\Git::ignored()` call, then drops the ignored
+ones from the edges handed to `Graph::unionEdges()` and passes the same set into
+`StaticEdges::expand(..., $ignored)`, which skips linking any target in it. `apply()`'s return
+gains `excludedEdges: int` (the coverage/explicit-link count only — `StaticEdges::expand()` still
+returns a bare `int $added`, unchanged in shape, so no existing `StaticEdgesTest.php` assertion
+needed touching). `GraphUpdater`'s constructor gains an optional `?Change\Git $git = null`
+(`Console\Runner\RunPipeline` passes its own instance through all five construction sites rather
+than paying for a second one).
+
+`Change\ChangedFiles::filterIgnored()` now calls the same `Git::ignored()` instead of shelling out
+to `check-ignore` itself — the one thing this fix reuses rather than duplicates.
+
+Fingerprint: `edges_exclude_ignored: true`, unconditional (§4.5) — every graph recorded before this
+key existed is missing it, so `structuralDrift()` names it and forces exactly one fresh record.
+
+Visibility: `Report\RecordSummary`/`Summary::recorded()` gain `excludedEdges`, rendered as
+`N excluded (gitignored)` only when positive (`RecordSummary::format()`, next to `edges`).
+`Console\StatusReport`/`StatusCommand` gain `excludedEdges` too, but computed differently — a LIVE
+`Git::ignored($graph->files())` at `status` time, not a stored counter, so it also surfaces stale
+pollution left in a graph recorded before this shipped; rendered beside the `edges:` line.
+
+No configuration: an allowlist design (`source_paths`) was considered and rejected — `.gitignore`
+is the one exclusion lever, matching `Select\ResiduePatterns`'s own stated principle that an
+allowlist omitting a real source root is an unsafe default.

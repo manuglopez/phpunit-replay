@@ -51,6 +51,15 @@ final readonly class StatusReport
         public string $remote = 'none',
         public string $remotePush = 'objects',
         public ?array $baseline = null,
+        /**
+         * How many of `$graph`'s currently-recorded dependency edges point at a file
+         * `git check-ignore` matches right now — a live check, not a stored counter, so it
+         * also surfaces stale pollution left behind by a graph recorded before this
+         * existed. Always 0 on a fresh graph recorded after the fix shipped: the one-time
+         * structural fingerprint bump (`Fingerprint::compute()`'s `edges_exclude_ignored`
+         * key) forces exactly one full re-record, and nothing adds such an edge afterwards.
+         */
+        public int $excludedEdges = 0,
     ) {
     }
 
@@ -84,7 +93,8 @@ final readonly class StatusReport
 
         $lines[] = 'files:      ' . $this->files;
         $lines[] = 'test files: ' . $this->testFiles;
-        $lines[] = 'edges:      ' . $this->edges;
+        $lines[] = 'edges:      ' . $this->edges
+            . ($this->excludedEdges > 0 ? sprintf(' (%d gitignored, stale — record to clean up)', $this->excludedEdges) : '');
         $lines[] = 'tables:     ' . $this->tables;
         $lines[] = 'graph.json: ' . Format::bytes($this->graphBytes);
         $lines[] = '';

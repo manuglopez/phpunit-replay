@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Manuglopez\Replay\Cache;
 
 use Manuglopez\Replay\Analysis\StaticEdges;
+use Manuglopez\Replay\Change\Git;
+use Manuglopez\Replay\Console\Runner\Warnings;
 use Manuglopez\Replay\Hermeticity\Quarantine;
 use Manuglopez\Replay\Record\RunPartial;
 
@@ -26,10 +28,18 @@ final class GraphUpdater
         7 => 'fail', 8 => 'fail',
     ];
 
+    /** @see self::ignoredDependencies() */
+    private readonly Git $git;
+
     /**
      * `$staticEdges` is the `static_declaration_edges` opt-in (SPEC.md §4.3.1): null — the
      * default, and every existing caller — leaves {@see self::apply()} recording exactly
      * the edges the coverage driver reported, byte for byte.
+     *
+     * `$git` defaults to a fresh `Change\Git` scoped to `$projectRoot`, matching the same
+     * "inject or construct" convention as `Change\ChangedFiles`. A caller that already has
+     * one (`Console\Runner\RunPipeline`, `PHPUnit\ReplayState`) passes it through instead of
+     * paying for a second one.
      */
     public function __construct(
         private readonly Graph $graph,
@@ -37,7 +47,9 @@ final class GraphUpdater
         private readonly ContentKey $contentKey,
         private readonly ?Quarantine $quarantine = null,
         private readonly ?StaticEdges $staticEdges = null,
+        ?Git $git = null,
     ) {
+        $this->git = $git ?? new Git($projectRoot);
     }
 
     /** The project root `$graph` and `$contentKey` are both scoped to. */
@@ -56,14 +68,32 @@ final class GraphUpdater
      * Applies a run partial. `$complete` means the run covered everything it was
      * asked to and was not truncated.
      *
-     * @return array{touched: list<string>, results: int, edges: int}
+     * @return array{touched: list<string>, results: int, edges: int, excludedEdges: int}
      */
     public function apply(RunPartial $partial, string $branch, bool $recordsEdges, bool $complete): array
     {
         $executed = $this->executedTestFiles($partial);
         $edgesCount = 0;
+        $excludedCount = 0;
 
         if ($recordsEdges) {
+            // No edge to a file git ignores (SPEC.md §7.3): batched ONCE per apply() call,
+            // covering every candidate BOTH edge writers below could possibly touch, never
+            // once per file or once per writer (ARG_MAX; see Change\Git::ignored()). Ignored
+            // is a stable property of a path PATTERN — an ignored file can never appear in
+            // Change\ChangedFiles::since(), so an edge to one is pure content-key pollution
+            // that could never trigger a rerun. Untracked-but-not-ignored is the opposite: a
+            // brand-new source file DOES appear in that diff, so its edge must survive this
+            // filter untouched (ChangedFilesTest::test_untracked_new_file_is_listed) — only
+            // an actual `.gitignore` match is dropped here.
+            $ignored = $this->ignoredDependencies($partial);
+            $excludedCount = self::countIgnored($partial->edges, $ignored);
+            $filteredEdges = self::withoutIgnored($partial->edges, $ignored);
+
+            if ($excludedCount > 0) {
+                self::debugExcluded($partial->edges, $ignored);
+            }
+
             // Union, not replace (Cache\Graph::unionEdges() docblock): this partial only
             // reflects what THIS run's coverage attributed, which can under-report a test
             // file's true dependencies (first-loader-wins, docs/SPEC.md §4.3) relative to
@@ -71,23 +101,25 @@ final class GraphUpdater
             // artifact — a Laravel query listener re-attributes every table a test
             // queries on every single run (Laravel\TableTracker), never just the first —
             // so `replaceTestTables` below stays exact.
-            $this->graph->unionEdges($partial->edges);
+            $this->graph->unionEdges($filteredEdges);
             $this->graph->markKnownTestFiles($executed);
 
             if ($partial->tables !== []) {
                 $this->graph->replaceTestTables($partial->tables);
             }
 
-            foreach ($partial->edges as $sources) {
+            foreach ($filteredEdges as $sources) {
                 $edgesCount += count($sources);
             }
 
             // One hop of name-resolution edges for what this run's tests can never get from
             // coverage (Analysis\StaticEdges). Must happen here, before mergeResults() below,
             // because that is where each touched file's content key is computed from its (by
-            // then final) dependency list.
+            // then final) dependency list. $ignored is passed through so this writer refuses
+            // the same paths the one above does — it is the OTHER of the two edge writers the
+            // "no edge to an ignored file" rule has to reach (docs/SPEC.md, "edge recording").
             if ($this->staticEdges !== null) {
-                $edgesCount += $this->staticEdges->expand($this->graph, self::behaviouralEdges($partial, $executed));
+                $edgesCount += $this->staticEdges->expand($this->graph, self::behaviouralEdges($filteredEdges, $executed), $ignored);
             }
         }
 
@@ -105,7 +137,129 @@ final class GraphUpdater
             'touched' => $touched,
             'results' => $resultCount,
             'edges' => $edgesCount,
+            'excludedEdges' => $excludedCount,
         ];
+    }
+
+    /**
+     * Every distinct source file this `apply()` call could possibly turn into an edge,
+     * batch-checked against `git check-ignore` exactly once: every source in `$partial->edges`
+     * (the coverage-derived and explicit `Recorder::linkSource()` edges `unionEdges()` is
+     * about to receive) plus, when the `static_declaration_edges` opt-in is on, every
+     * declaring file in `Analysis\StaticEdges::index()` (the universe `expand()` could link
+     * to). `index()` is memoized on `$this->staticEdges` itself, so calling it here does not
+     * duplicate the parse `expand()` would otherwise trigger a few lines below — it just
+     * moves the one, cached computation earlier.
+     *
+     * Fails open: `Change\Git::ignored()` returns null when git itself failed (no git, not a
+     * repository, a subprocess error or a timeout), and null here becomes an empty set —
+     * nothing is treated as ignored, so every edge is still recorded. Same precedent as
+     * `Fingerprint::isTrackedByGit()`: no `.git` at all ⇒ trust it.
+     *
+     * @return array<string, true>
+     */
+    private function ignoredDependencies(RunPartial $partial): array
+    {
+        $candidates = [];
+
+        foreach ($partial->edges as $sources) {
+            foreach ($sources as $source) {
+                $candidates[$source] = true;
+            }
+        }
+
+        if ($this->staticEdges !== null) {
+            foreach ($this->staticEdges->index() as $declaringFiles) {
+                foreach ($declaringFiles as $declaringFile) {
+                    $candidates[$declaringFile] = true;
+                }
+            }
+        }
+
+        if ($candidates === []) {
+            return [];
+        }
+
+        return $this->git->ignored(array_keys($candidates)) ?? [];
+    }
+
+    /**
+     * @param array<string, list<string>> $edges
+     * @param array<string, true> $ignored
+     * @return array<string, list<string>>
+     */
+    private static function withoutIgnored(array $edges, array $ignored): array
+    {
+        if ($ignored === []) {
+            return $edges;
+        }
+
+        $out = [];
+
+        foreach ($edges as $testFile => $sources) {
+            $out[$testFile] = array_values(array_filter(
+                $sources,
+                static fn (string $source): bool => ! isset($ignored[$source]),
+            ));
+        }
+
+        return $out;
+    }
+
+    /**
+     * @param array<string, list<string>> $edges
+     * @param array<string, true> $ignored
+     */
+    private static function countIgnored(array $edges, array $ignored): int
+    {
+        if ($ignored === []) {
+            return 0;
+        }
+
+        $count = 0;
+
+        foreach ($edges as $sources) {
+            foreach ($sources as $source) {
+                if (isset($ignored[$source])) {
+                    $count++;
+                }
+            }
+        }
+
+        return $count;
+    }
+
+    /**
+     * The actual excluded paths, one per line, behind `PHPUNIT_REPLAY_DEBUG=1`
+     * (`Warnings::debug()` — never printed otherwise, unlike the count on
+     * `Report\RecordSummary`'s summary line, which is unconditional whenever positive).
+     * Deduplicated: the same ignored file can be a dependency of several tests in one run,
+     * and the count already says how many edge instances that was.
+     *
+     * @param array<string, list<string>> $edges
+     * @param array<string, true> $ignored
+     */
+    private static function debugExcluded(array $edges, array $ignored): void
+    {
+        $distinct = [];
+
+        foreach ($edges as $sources) {
+            foreach ($sources as $source) {
+                if (isset($ignored[$source])) {
+                    $distinct[$source] = true;
+                }
+            }
+        }
+
+        $paths = array_keys($distinct);
+        sort($paths);
+
+        Warnings::debug(sprintf(
+            'excluded %d gitignored dependenc%s: %s',
+            count($paths),
+            count($paths) === 1 ? 'y' : 'ies',
+            implode(', ', $paths),
+        ));
     }
 
     /**
@@ -260,14 +414,15 @@ final class GraphUpdater
      * test directory, or any `--coverage-*` report, produces it). Passing
      * `array_keys($partial->edges)` skipped exactly those tests.
      *
+     * @param array<string, list<string>> $edges this run's (already ignore-filtered) edges
      * @param list<string> $executed project-relative test files
      * @return array<string, list<string>>
      */
-    private static function behaviouralEdges(RunPartial $partial, array $executed): array
+    private static function behaviouralEdges(array $edges, array $executed): array
     {
         $out = array_fill_keys($executed, []);
 
-        foreach ($partial->edges as $testFile => $sources) {
+        foreach ($edges as $testFile => $sources) {
             $out[$testFile] = $sources;
         }
 

@@ -85,6 +85,52 @@ final readonly class Git
         ];
     }
 
+    /**
+     * Batches `git check-ignore --no-index -z --stdin` over `$paths` in one process (stdin
+     * avoids ARG_MAX; callers must never invoke this once per path) — shared by
+     * `Change\ChangedFiles::filterIgnored()` and `Cache\GraphUpdater`'s edge filter, the two
+     * places that need "which of these does git ignore" (docs/SPEC.md §7.3/§7.1). `--no-index`
+     * means the check runs off `.gitignore` patterns alone, regardless of whether a path is
+     * already tracked in the index.
+     *
+     * Returns the ignored subset of `$paths` (relative or absolute; relative paths resolve
+     * against `$this->directory`, like every other command here), or null when git itself
+     * failed — no git binary, not a repository, a subprocess error, or a timeout (exit code
+     * neither 0 nor 1). Callers decide what "unknown" means for them; every caller today
+     * fails open (treats null as "nothing is ignored").
+     *
+     * @param list<string> $paths
+     * @return array<string, true>|null
+     */
+    public function ignored(array $paths): ?array
+    {
+        if ($paths === []) {
+            return [];
+        }
+
+        $result = $this->result(['check-ignore', '--no-index', '-z', '--stdin'], implode("\x00", $paths));
+
+        if ($result['exitCode'] !== 0 && $result['exitCode'] !== 1) {
+            return null;
+        }
+
+        $output = $result['output'];
+
+        if ($output === '') {
+            return [];
+        }
+
+        $ignored = [];
+
+        foreach (explode("\x00", rtrim($output, "\x00")) as $path) {
+            if ($path !== '') {
+                $ignored[$path] = true;
+            }
+        }
+
+        return $ignored;
+    }
+
     public static function available(): bool
     {
         /** @var bool|null $cached */

@@ -40,7 +40,7 @@ final class FingerprintStaticDeclarationEdgesTest extends TestCase
         $fingerprint = Fingerprint::compute($this->repo->root, 'pcov', false);
 
         self::assertSame(
-            ['schema', 'composer_lock', 'phpunit_xml', 'phpunit_xml_dist', 'replay_config'],
+            ['schema', 'edges_exclude_ignored', 'composer_lock', 'phpunit_xml', 'phpunit_xml_dist', 'replay_config'],
             array_keys($fingerprint['structural']),
         );
         self::assertArrayNotHasKey('analysis_rules', $fingerprint['structural']);
@@ -50,9 +50,13 @@ final class FingerprintStaticDeclarationEdgesTest extends TestCase
     public function with_the_flag_off_the_content_key_material_is_byte_identical(): void
     {
         // Cache\ContentKey hashes exactly this string. If it moved, every cached key on
-        // every machine in the world would be invalidated by upgrading.
+        // every machine in the world would be invalidated by upgrading. It DID move once,
+        // deliberately, for `edges_exclude_ignored` (Fingerprint's own class docblock,
+        // "edges_exclude_ignored" section) — a graph is contaminated by definition once an
+        // edge can point at a file git ignores, so every graph on every machine had to be
+        // invalidated exactly once.
         self::assertSame(
-            '{"composer_lock":null,"phpunit_xml":null,"phpunit_xml_dist":null,"replay_config":null,"schema":1}',
+            '{"composer_lock":null,"edges_exclude_ignored":true,"phpunit_xml":null,"phpunit_xml_dist":null,"replay_config":null,"schema":1}',
             Fingerprint::canonicalStructural(Fingerprint::compute($this->repo->root, 'pcov', false)),
         );
         self::assertSame(

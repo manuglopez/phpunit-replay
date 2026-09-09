@@ -63,12 +63,12 @@ final class LaravelIntegration
     }
 
     /** @return list<Subscriber> */
-    public static function subscribers(Recorder $recorder): array
+    public static function subscribers(Recorder $recorder, string $projectRoot): array
     {
         $usesDatabase = new UsesDatabaseCollector();
 
         return [
-            new ArmLaravelTrackersOnPrepared($recorder, $usesDatabase),
+            new ArmLaravelTrackersOnPrepared($recorder, $usesDatabase, $projectRoot),
             new FlushUsesDatabaseOnExecutionFinished(ReplayState::runWriter(), $usesDatabase),
         ];
     }

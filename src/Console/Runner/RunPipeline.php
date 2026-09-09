@@ -594,7 +594,7 @@ final class RunPipeline
                     $partial = LaravelIntegration::augment($partial, $root);
                 }
 
-                $updater = new GraphUpdater($this->graph, $root, new ContentKey($root), $this->quarantine, $this->staticEdges);
+                $updater = new GraphUpdater($this->graph, $root, new ContentKey($root), $this->quarantine, $this->staticEdges, $this->git);
                 $updater->apply($partial, $this->branch, recordsEdges: false, complete: false);
                 $this->store->save($this->graph);
                 $this->quarantine->save($this->stateDir);
@@ -661,7 +661,7 @@ final class RunPipeline
 
         $complete = ! (bool) ($partial->meta['truncated'] ?? false) && in_array($exitCode, [0, 1], true);
 
-        $updater = new GraphUpdater($graph, $root, new ContentKey($root), $this->quarantine, $this->staticEdges);
+        $updater = new GraphUpdater($graph, $root, new ContentKey($root), $this->quarantine, $this->staticEdges, $this->git);
         $applied = $updater->apply($partial, $this->branch, recordsEdges: true, complete: $complete);
         $this->quarantine->save($this->stateDir);
 
@@ -671,7 +671,7 @@ final class RunPipeline
 
         $this->persistAfterRun($updater, $complete, new ChangedFiles($root, $this->git));
         $this->pushAfterRun($graph, $applied['touched'], $complete);
-        $this->printRecordSummary($partial);
+        $this->printRecordSummary($partial, $applied['excludedEdges']);
 
         // A full record pass replays nothing: whatever coverage PHPUnit collected for this
         // run is already complete on its own (SPEC.md §3.2 last paragraph).
@@ -768,7 +768,7 @@ final class RunPipeline
 
         // No quarantine passed here: divergences are detected explicitly below (reason
         // 'divergence', not the generic 'flip' GraphUpdater's own detection would use).
-        $updater = new GraphUpdater($graph, $root, new ContentKey($root), null, $this->staticEdges);
+        $updater = new GraphUpdater($graph, $root, new ContentKey($root), null, $this->staticEdges, $this->git);
         $updater->apply($partial, $this->branch, recordsEdges: $recordsEdges, complete: $complete);
 
         if ($this->fingerprintDrifted($partial)) {
@@ -1057,7 +1057,7 @@ final class RunPipeline
         if ($runList === []) {
             if ($changed !== []) {
                 if ($this->persist && (! $this->ciMode || $request->allowCiBaseline)) {
-                    (new GraphUpdater($graph, $root, new ContentKey($root), $this->quarantine, $this->staticEdges))
+                    (new GraphUpdater($graph, $root, new ContentKey($root), $this->quarantine, $this->staticEdges, $this->git))
                         ->finalizeBaseline($this->branch, $this->head, $this->git->branchNames());
                 }
 
@@ -1140,7 +1140,7 @@ final class RunPipeline
 
         $complete = ! (bool) ($partial->meta['truncated'] ?? false) && in_array($exitCode, [0, 1], true);
 
-        $updater = new GraphUpdater($graph, $root, new ContentKey($root), $this->quarantine, $this->staticEdges);
+        $updater = new GraphUpdater($graph, $root, new ContentKey($root), $this->quarantine, $this->staticEdges, $this->git);
         $applied = $updater->apply($partial, $this->branch, recordsEdges: $recordsEdges, complete: $complete);
         $this->quarantine->save($this->stateDir);
 
@@ -1490,7 +1490,7 @@ final class RunPipeline
         return Summary::label(false) . '  ' . $message;
     }
 
-    private function printRecordSummary(RunPartial $partial): void
+    private function printRecordSummary(RunPartial $partial, int $excludedEdges): void
     {
         $graph = $this->graph;
 
@@ -1506,6 +1506,7 @@ final class RunPipeline
             $stats['test_files'],
             $stats['files'],
             $stats['edges'],
+            $excludedEdges,
             $graphBytes !== false ? $graphBytes : 0,
             microtime(true) - $this->startedAt,
             $this->persist ? $this->branch : null,

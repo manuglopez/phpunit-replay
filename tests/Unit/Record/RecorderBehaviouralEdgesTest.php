@@ -188,7 +188,14 @@ final class RecorderBehaviouralEdgesTest extends TestCase
     public function link_source_is_untouched_by_the_filter(): void
     {
         // Explicit links (Laravel Blade tracking, SPEC.md §10) never went through coverage
-        // in the first place, so they are not the recorder's to second-guess.
+        // in the first place, so they are not the recorder's to second-guess. That
+        // principle still holds for a real template, and this test still proves exactly
+        // that — for the OTHER half (an explicit link to a generated compiled view must be
+        // refused), see the sibling test directly below and
+        // tests/Unit/Laravel/BladeTrackerTest.php: the caller (Laravel\BladeTracker)
+        // decides BEFORE ever calling linkSource(), because only it knows the difference
+        // between a source template and `config('view.compiled')`'s disposable output —
+        // Recorder itself has (and needs) no such knowledge.
         $recorder = $this->recorder([[]]);
         $recorder->beginTest('/project/tests/FooTest.php');
         $recorder->linkSource('/project/resources/views/mail.blade.php');
@@ -196,6 +203,26 @@ final class RecorderBehaviouralEdgesTest extends TestCase
 
         self::assertSame(
             ['/project/tests/FooTest.php' => ['/project/resources/views/mail.blade.php']],
+            $recorder->perTestFiles(),
+        );
+    }
+
+    #[Test]
+    public function link_source_still_does_not_second_guess_a_path_shaped_like_a_compiled_view(): void
+    {
+        // Reinforces the architectural boundary the test above documents: even a path that
+        // LOOKS exactly like what Laravel\BladeTracker now refuses to forward (a compiled
+        // view under bootstrap/cache/) is recorded without question when it reaches
+        // linkSource() directly, because Recorder has no SourceScope/config awareness at
+        // all and must not grow any — that filtering is BladeTracker's job, one layer up,
+        // precisely because it is the only caller that knows what `view.compiled` is.
+        $recorder = $this->recorder([[]]);
+        $recorder->beginTest('/project/tests/FooTest.php');
+        $recorder->linkSource('/project/bootstrap/cache/views/test_3/3a1f9c2b8e0d7a6c.php');
+        $recorder->endTest();
+
+        self::assertSame(
+            ['/project/tests/FooTest.php' => ['/project/bootstrap/cache/views/test_3/3a1f9c2b8e0d7a6c.php']],
             $recorder->perTestFiles(),
         );
     }

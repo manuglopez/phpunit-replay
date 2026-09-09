@@ -61,12 +61,13 @@ final readonly class Summary
         int $testFiles,
         int $sourceFiles,
         int $edges,
+        int $excludedEdges,
         int $graphBytes,
         float $seconds,
         ?string $branch,
         ?string $sha,
     ): RecordSummary {
-        return new RecordSummary($tests, $testFiles, $sourceFiles, $edges, $graphBytes, $seconds, $branch, $sha);
+        return new RecordSummary($tests, $testFiles, $sourceFiles, $edges, $excludedEdges, $graphBytes, $seconds, $branch, $sha);
     }
 
     public function format(bool $colors = false): string
