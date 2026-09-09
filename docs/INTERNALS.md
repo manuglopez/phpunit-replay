@@ -789,6 +789,21 @@ final class Cache\Remote\ObjectStore               // put/get of objects/<shard>
                                                     // deviation: the project key is fixed at construction (`__construct(RemoteCache $remote, string $stateDir, string $projectKey)`), not a per-call argument — `graph(string $branch)`/`graphOf(string $branch, string $projectRoot)` take only the branch
 ```
 
+Bug fix — publish markers vs. the read-through cache: `ObjectStore`'s local mirror
+(`<stateDir>/remote/cache/objects/<k>.json`) does two jobs, and only one of them may happen
+at `put()` time. As a *read* cache (written by `object()` on a successful `get()`) it is fine
+to write immediately — a successful read really did read something. As `putObject()`'s
+*publish marker* — the file whose mere existence makes the next `putObject()` for the same
+`k` skip — it must mean "durably in the remote", which `put()` returning `true` does **not**
+always mean: `FilesystemRemoteCache`/`HttpRemoteCache` are synchronous, but `GitRemoteCache`'s
+`put()` only stages the local mirror working tree, and the object is not actually in the
+shared remote until `end()` completes with `lastError() === null` (see below). `ObjectStore`
+therefore buffers what `putObject()` accepts this session (`k => body`) and only writes the
+marker from `confirmPublished(): int`, which is itself a no-op (writes nothing, returns 0)
+whenever `lastError() !== null` — so a caller cannot turn a failed push into a permanently
+skipped object even by forgetting the check. `RunPipeline::closeRemote()`,
+`PHPUnit\ReplayState::closeRemote()` and `PushCommand` all call it right after `end()`.
+
 ### GitRemoteCache — automatic maintenance
 
 - Mirror: `<stateDir>/remote/git/` = shallow clone (`--depth 1`, single branch, default `main`, configurable `remote_branch`).
@@ -803,7 +818,7 @@ final class Cache\Remote\ObjectStore               // put/get of objects/<shard>
 
 - Startup without local graph: `ObjectStore::graph(branch) ?? graph(defaultBranch)` (the project key is fixed on the `ObjectStore` instance, not passed to `graph()`/`graphOf()` — see above) → fingerprint reconcile (structural must match; environmental drift clears results) → sha must be an ancestor of HEAD, else use it only as a source of `objects` by key (edges still useful) — record fresh but replay-remote by `k` still applies.
 - Replay: for every test file in the run list that is `affected` (not unknown/rerun/quarantined/not-cacheable): compute `k_now`; `ObjectStore::object(k_now)` hit → mark file **replayed-remote**, drop from the run list, merge its results with `key = k_now` (Summary: `M replayed (R from remote)`).
-- After the run: `put objects/<shard>/<k>.json` for each executed test file (results of that file, with `k`); `put graph/<key>/<branch>.json` when `remote_push === 'all'` and the pass was complete. `CI=true`: objects only unless `--allow-ci-baseline`.
+- After the run: `put objects/<shard>/<k>.json` for each executed test file (results of that file, with `k`); `put graph/<key>/<branch>.json` when `remote_push === 'all'` and the pass was complete. `CI=true`: objects only unless `--allow-ci-baseline`. The per-object local publish marker is confirmed later, not here — see "publish markers vs. the read-through cache" above.
 - Commands: `push [--graph]` (force a push of the current graph and all objects derivable from it), `pull` (fetch graph for the current branch/default and store locally as baseline), `prune --remote`.
 - `--no-remote` disables all of the above for one run; `remote => null` disables permanently.
 - Deviation: `verify` and `results-only` (a partial CLI selection: `--filter`/`--group`/`--testsuite`/an explicit path) never publish — they persist the local graph the same way a full pass does, but never reach the `putObject`/`putGraph` step above. Only `record` and a full/replay `run` (`RunPipeline::pushAfterRun()`) publish; `verify`'s whole point is comparing against what is already cached, and a partial selection has nothing complete enough to be worth sharing.

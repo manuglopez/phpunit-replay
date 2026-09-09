@@ -533,6 +533,17 @@ final class RunPipeline
 
         $this->remoteOpen = false;
         $this->remote->end();
+
+        // Bug fix: the local "already published" markers for objects put() accepted this
+        // pass are written only now, after end() — ObjectStore::confirmPublished() itself is
+        // a no-op when end()'s push failed (lastError() !== null), so a transient failure
+        // here can never turn into a permanently skipped object on a later run.
+        $confirmed = $this->objects?->confirmPublished() ?? 0;
+
+        if ($confirmed > 0) {
+            Warnings::debug('remote: ' . $confirmed . ' object(s) published');
+        }
+
         $this->warnRemote();
     }
 
@@ -1375,6 +1386,11 @@ final class RunPipeline
      * earned a baseline. `remote_push => 'off'` makes the remote pull-only; `CI=true`
      * publishes objects but never a graph unless `--allow-ci-baseline` says so (SPEC §12.1).
      *
+     * Bug fix: this only stages objects with the remote (`ObjectStore::putObject()`); their
+     * local "already published" markers are confirmed later, in {@see self::closeRemote()},
+     * only once `end()` has actually confirmed the push succeeded — see
+     * `ObjectStore::confirmPublished()`.
+     *
      * @param list<string> $executedTestFiles project-relative, from GraphUpdater::apply()
      */
     private function pushAfterRun(Graph $graph, array $executedTestFiles, bool $complete): void
@@ -1387,7 +1403,6 @@ final class RunPipeline
 
         $contentKey = new ContentKey($this->root ?? '');
         $own = $graph->ownResults($this->branch);
-        $pushed = 0;
 
         foreach ($executedTestFiles as $file) {
             if ($graph->isNotCacheable($file)) {
@@ -1408,12 +1423,10 @@ final class RunPipeline
                 }
             }
 
-            if ($results !== [] && $objects->putObject($key, $file, $results)) {
-                $pushed++;
+            if ($results !== []) {
+                $objects->putObject($key, $file, $results);
             }
         }
-
-        Warnings::debug('remote: ' . $pushed . ' object(s) published');
 
         if ($this->config->remotePush !== 'all' || ! $complete || ! $this->persist) {
             return;

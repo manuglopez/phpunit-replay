@@ -27,6 +27,14 @@ use Manuglopez\Replay\Support\Json;
  * key costs one `is_file()`. That mirror is also what makes a re-`put` of an object this
  * machine already knows about a no-op. Graphs are mutable and are never mirrored.
  *
+ * Bug fix: that mirror file doubles as {@see self::putObject()}'s "already published"
+ * marker, so it must mean the object is durably in the remote — never merely that `put()`
+ * returned true, which for the git backend only means "staged in a local commit" ({@see
+ * \Manuglopez\Replay\Cache\Remote\GitRemoteCache}'s `end()` is what actually pushes). Writing
+ * the marker any earlier turned one transient push failure into permanent, silent data loss:
+ * `putObject()`'s own skip check would see the marker and never retry that object again, on
+ * any later run. See {@see self::confirmPublished()}, which now owns writing it.
+ *
  * @phpstan-import-type TestResultArray from Graph
  * @phpstan-type RemoteObject array{k: string, file: string, results: array<string, TestResultArray>}
  */
@@ -40,6 +48,16 @@ final class ObjectStore
 
     /** @var array<string, ?string> memoised graph bodies by branch (one download per run) */
     private array $graphBodies = [];
+
+    /**
+     * Bug fix: objects {@see self::putObject()} handed to `put()` this session, keyed by
+     * `k`, not yet confirmed durable — see {@see self::confirmPublished()}, which is what
+     * finally writes their local "already published" marker, and only once the remote's
+     * `end()` has actually confirmed the write landed.
+     *
+     * @var array<string, string>
+     */
+    private array $pending = [];
 
     public function __construct(
         private readonly RemoteCache $remote,
@@ -181,7 +199,8 @@ final class ObjectStore
 
     /**
      * Publishes the results of one test file under its content key. A key this machine
-     * already has mirrored locally is skipped: objects are immutable, so re-uploading one
+     * already has mirrored locally (durably confirmed, {@see self::confirmPublished()}) or
+     * already staged this very session is skipped: objects are immutable, so re-uploading one
      * only costs bandwidth (and, on the git backend, a pointless commit).
      *
      * @param array<string, TestResultArray> $results
@@ -192,9 +211,7 @@ final class ObjectStore
             return false;
         }
 
-        $local = $this->mirrorPath($k);
-
-        if (is_file($local)) {
+        if (isset($this->pending[$k]) || is_file($this->mirrorPath($k))) {
             $this->debug('skip (already published) objects/*/' . $k . '.json');
 
             return false;
@@ -217,9 +234,53 @@ final class ObjectStore
             return false;
         }
 
-        AtomicFile::write($local, $body);
+        // Bug fix: NOT `AtomicFile::write($this->mirrorPath($k), $body)` here anymore.
+        // `put()` returning true means "accepted" — durable immediately for the file/http
+        // backends, but for the git backend only staged in a local commit `end()` has not
+        // necessarily pushed yet. Buffered instead; the caller confirms via
+        // {@see self::confirmPublished()} once `end()` says the push actually landed.
+        $this->pending[$k] = $body;
 
         return true;
+    }
+
+    /**
+     * Marks every object {@see self::putObject()} staged this session as durably published,
+     * by writing each one's local "already published" marker — the very file
+     * {@see self::putObject()}'s own skip check reads. Call this once, right after the
+     * remote's `end()`, never before: `end()` is the one call that actually confirms a git
+     * push landed (`put()` alone never does, see {@see self::putObject()}'s docblock).
+     *
+     * A no-op — writes nothing, returns 0 — whenever {@see RemoteCache::lastError()} reports
+     * an error. Checked here, inside ObjectStore, rather than left to the caller: a caller
+     * that forgets the check can then never turn a failed push into permanent data loss.
+     * This is the deliberately safe direction, and it is asymmetric on purpose — skipping a
+     * marker here costs one redundant `put` of the same key on the next run, a documented
+     * no-op because objects are content-addressed and append-only
+     * (docs/sharing-the-cache.md: "two machines writing the same key at the same time is a
+     * no-op, never a conflict"); writing one for a push that silently failed costs that
+     * object forever, because {@see self::putObject()} never puts a key its marker already
+     * exists for. When in doubt, this method does not write the marker.
+     *
+     * @return int how many markers were actually written this call
+     */
+    public function confirmPublished(): int
+    {
+        if ($this->pending === [] || $this->remote->lastError() !== null) {
+            return 0;
+        }
+
+        $written = 0;
+
+        foreach ($this->pending as $k => $body) {
+            if (AtomicFile::write($this->mirrorPath($k), $body)) {
+                $written++;
+            }
+        }
+
+        $this->pending = [];
+
+        return $written;
     }
 
     /** @return list<string> `yyyy-mm` shards, newest first */
