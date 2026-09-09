@@ -949,7 +949,40 @@ final class Graph
 
     public function encode(): ?string
     {
-        $sortedFiles = array_values(array_unique($this->files));
+        // A file id that no edge references any more (its only test was deleted —
+        // pruneMissingTestFiles() — or its edge was dropped — pruneMissingDependencies(),
+        // or a partial replaceEdges()) would otherwise be carried into `files` forever:
+        // link() only ever adds, and nothing else in this class ever shrinks $this->files.
+        // Filtering to what $this->edges still points to keeps graph.json bounded by what
+        // is actually reachable, on every encode, not just under `prune`.
+        //
+        // Keyed by PATH, deliberately, not by file id — link() itself can never assign two
+        // ids to the same path (it only mints a fresh one when the path is not already in
+        // $fileIds), but decode() trusts a `files` JSON array verbatim with no
+        // de-duplication (below), so a foreign/older/hand-edited graph.json can hold one
+        // path under two ids. array_unique($this->files) then keeps the FIRST of the two
+        // as that path's representative key, while $fileIds (array_flip($this->files))
+        // keeps the LAST — so an edge recorded against whichever id array_unique did NOT
+        // keep would silently vanish under an id-keyed filter (array_intersect_key
+        // against $referenced), instead of being remapped like every other live edge.
+        // Resolving each referenced id back to its path first, and filtering on path
+        // membership, makes it irrelevant which of the two raw ids "won".
+        $referencedPaths = [];
+
+        foreach ($this->edges as $ids) {
+            foreach ($ids as $id) {
+                if (isset($this->files[$id])) {
+                    $referencedPaths[$this->files[$id]] = true;
+                }
+            }
+        }
+
+        $live = array_filter(
+            array_unique($this->files),
+            static fn (string $path): bool => isset($referencedPaths[$path]),
+        );
+
+        $sortedFiles = array_values($live);
         sort($sortedFiles);
 
         $remap = [];

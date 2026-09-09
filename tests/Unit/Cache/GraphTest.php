@@ -410,6 +410,37 @@ final class GraphTest extends TestCase
         self::assertSame(['tests/Feature/KeepTest.php'], $graph->notCacheable());
     }
 
+    /**
+     * pruneMissingTestFiles() runs on every ordinary `run`/`record` where anything
+     * changed (RunPipeline.php:1017, ReplayState.php:772) — not only under
+     * `prune --stale-edges` — so a deleted test file orphaning its only dependency is
+     * the everyday trigger for a `files` entry nothing references any more, not a rare
+     * `prune`-only case. See encode()'s own orphan-filtering and this change's commit
+     * message.
+     */
+    public function test_encode_drops_a_dependency_orphaned_by_a_deleted_test_files_own_edges(): void
+    {
+        $this->write('tests/Feature/KeepTest.php');
+        $goneAbsolute = $this->write('tests/Feature/GoneTest.php');
+        $this->write('app/Shared.php');
+        $this->write('app/OnlyGoneUsed.php');
+
+        $graph = new Graph($this->root);
+        $graph->link('tests/Feature/KeepTest.php', 'app/Shared.php');
+        $graph->link('tests/Feature/GoneTest.php', 'app/OnlyGoneUsed.php');
+
+        unlink($goneAbsolute);
+
+        $graph->pruneMissingTestFiles();
+
+        $json = $graph->encode();
+        self::assertNotNull($json);
+
+        $raw = json_decode($json, true);
+        self::assertIsArray($raw);
+        self::assertSame(['app/Shared.php'], $raw['files']);
+    }
+
     public function test_prune_missing_dependencies_drops_only_the_edge_whose_file_is_gone(): void
     {
         $this->write('tests/Feature/FooTest.php');
@@ -427,6 +458,31 @@ final class GraphTest extends TestCase
         self::assertSame(1, $removed);
         self::assertSame(['app/Kept.php'], $graph->dependenciesOf('tests/Feature/FooTest.php'));
         self::assertTrue($graph->knowsTest('tests/Feature/FooTest.php'));
+    }
+
+    public function test_encode_drops_a_dependency_orphaned_by_prune_missing_dependencies(): void
+    {
+        $this->write('tests/Feature/FooTest.php');
+        $this->write('app/Kept.php');
+        $goneAbsolute = $this->write('app/Gone.php');
+
+        $graph = new Graph($this->root);
+        $graph->link('tests/Feature/FooTest.php', 'app/Kept.php');
+        $graph->link('tests/Feature/FooTest.php', 'app/Gone.php');
+
+        unlink($goneAbsolute);
+        $graph->pruneMissingDependencies();
+
+        $json = $graph->encode();
+        self::assertNotNull($json);
+
+        $raw = json_decode($json, true);
+        self::assertIsArray($raw);
+
+        // app/Gone.php has no edge pointing to it any more: it must not be carried into
+        // the persisted graph forever just because it was linked once, unlike
+        // app/Kept.php, which tests/Feature/FooTest.php still depends on.
+        self::assertSame(['app/Kept.php'], $raw['files']);
     }
 
     public function test_prune_missing_dependencies_keeps_the_test_entry_when_every_dependency_is_gone(): void
@@ -565,6 +621,40 @@ final class GraphTest extends TestCase
         ], $graph->stats());
     }
 
+    /**
+     * Deliberate scope boundary, not an oversight (see this change's commit message):
+     * pruning removes an edge, never the file id it pointed to, so files()/stats() keep
+     * counting an orphan until the next encode() — only the persisted graph.json, and a
+     * graph decoded back from it, are ever guaranteed free of one. `files()`/`stats()`
+     * are not compacted eagerly because (a) no current caller ever reads them between a
+     * prune and a save on the same Graph instance — the two call sites that print
+     * `stats()['files']` (RunPipeline::printRecordSummary(), ReplayState's Record mode)
+     * only ever run against a freshly built graph that cannot yet contain an orphan, and
+     * (b) test_replace_edges_replaces_rather_than_unions_and_dedups() above already locks
+     * in files() returning every path ever linked, orphaned or not, as replaceEdges()'s
+     * existing contract. This test pins that boundary so a future change doesn't
+     * silently cross it.
+     */
+    public function test_stats_files_counter_still_counts_an_orphan_until_the_next_encode(): void
+    {
+        $this->write('tests/Feature/FooTest.php');
+        $goneAbsolute = $this->write('app/Gone.php');
+
+        $graph = new Graph($this->root);
+        $graph->link('tests/Feature/FooTest.php', 'app/Gone.php');
+
+        unlink($goneAbsolute);
+        $graph->pruneMissingDependencies();
+
+        self::assertSame(['app/Gone.php'], $graph->files());
+        self::assertSame(1, $graph->stats()['files']);
+
+        $decoded = Graph::decode((string) $graph->encode(), $this->root);
+        self::assertNotNull($decoded);
+        self::assertSame([], $decoded->files());
+        self::assertSame(0, $decoded->stats()['files']);
+    }
+
     // -- codec -------------------------------------------------------------
 
     public function test_encode_decode_round_trip_preserves_all_sections(): void
@@ -619,6 +709,57 @@ final class GraphTest extends TestCase
         self::assertSame(
             $graph->result('main', 'Tests\FooTest::it_works'),
             $decoded->result('main', 'Tests\FooTest::it_works'),
+        );
+    }
+
+    /**
+     * Regression found in review: encode()'s orphan filter must key on PATH, not file id.
+     * Graph::link() can never itself produce two ids for the same path — it only mints a
+     * fresh one when the path is not already in $fileIds — so the only route to this
+     * state (which is why this test goes in through decode() with a hand-built payload,
+     * rather than through the normal link()/replaceEdges() API) is decode() trusting a
+     * `files` JSON array verbatim with no de-duplication (Graph.php's decode()): a
+     * graph.json from a foreign or older writer, or a hand-edited one, can hold one path
+     * under two ids. Here 'dup.php' is both id 1 and id 2; the edge references id 2.
+     * array_unique($this->files) keeps id 1 as 'dup.php''s representative (first
+     * occurrence); array_flip($this->files) — what decode() builds $fileIds from — keeps
+     * id 2 (last occurrence). An id-keyed filter checks whether id 1 is referenced, finds
+     * it is not (only id 2 is), and silently drops the edge instead of remapping it.
+     */
+    public function test_encode_keeps_an_edge_to_a_path_duplicated_under_two_ids(): void
+    {
+        $json = json_encode([
+            'schema' => 1,
+            'generator' => 'test',
+            'fingerprint' => [],
+            'files' => ['a.php', 'dup.php', 'dup.php'],
+            'edges' => ['tests/Feature/FooTest.php' => [0, 2]],
+            'test_tables' => [],
+            'not_cacheable' => [],
+            'baselines' => [],
+        ]);
+        self::assertIsString($json);
+
+        $graph = Graph::decode($json, $this->root);
+        self::assertNotNull($graph);
+        self::assertEqualsCanonicalizing(
+            ['a.php', 'dup.php'],
+            $graph->dependenciesOf('tests/Feature/FooTest.php'),
+        );
+
+        $reEncoded = $graph->encode();
+        self::assertNotNull($reEncoded);
+
+        $raw = json_decode($reEncoded, true);
+        self::assertIsArray($raw);
+        self::assertEqualsCanonicalizing(['a.php', 'dup.php'], $raw['files']);
+        self::assertEqualsCanonicalizing([0, 1], $raw['edges']['tests/Feature/FooTest.php']);
+
+        $decoded = Graph::decode($reEncoded, $this->root);
+        self::assertNotNull($decoded);
+        self::assertEqualsCanonicalizing(
+            ['a.php', 'dup.php'],
+            $decoded->dependenciesOf('tests/Feature/FooTest.php'),
         );
     }
 
