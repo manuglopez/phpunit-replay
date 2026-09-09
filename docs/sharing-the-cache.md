@@ -160,12 +160,19 @@ constantly with real commits.
    notices on its next `begin()` (the start of the next push or pull): a fetch reporting
    unrelated/rewritten history makes it wipe its local mirror and re-clone, automatically, with a
    warning — no manual step on anyone's machine.
-9. **Sizes.** Each object is small — roughly 1–20 KB per test file per distinct content version
-   (bigger test files or ones with more source dependencies land at the high end). Objects are
-   sharded by the month they were written (`objects/2026-09/<k>.json`, ...), and
-   `prune --remote --keep-months=3` (the `tia-gc.yml` default) drops shards older than that window
-   except for any object still referenced by a current `graph/**` baseline — so the retained
-   history stays bounded regardless of how long the project lives.
+9. **A failed push never loses data.** Publishing an object is two steps for this backend: stage
+   it in the local mirror, then `push` it. If the push itself fails — a network blip, an expired
+   credential, a rejected fast-forward that could not be resolved after retrying — the object is
+   never marked as published locally, regardless of how the staging step went. The next `run` (or
+   `phpunit-replay push`) simply tries again; retrying an already-published, content-addressed
+   object is the no-op described above, so nothing is ever pushed twice for real, and nothing is
+   ever silently dropped because of a failure that looked like it belonged to a different object.
+10. **Sizes.** Each object is small — roughly 1–20 KB per test file per distinct content version
+    (bigger test files or ones with more source dependencies land at the high end). Objects are
+    sharded by the month they were written (`objects/2026-09/<k>.json`, ...), and
+    `prune --remote --keep-months=3` (the `tia-gc.yml` default) drops shards older than that window
+    except for any object still referenced by a current `graph/**` baseline — so the retained
+    history stays bounded regardless of how long the project lives.
 
 ## Git-flow branching (`baseline_branches`)
 

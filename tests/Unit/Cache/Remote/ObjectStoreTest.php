@@ -10,6 +10,7 @@ use Manuglopez\Replay\Cache\Remote\HttpRemoteCache;
 use Manuglopez\Replay\Cache\Remote\NullRemoteCache;
 use Manuglopez\Replay\Cache\Remote\ObjectStore;
 use Manuglopez\Replay\Support\Json;
+use Manuglopez\Replay\Tests\Support\FakeRemoteCache;
 use Manuglopez\Replay\Tests\Support\TempDir;
 use PHPUnit\Framework\TestCase;
 
@@ -150,6 +151,98 @@ final class ObjectStoreTest extends TestCase
 
         self::assertTrue($store->putObject('deadbeef', 'tests/MoneyTest.php', $this->results()));
         self::assertFalse($store->putObject('deadbeef', 'tests/MoneyTest.php', $this->results()));
+    }
+
+    /**
+     * The regression that matters (reproduced against a real GitHub repo, see CHANGELOG
+     * [Unreleased]): `putObject()`'s `put()` call can succeed while the remote's `end()`
+     * still fails (a rejected git push, after retries) — `GitRemoteCache::put()` only ever
+     * stages the local mirror working tree; `end()` is what actually pushes. The local
+     * "already published" marker must therefore never be written on `put()`'s promise alone,
+     * or a transient push failure silently and permanently drops the object: no later run
+     * ever retries a key whose marker already exists.
+     */
+    public function testAFailedEndWritesNoMarkerAndTheNextRunRetriesThePut(): void
+    {
+        $backend = new FakeRemoteCache();
+        $backend->begin();
+
+        $store = new ObjectStore($backend, $this->stateDir, 'shop-abc');
+
+        self::assertTrue($store->putObject('deadbeef', 'tests/MoneyTest.php', $this->results()));
+        self::assertFileDoesNotExist($store->mirrorPath('deadbeef'), 'no marker until end() confirms the push');
+
+        // The push itself is what fails here — put() above already returned true, exactly
+        // GitRemoteCache's "staged, then end() rejects the push" shape.
+        $backend->endError = 'git push rejected after 3 retries';
+        $backend->end();
+
+        self::assertSame(0, $store->confirmPublished(), 'end() failed: nothing may be confirmed durable');
+        self::assertFileDoesNotExist(
+            $store->mirrorPath('deadbeef'),
+            'a failed push must never be remembered as "already published"',
+        );
+
+        // A fresh ObjectStore (the next run, same state dir, same remote) must re-attempt the
+        // put, not skip it — the on-disk marker its skip check trusts was never written.
+        $nextRun = new ObjectStore($backend, $this->stateDir, 'shop-abc');
+        self::assertTrue($nextRun->putObject('deadbeef', 'tests/MoneyTest.php', $this->results()));
+    }
+
+    /** The happy path this must not break: a successful end() does confirm the marker. */
+    public function testASuccessfulEndConfirmsTheMarkerAndTheNextRunSkips(): void
+    {
+        $backend = new FakeRemoteCache();
+        $backend->begin();
+
+        $store = new ObjectStore($backend, $this->stateDir, 'shop-abc');
+
+        self::assertTrue($store->putObject('deadbeef', 'tests/MoneyTest.php', $this->results()));
+        self::assertFileDoesNotExist($store->mirrorPath('deadbeef'), 'no marker until end() confirms the push');
+
+        $backend->end(); // lastError() stays null: the push succeeded.
+
+        self::assertSame(1, $store->confirmPublished());
+        self::assertFileExists($store->mirrorPath('deadbeef'));
+
+        $nextRun = new ObjectStore($backend, $this->stateDir, 'shop-abc');
+        self::assertFalse(
+            $nextRun->putObject('deadbeef', 'tests/MoneyTest.php', $this->results()),
+            'a confirmed marker must make the next run skip',
+        );
+    }
+
+    /**
+     * Pinning the failure direction stated in ObjectStore's own docblock: a crash (or any
+     * caller that simply never reaches confirmPublished()) between a push that genuinely
+     * succeeded and the marker being written must degrade to a redundant, harmless put next
+     * time — never to a wrongly-confirmed marker, and never to a wrongly-skipped retry either.
+     */
+    public function testACrashBeforeConfirmPublishedDegradesToARedundantPutNeverASkip(): void
+    {
+        $backend = new FakeRemoteCache();
+        $backend->begin();
+
+        $store = new ObjectStore($backend, $this->stateDir, 'shop-abc');
+
+        self::assertTrue($store->putObject('deadbeef', 'tests/MoneyTest.php', $this->results()));
+        $backend->end(); // the push succeeds ...
+
+        // ... but confirmPublished() is never called this run (simulating a crash right here).
+        self::assertFileDoesNotExist($store->mirrorPath('deadbeef'));
+
+        $nextRun = new ObjectStore($backend, $this->stateDir, 'shop-abc');
+        self::assertTrue(
+            $nextRun->putObject('deadbeef', 'tests/MoneyTest.php', $this->results()),
+            'no marker means a redundant (harmless, content-addressed) retry, never a skip',
+        );
+    }
+
+    public function testConfirmPublishedIsANoOpWhenNothingIsPending(): void
+    {
+        $store = new ObjectStore(new FakeRemoteCache(), $this->stateDir, 'shop-abc');
+
+        self::assertSame(0, $store->confirmPublished());
     }
 
     public function testAnEmptyKeyOrEmptyResultsArePublishedNowhere(): void

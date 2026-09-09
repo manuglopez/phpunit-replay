@@ -71,25 +71,39 @@ final class PushCommand extends Command
 
         $remote->begin();
 
-        try {
-            $objects = new ObjectStore($remote, $stateDir, ProjectKey::shared($root));
-            $pushed = self::pushObjects($objects, $graph, $root, $branch);
+        $objects = new ObjectStore($remote, $stateDir, ProjectKey::shared($root));
+        $graphKey = null;
+        $graphPutError = null;
 
-            $output->writeln(sprintf('pushed %d object(s) to the %s remote', $pushed, $remote->name()));
+        try {
+            self::pushObjects($objects, $graph, $root, $branch);
 
             if ($input->getOption('graph') === true) {
                 $body = $graph->encode();
 
                 if ($body === null || ! $objects->putGraph($branch, $body)) {
-                    $output->writeln('could not publish the ' . $branch . ' baseline: ' . ($remote->lastError() ?? 'unknown error'));
-
-                    return Command::FAILURE;
+                    // Captured now, before end() can overwrite lastError() with a (possibly
+                    // unrelated) push failure of its own.
+                    $graphPutError = $remote->lastError() ?? 'unknown error';
+                } else {
+                    $graphKey = ObjectStore::graphKey(ProjectKey::shared($root), $branch);
                 }
-
-                $output->writeln('pushed the ' . $branch . ' baseline (' . ObjectStore::graphKey(ProjectKey::shared($root), $branch) . ')');
             }
         } finally {
+            // Bug fix: this used to print "pushed N object(s)" / "pushed the X baseline"
+            // BEFORE end() ran — for the git backend, put()/putGraph() returning true only
+            // means "staged in a local commit", not "pushed" (ObjectStore::putObject()'s
+            // docblock, ObjectStore::confirmPublished()). A rejected push then printed
+            // success twice, with the failure reported only on a third line below it — read,
+            // in production, as "it worked". Both messages now wait for end() to actually
+            // confirm the outcome, below.
             $remote->end();
+        }
+
+        if ($graphPutError !== null) {
+            $output->writeln('could not publish the ' . $branch . ' baseline: ' . $graphPutError);
+
+            return Command::FAILURE;
         }
 
         $error = $remote->lastError();
@@ -100,11 +114,21 @@ final class PushCommand extends Command
             return Command::FAILURE;
         }
 
+        // Only now, after end() has confirmed the push, are these objects (and the graph, if
+        // requested) durably in the remote. confirmPublished() is itself a no-op whenever
+        // lastError() is non-null, so $pushed always reflects what actually landed.
+        $pushed = $objects->confirmPublished();
+        $output->writeln(sprintf('pushed %d object(s) to the %s remote', $pushed, $remote->name()));
+
+        if ($graphKey !== null) {
+            $output->writeln('pushed the ' . $branch . ' baseline (' . $graphKey . ')');
+        }
+
         return Command::SUCCESS;
     }
 
     /** One object per test file the graph has results for; keys are recomputed from the graph's own edges. */
-    private static function pushObjects(ObjectStore $objects, Graph $graph, string $root, string $branch): int
+    private static function pushObjects(ObjectStore $objects, Graph $graph, string $root, string $branch): void
     {
         $contentKey = new ContentKey($root);
         $byFile = [];
@@ -117,8 +141,6 @@ final class PushCommand extends Command
             }
         }
 
-        $pushed = 0;
-
         foreach ($byFile as $file => $results) {
             if ($graph->isNotCacheable($file)) {
                 continue;
@@ -126,11 +148,9 @@ final class PushCommand extends Command
 
             $key = $contentKey->forTestFile($graph, $file);
 
-            if ($key !== null && $objects->putObject($key, $file, $results)) {
-                $pushed++;
+            if ($key !== null) {
+                $objects->putObject($key, $file, $results);
             }
         }
-
-        return $pushed;
     }
 }
