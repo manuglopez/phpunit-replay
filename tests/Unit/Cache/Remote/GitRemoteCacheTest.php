@@ -127,6 +127,158 @@ final class GitRemoteCacheTest extends TestCase
         self::assertSame('A', $this->showUpstream($bare, 'objects/A.json'));
     }
 
+    /**
+     * The bug this fix closes: {@see GitRemoteCache::delete()} only unlinked the mirror's
+     * working-tree file and recorded the deletion nowhere else, so
+     * {@see GitRemoteCache}'s reconciliation (which only ever knew how to replay THIS run's
+     * buffered {@see GitRemoteCache::put()} calls) had no way to redo a deletion after a
+     * rejected push's `git reset --hard FETCH_HEAD` restored the file exactly as upstream
+     * still had it. `end()` must not report success while quietly leaving the object upstream.
+     */
+    public function test_a_deletion_survives_a_rejected_push_and_is_gone_upstream(): void
+    {
+        $bare = $this->bareRepo();
+        $this->seedUpstream($bare, 'objects/2026-09/c.json', '{"c":1}');
+
+        $client = $this->cacheFor($bare);
+        $client->begin();
+        self::assertTrue($client->has('objects/2026-09/c.json'));
+        self::assertTrue($client->delete('objects/2026-09/c.json'));
+
+        // An unrelated concurrent write moves upstream on WITHOUT touching c.json, so the
+        // client's own push is rejected (its local history and the new upstream tip are
+        // sibling commits of the seeded one) and reconciliation must reset onto a tree that
+        // still has c.json — exactly the moment the deletion can be lost.
+        $this->extendUpstream($bare, 'objects/2026-09/other.json', '{"other":1}');
+
+        $client->end();
+        self::assertNull($client->lastError());
+
+        self::assertNull($this->showUpstream($bare, 'objects/2026-09/c.json'));
+        self::assertSame('{"other":1}', $this->showUpstream($bare, 'objects/2026-09/other.json'));
+    }
+
+    /**
+     * The narrower shape of the same root cause: {@see GitRemoteCache}'s write buffer had no
+     * idea a key it held was deleted again on this very instance, so replaying it after a
+     * reset would resurrect an object the caller explicitly removed before `end()` ever ran.
+     */
+    public function test_put_then_delete_on_one_instance_does_not_resurrect_the_object(): void
+    {
+        $bare = $this->bareRepo();
+        $this->seedUpstream($bare, 'seed.txt', 'seed');
+
+        $client = $this->cacheFor($bare);
+        $client->begin();
+        self::assertTrue($client->put('objects/2026-09/new.json', '{"new":1}'));
+        self::assertTrue($client->delete('objects/2026-09/new.json'));
+
+        $this->extendUpstream($bare, 'objects/2026-09/other.json', '{"other":1}');
+
+        $client->end();
+        self::assertNull($client->lastError());
+
+        self::assertNull($this->showUpstream($bare, 'objects/2026-09/new.json'));
+        self::assertSame('{"other":1}', $this->showUpstream($bare, 'objects/2026-09/other.json'));
+    }
+
+    /**
+     * The mirror image of the previous test: a `put()` after a `delete()` for the same key on
+     * the same instance must cancel the tombstone rather than the other way around — the key
+     * is being (re)written, not removed, and the newer body must be what lands upstream.
+     */
+    public function test_delete_then_put_on_one_instance_publishes_the_new_body(): void
+    {
+        $bare = $this->bareRepo();
+        $this->seedUpstream($bare, 'objects/2026-09/c.json', '{"c":1}');
+
+        $client = $this->cacheFor($bare);
+        $client->begin();
+        self::assertTrue($client->delete('objects/2026-09/c.json'));
+        self::assertTrue($client->put('objects/2026-09/c.json', '{"c":2}'));
+
+        $this->extendUpstream($bare, 'objects/2026-09/other.json', '{"other":1}');
+
+        $client->end();
+        self::assertNull($client->lastError());
+
+        self::assertSame('{"c":2}', $this->showUpstream($bare, 'objects/2026-09/c.json'));
+        self::assertSame('{"other":1}', $this->showUpstream($bare, 'objects/2026-09/other.json'));
+    }
+
+    public function test_a_rejected_push_with_both_a_write_and_an_unrelated_deletion_lands_both(): void
+    {
+        $bare = $this->bareRepo();
+        $this->seedUpstream($bare, 'objects/2026-09/old.json', '{"old":1}');
+
+        $client = $this->cacheFor($bare);
+        $client->begin();
+        self::assertTrue($client->put('objects/2026-09/new.json', '{"new":1}'));
+        self::assertTrue($client->delete('objects/2026-09/old.json'));
+
+        $this->extendUpstream($bare, 'objects/2026-09/other.json', '{"other":1}');
+
+        $client->end();
+        self::assertNull($client->lastError());
+
+        self::assertSame('{"new":1}', $this->showUpstream($bare, 'objects/2026-09/new.json'));
+        self::assertNull($this->showUpstream($bare, 'objects/2026-09/old.json'));
+        self::assertSame('{"other":1}', $this->showUpstream($bare, 'objects/2026-09/other.json'));
+    }
+
+    /**
+     * Regression guard: a rejected push carrying only writes (no deletions at all) must
+     * behave exactly as before this fix — no tombstones are recorded, so reconciliation only
+     * ever replays the buffer, same as always.
+     */
+    public function test_a_plain_rejected_push_with_only_writes_is_unchanged(): void
+    {
+        $bare = $this->bareRepo();
+        $this->seedUpstream($bare, 'seed.txt', 'seed');
+
+        $client = $this->cacheFor($bare);
+        $client->begin();
+        self::assertTrue($client->put('objects/2026-09/mine.json', '{"mine":1}'));
+
+        $this->extendUpstream($bare, 'objects/2026-09/other.json', '{"other":1}');
+
+        $client->end();
+        self::assertNull($client->lastError());
+
+        self::assertSame('{"mine":1}', $this->showUpstream($bare, 'objects/2026-09/mine.json'));
+        self::assertSame('{"other":1}', $this->showUpstream($bare, 'objects/2026-09/other.json'));
+    }
+
+    /**
+     * The deliberate edge case behind the fix: a key can exist upstream without ever being
+     * fetched into THIS shallow mirror, because a mirror is only ever as fresh as its last
+     * `begin()` (up to `remoteRefreshSeconds` stale by design, docs/INTERNALS.md
+     * "GitRemoteCache — automatic maintenance"). `delete()` tombstones the key even though
+     * `is_file()` was false at call time, so reconciliation still removes it if a rejected
+     * push's reset lands on a newer upstream tip that turns out to have had it all along.
+     */
+    public function test_delete_of_a_key_never_fetched_into_a_stale_mirror_still_tombstones_it(): void
+    {
+        $bare = $this->bareRepo();
+        $this->seedUpstream($bare, 'seed.txt', 'seed');
+
+        $client = $this->cacheFor($bare);
+        $client->begin();
+        self::assertFalse($client->has('objects/2026-09/ghost.json'));
+        self::assertTrue($client->delete('objects/2026-09/ghost.json'));
+        self::assertTrue($client->put('objects/2026-09/mine.json', '{"mine":1}'));
+
+        // Simulates another client publishing ghost.json after THIS client's begin(): it is
+        // upstream by the time the retry fetches, but was never pulled into this mirror.
+        $this->extendUpstream($bare, 'objects/2026-09/ghost.json', '{"ghost":1}');
+
+        $client->end();
+        self::assertNull($client->lastError());
+
+        self::assertNull($this->showUpstream($bare, 'objects/2026-09/ghost.json'));
+        self::assertSame('{"mine":1}', $this->showUpstream($bare, 'objects/2026-09/mine.json'));
+    }
+
     public function test_begin_with_zero_refresh_seconds_always_refreshes_and_sees_the_other_clients_object(): void
     {
         $bare = $this->bareRepo();
@@ -300,6 +452,28 @@ final class GitRemoteCacheTest extends TestCase
         $this->git($seed, ['commit', '-q', '-m', 'rewritten']);
         $this->git($seed, ['branch', '-M', 'main']);
         $this->git($seed, ['push', '-q', '--force', 'origin', 'main']);
+    }
+
+    /**
+     * Pushes one more commit onto the bare repo's existing "main" tip — a normal,
+     * fast-forward push simulating a concurrent client publishing something else while this
+     * test's own client is mid-run, without touching (or even knowing about) anything that
+     * client already cloned or wrote.
+     */
+    private function extendUpstream(string $bareRepo, string $relative, string $content): void
+    {
+        $seed = TempDir::make('gitremote-extend');
+        $this->cleanup[] = $seed;
+
+        $this->git($seed, ['clone', '-q', $bareRepo, '.']);
+        $this->git($seed, ['config', 'user.email', 'tests@example.invalid']);
+        $this->git($seed, ['config', 'user.name', 'Replay Tests']);
+
+        TempDir::write($seed . '/' . $relative, $content);
+
+        $this->git($seed, ['add', '-A']);
+        $this->git($seed, ['commit', '-q', '-m', 'extended']);
+        $this->git($seed, ['push', '-q', 'origin', 'main']);
     }
 
     private function showUpstream(string $bareRepo, string $path): ?string
