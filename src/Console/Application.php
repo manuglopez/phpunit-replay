@@ -10,6 +10,7 @@ use Manuglopez\Replay\Console\Commands\PruneCommand;
 use Manuglopez\Replay\Console\Commands\PullCommand;
 use Manuglopez\Replay\Console\Commands\PushCommand;
 use Manuglopez\Replay\Console\Commands\RecordCommand;
+use Manuglopez\Replay\Console\Commands\RemoteInitCommand;
 use Manuglopez\Replay\Console\Commands\RunCommand;
 use Manuglopez\Replay\Console\Commands\StatusCommand;
 use Manuglopez\Replay\Console\Commands\VerifyCommand;
@@ -136,6 +137,7 @@ final class Application extends BaseApplication
             new VerifyCommand(),
             new PushCommand(),
             new PullCommand(),
+            new RemoteInitCommand(),
         ];
     }
 
@@ -265,9 +267,13 @@ final class Application extends BaseApplication
      * attached via `=`: this splitter only ever peeks a following token for a
      * `VALUE_OPTIONAL` option (see `acceptsPeekedValue()`), which is what subsumes the
      * previous hand-written `--log-junit=`/`--keep-months=` special cases without naming
-     * either option — `isValueRequired()` is true for exactly those two and nothing else
-     * in this CLI. A short option (`-p4`, `-p=4`, `-vv`, ...) is recognised by
-     * `resolveShortToken()`, below.
+     * either option. Every `VALUE_REQUIRED` option in this CLI therefore shares one pinned
+     * gap — `--option value` as two tokens is not recognised, only `--option=value`
+     * (`tests/Unit/Console/ApplicationArgvSplitTest.php` pins it case by case, and
+     * `tests/Integration/RemoteInitArgvTest.php` pins it for the newest of them):
+     * `run --log-junit=`, `prune --keep-months=`, and `remote:init`'s
+     * `--name=`/`--owner=`/`--branch=`. A short option (`-p4`, `-p=4`, `-vv`, ...) is
+     * recognised by `resolveShortToken()`, below.
      */
     private static function isRecognised(InputDefinition $own, InputDefinition $global, string $token): bool
     {
