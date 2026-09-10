@@ -2,7 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.8.0] — 2026-09-10
+
+Two correctness fixes, both found by installing the package in a second real project whose
+`phpunit.xml` and test-class layout differ from the first one it was developed against. Neither
+could have surfaced on a project without group exclusions or without abstract base test classes.
+
+**This release invalidates every existing graph once.** `Cache\Fingerprint` gains a new
+unconditional structural key, `edges_by_running_class`, because the second fix changes which file
+an edge is recorded under — so a graph recorded before it is contaminated by definition.
+`phpunit-replay status` names the key in its drift report rather than discarding the cache
+silently. Nothing else changed: no configuration key was added, renamed or given a new default.
+
+Measured on a real 4,820-test Laravel suite before and after, same tree, same database, only the
+package version differing: a `run` with nothing changed went from **4m10s to 0.57s** —
+`0 executed · 4820 replayed`. Before the second fix the package saved no wall clock at all on
+that suite (4m10s against a 4m27s baseline), because the two most expensive test files in it were
+permanently outside the cache.
+
+
 
 - **Fix: a test method inherited from an abstract base class recorded no edges at all, permanently, on the concrete class that actually ran it.** Reproduced on a real 4820-test Laravel suite: two `final` test classes extending a shared abstract base, adding no test methods of their own — the base declares them and is never itself run by PHPUnit (abstract classes cannot be instantiated). `baselines['<branch>']['results']` correctly held both classes' results, keyed by test id, but `edges` did not: the abstract base had 841 recorded dependencies and the two concrete classes had none. Consequence: the two concrete files were permanently "unknown test files" and re-ran on every pass — the two most expensive files in the suite, measured at 466s under pcov, on a replay pass that should have taken seconds.
 
