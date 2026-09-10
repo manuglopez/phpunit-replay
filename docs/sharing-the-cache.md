@@ -13,42 +13,43 @@ starts costing more than it's worth.
 
 ## Start here
 
-If you have git and no object storage — which is most teams — use a **dedicated git repository**.
-No infrastructure to run, the same on any forge, and the object store is append-only and
-content-addressed, so concurrent writers cannot conflict.
+```
+vendor/bin/phpunit-replay remote:init
+```
 
-1. **Create an empty repository, and make it private.** Private is not paranoia: the cache stores
-   test names, file paths and failure messages, which is source-adjacent. A name like
-   `<your-project>-replay-cache` says what it is and that it is disposable.
+That is the whole setup. It reads your project's `origin`, proposes a **private** cache
+repository next to it named `<your-project>-replay-cache`, creates it through `gh` if you have
+`gh` authenticated, publishes a probe object and reads it back from a separate clone to prove the
+round trip actually works, and writes `phpunit-replay.php` for you. Add `--dry-run` to see every
+action first and take none.
 
-   ```
-   gh repo create your-org/your-project-replay-cache --private
-   ```
+It deliberately does two things by *not* doing them. **It never touches a credential** — `gh`
+already owns yours, and a test-tooling package that asks for a personal access token is a package
+nobody installs; without `gh` it prints the exact manual steps instead of failing. And **it never
+writes a secret into your project's repository**: publishing from CI needs a deploy key in the
+cache repository plus a matching secret in your own, which are two writes to real infrastructure,
+so it prints those steps and a workflow snippet and stops there.
 
-2. **Point the package at it**, in `phpunit-replay.php` at your project root:
+It will also not create a public repository, and there is no flag to make it. The cache stores
+test names, file paths and failure messages, which is source-adjacent.
 
-   ```php
-   return [
-       'remote' => 'https://github.com/your-org/your-project-replay-cache.git',
+If `phpunit-replay.php` already exists it is left byte-identical and the lines to add are printed
+instead — a config with `baseline_branches` already tuned must not be clobbered by a setup
+command.
 
-       // Client-side self-restraint, not access control — the repository's own permissions
-       // are what actually enforce this. Developers read; a CI job that publishes sets
-       // PHPUNIT_REPLAY_REMOTE_PUSH itself.
-       'remote_push' => 'off',
-   ];
-   ```
+**Why a dedicated repository is the default.** No infrastructure to run, the same on any forge,
+and the object store is append-only and content-addressed, so concurrent writers cannot conflict.
+`remote:init --same-repo` configures the other supported shape instead — an orphan branch of the
+repository you already have, with nothing to create and no access to grant — and prints the cost
+that keeps it from being the default: a plain `git clone` of your project fetches every branch, so
+the cache lands in the clone of everyone who checks it out. See [that section
+below](#setup-an-orphan-branch-in-the-projects-own-repository-least-setup).
 
-   HTTPS rather than SSH is deliberate for people: it reuses whatever git credential helper each
-   developer already has, so nobody needs a working ssh-agent to *read* the cache. CI overrides it
-   with the SSH URL, because a forge deploy key only works over SSH.
+Two things the command does not decide for you: the team needs read access on the cache
+repository, and CI needs the only write credential. Both are in [the dedicated-repository section
+below](#setup-dedicated-git-repository-recommended-default-when-you-have-neither).
 
-3. **Give CI the only write credential.** A deploy key with write access on the cache repository,
-   and the team read access. [Full steps below.](#setup-dedicated-git-repository-recommended-default-when-you-have-neither)
-
-4. **Run it once and check.** `phpunit-replay status` prints the remote and whether it is
-   reachable; a `run` that finds nothing yet simply records, and the next machine inherits it.
-
-Everything below is either the detail of those four steps, or one of the five other shapes — a
+Everything below is either the detail of what that command set up, or one of the five other shapes — a
 shared folder, HTTP object storage, an orphan branch of the repository you already have, CI
 artifacts, or nothing at all. **None of them is required**: the package works fully locally with
 `remote` left at `null`.

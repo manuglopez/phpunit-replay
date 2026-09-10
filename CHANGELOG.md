@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+- **New: `phpunit-replay remote:init` — sharing the cache stops being a document you read.** Every remote shape worked and every one of them needed a manual setup a user had to find, read and translate, which is where adoption dies. The command reads the project's `origin`, proposes a **private** cache repository beside it named `<project>-replay-cache` (from origin's repository name, never the working directory's), creates it through `gh` when `gh` is authenticated, publishes a probe object and reads it back **from a separate clone** to prove the round trip works, and writes `phpunit-replay.php`. `--dry-run` prints every action and takes none.
+
+  Two things it does deliberately by not doing them. **It never touches a credential:** `gh` already owns the user's, and a test-tooling package that asks for a personal access token is a package nobody installs — without `gh` it prints the exact manual steps rather than failing, because someone who created the repository by hand still wants the rest. And **it never writes a secret into the project's repository:** publishing from CI needs a deploy key in the cache repository plus a matching secret in the project's own, which are two writes to real infrastructure, so it prints the steps and a workflow snippet and stops.
+
+  It will not create a public repository and there is no flag to make it, because the cache stores test names, file paths and failure messages. An existing `phpunit-replay.php` is left byte-identical and the lines to add are printed instead — a config with `baseline_branches` already tuned must not be clobbered by a setup command. `--same-repo` configures the orphan-branch shape (`docs/DECISIONS.md` D-045) and prints the clone-size cost in its own output rather than leaving it in a document; it refuses a `--branch` that is the checked-out or default branch, since the probe would otherwise push a commit onto a code branch.
+
+  `docs/sharing-the-cache.md` now opens on this command instead of on a six-option comparison table.
+
+  **Known gap, pinned rather than closed:** `--name value` as two tokens is not recognised, only `--name=value`. `Console\Application`'s argv pre-splitter recognises a value-taking option only with its value attached by `=`, and the same already holds for `run --log-junit` and `prune --keep-months`; closing it changes shared argv behaviour and belongs in its own change.
+
 ## [0.9.0] — 2026-09-11
 
 A shared cache could serve a result recorded under a different PHP minor or a different OS, and every developer's local read-through mirror grew without bound because nothing ever collected it. Both are closed by the same change, and the design record is `docs/proposals/remote-layout.md`.

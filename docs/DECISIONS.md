@@ -266,3 +266,7 @@ out, including people who never use this package.** Not opt-in, and bounded only
 the same-repo orphan branch is documented as the low-setup option with that cost stated. Nothing
 in the code needs to change for it: `remote_branch` has always existed, and no guard rejects a
 remote URL equal to `origin`.
+
+`remote:init --same-repo` implements this shape, and prints the clone-size cost in its own
+output rather than leaving it in a document — a setup command that hides the one reason not to
+use what it just configured is worse than no command.

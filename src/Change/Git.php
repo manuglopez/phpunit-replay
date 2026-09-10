@@ -158,6 +158,21 @@ final readonly class Git
         return $this->output(['remote']) !== null;
     }
 
+    /**
+     * The URL configured for the `origin` remote, or null when there is no `origin` (no remote
+     * at all, or one under a different name).
+     *
+     * Deliberately `config --get` rather than `remote get-url`: the latter expands
+     * `url.<base>.insteadOf` rewrites, and what
+     * {@see \Manuglopez\Replay\Cache\ProjectKey::originIdentity()} hashes into the shared cache's
+     * project key is the literal config value — so `remote:init`, which prints that identity and
+     * proposes a sibling URL from the same string, has to read the same one.
+     */
+    public function originUrl(): ?string
+    {
+        return $this->output(['config', '--get', 'remote.origin.url']);
+    }
+
     public function show(string $sha, string $path): ?string
     {
         return $this->raw(['show', $sha.':'.$path]);

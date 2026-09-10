@@ -243,6 +243,51 @@ four figures it reports are explained in the [README](../README.md#keeping-the-c
 `push` publishes cached objects; `push --graph` also publishes the branch baseline. `pull` fetches
 the branch baseline from the remote and stores it locally.
 
+### `remote:init`
+
+One-shot setup of the shared remote cache: derives a cache repository from the project's
+`origin`, creates it (private) when it can, **proves a round trip through it**, writes
+`phpunit-replay.php` when the project has none, and prints what CI still needs. Background and
+the manual equivalent: [sharing-the-cache.md](sharing-the-cache.md).
+
+| Option | Effect |
+|---|---|
+| `--name=NAME` | Cache repository name. Default: origin's repository name + `-replay-cache` — derived from `origin`, never from the checkout directory, so two developers who cloned into differently named directories land on the same repository. |
+| `--owner=OWNER` | Owner or namespace for it. Default: origin's own. |
+| `--branch=BRANCH` | Branch of the cache repository that holds the objects. Default `main`; `phpunit-replay-cache` with `--same-repo`. |
+| `--same-repo` | Keep the cache on an orphan branch of the project's *own* repository instead of a dedicated one: nothing to create and no access to grant. The cost, printed in the output rather than buried here, is that a plain `git clone` of the project fetches every branch, so the cache lands in every checkout — including those of people who never use this package. A dedicated repository stays the recommendation. |
+| `--no-create` | Assume the cache repository already exists; never try to create it. |
+| `--dry-run` | Print every action and take none: nothing is contacted, created, pushed or written. |
+
+Like every other value-taking option in this CLI (`run --log-junit=`, `prune --keep-months=`),
+these attach their value with `=` — `--branch=main`, not `--branch main`.
+
+With `--same-repo`, a `--branch` naming the checked-out branch or the project's default branch is
+refused (exit `2`): the cache branch receives cache commits, so it has to be one that holds
+nothing else. The default, `phpunit-replay-cache`, is created as an orphan branch by the first
+push and shares no history with your code.
+
+**Always private.** The cache stores test names, file paths and failure messages, which is
+source-adjacent. There is no `--public`; passing one is refused and exits `2`.
+
+**No credential passes through the command.** No token is asked for, read or stored: creating the
+repository is delegated to `gh`, which already holds that credential, and pushing to git, which
+holds the other. When `gh` is absent, unauthenticated, or refused (no write permission in the
+target namespace is the common case), the exact manual steps are printed and the run continues —
+a repository created by hand still wants the probe, the config and the CI notes.
+
+**It writes nothing to your CI.** Publishing from CI needs a deploy key with write access in the
+cache repository plus a matching secret in the project's repository; the command prints those
+steps and a workflow snippet, and performs neither — it generates no keys and sets no secret.
+
+**An existing `phpunit-replay.php` is never edited**, only read for its existence: the lines to
+add are printed instead, so a file that already sets `default_branch` or `baseline_branches`
+cannot be clobbered.
+
+The exit code answers "does it work", not "was it configured": `0` only when the probe object
+actually made the round trip, `1` when it did not — everything else is still reported and
+written, and the backend's own error is printed verbatim.
+
 ### `status`, `explain`, `baseline-path`
 
 No options. `explain` takes one path argument.
