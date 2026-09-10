@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Manuglopez\Replay\PHPUnit\Subscribers;
 
+use Manuglopez\Replay\PHPUnit\TestMethodFile;
 use Manuglopez\Replay\Record\ResultCollector;
 use PHPUnit\Event\Code\TestMethod;
 use PHPUnit\Event\Test\PreparationStarted;
@@ -23,7 +24,13 @@ final readonly class CollectResultOnPreparationStarted implements PreparationSta
         $test = $event->test();
 
         if ($test instanceof TestMethod) {
-            $this->collector->testPrepared($test->id(), $test->file());
+            // The result's stored `file` feeds Cache\GraphUpdater::mergeResults(), which
+            // computes and attaches this test's content key from THAT file's dependency
+            // list (Cache\ContentKey::forTestFile()) — it must be the running class's file
+            // (TestMethodFile::of()), the same one StartRecordingOnPreparationStarted just
+            // opened edges under, or a result would carry a key computed from a different
+            // file's dependencies than the ones actually recorded for it.
+            $this->collector->testPrepared($test->id(), TestMethodFile::of($test));
         }
     }
 }

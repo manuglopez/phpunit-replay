@@ -1,0 +1,19 @@
+{
+    "name": "fixture/abstract-base",
+    "description": "Fixture for the abstract-base test class defect: a shared abstract base declares the test methods, concrete `final` subclasses add none of their own, so every executed method's declaring file (PHPUnit\\Event\\Code\\TestMethod::file()) differs from the file that actually ran it (TestMethod::className()).",
+    "type": "project",
+    "require": {
+        "php": "^8.2"
+    },
+    "autoload": {
+        "psr-4": {
+            "App\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "App\\Tests\\": "tests/"
+        }
+    },
+    "minimum-stability": "stable"
+}

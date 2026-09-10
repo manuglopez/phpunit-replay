@@ -58,7 +58,7 @@ final class FingerprintTest extends TestCase
         $fingerprint = Fingerprint::compute($this->repo->root, 'pcov', false);
 
         self::assertSame(
-            ['schema', 'edges_exclude_ignored', 'composer_lock', 'phpunit_xml', 'phpunit_xml_dist', 'replay_config'],
+            ['schema', 'edges_exclude_ignored', 'edges_by_running_class', 'composer_lock', 'phpunit_xml', 'phpunit_xml_dist', 'replay_config'],
             array_keys($fingerprint['structural']),
         );
         self::assertSame(Fingerprint::SCHEMA_VERSION, $fingerprint['structural']['schema']);
@@ -94,6 +94,36 @@ final class FingerprintTest extends TestCase
         $current = Fingerprint::compute($this->repo->root, 'pcov', false);
 
         self::assertSame(['edges_exclude_ignored'], Fingerprint::structuralDrift($stored, $current));
+        self::assertFalse(Fingerprint::structuralMatches($stored, $current));
+    }
+
+    /**
+     * `edges_by_running_class` (Fingerprint's own class docblock): unconditional, exactly
+     * like `edges_exclude_ignored` above and for the same kind of reason — it describes this
+     * package's own edge-attribution behaviour (a test method inherited from an abstract base
+     * now credits the concrete, running class's file), not a project opt-in.
+     */
+    public function testEdgesByRunningClassIsAlwaysPresentAndTrue(): void
+    {
+        self::assertTrue(Fingerprint::compute($this->repo->root, 'pcov', false)['structural']['edges_by_running_class']);
+        self::assertTrue(Fingerprint::compute($this->repo->root, 'xdebug', true)['structural']['edges_by_running_class']);
+        self::assertTrue(Fingerprint::compute($this->repo->root, 'none', false)['structural']['edges_by_running_class']);
+    }
+
+    /**
+     * Same one-time invalidation `edges_exclude_ignored` forces, named separately: a graph
+     * recorded before this key existed has abstract-base-declared test methods' edges under
+     * the wrong file entirely, and `structuralDrift()` must name it so a fresh record is not
+     * an unexplained full discard.
+     */
+    public function testAnOldFingerprintMissingTheEdgesByRunningClassKeyIsNamedStructuralDrift(): void
+    {
+        $stored = Fingerprint::compute($this->repo->root, 'pcov', false);
+        unset($stored['structural']['edges_by_running_class']);
+
+        $current = Fingerprint::compute($this->repo->root, 'pcov', false);
+
+        self::assertSame(['edges_by_running_class'], Fingerprint::structuralDrift($stored, $current));
         self::assertFalse(Fingerprint::structuralMatches($stored, $current));
     }
 

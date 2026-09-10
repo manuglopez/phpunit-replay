@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Manuglopez\Replay\PHPUnit\Subscribers;
 
 use Manuglopez\Replay\Attributes\NotCacheable;
+use Manuglopez\Replay\PHPUnit\TestMethodFile;
 use Manuglopez\Replay\Record\NotCacheableCollector;
 use Manuglopez\Replay\Support\Paths;
 use PHPUnit\Event\Code\TestMethod;
@@ -43,7 +44,14 @@ final readonly class RecordNotCacheableOnPreparationStarted implements Preparati
         }
 
         if ($class->getAttributes(NotCacheable::class) !== []) {
-            $rel = Paths::relative($this->projectRoot, $test->file());
+            // The running class's file (TestMethodFile::of()), not $test->file(): this
+            // marks a FILE not-cacheable, and the file a future pass checks that marker
+            // against (Cache\Graph::isNotCacheable(), Select\RunListBuilder::build()) is
+            // always the concrete class that runs, never an abstract base it inherited the
+            // attribute from — reflection does not see an inherited class attribute in the
+            // first place ($class here is already the concrete class), so this only
+            // matters when the attribute sits on the concrete class itself.
+            $rel = Paths::relative($this->projectRoot, TestMethodFile::of($test));
 
             if ($rel !== null) {
                 $this->collector->add($rel);
