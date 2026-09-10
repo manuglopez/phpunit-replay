@@ -27,11 +27,14 @@ use SplFileInfo;
  * observed in practice as a flaky "unresolved rebase conflict outside graph/**" on CI,
  * depending on git's version and exactly how each client's history happened to diverge.
  * Instead, {@see self::adoptFetchedHistory()} adopts whatever is upstream wholesale
- * (`git reset --hard FETCH_HEAD`) and re-writes every key THIS run's {@see self::put()}
- * calls buffered on top of it, then commits and retries the push. This never needs to
+ * (`git reset --hard FETCH_HEAD`) and replays THIS run's own changes on top of it: every key
+ * {@see self::put()} buffered is re-written, and every key {@see self::delete()} tombstoned
+ * is re-removed — the reset would otherwise silently restore a file this run deleted, right
+ * back to whatever upstream still had, exactly as it restores a write. This never needs to
  * reconcile anything path-by-path: objects are content-addressed and append-only (writing
- * one again is a harmless no-op) and `graph/**` is "ours wins" by construction, since our
- * own buffered write simply overwrites it again after adopting upstream.
+ * one again is a harmless no-op, and removing one already gone is too) and `graph/**` is
+ * "ours wins" by construction, since our own buffered write simply overwrites it again after
+ * adopting upstream.
  *
  * Accepted URL forms: `git+ssh://…`, `git+https://…` (the `git+` prefix is stripped before
  * being handed to git), plain `ssh://…`, the scp-like `git@host:path.git`, `https://….git`,
@@ -70,6 +73,31 @@ final class GitRemoteCache implements RemoteCache
      * @var array<string, string>
      */
     private array $buffer = [];
+
+    /**
+     * Bug fix: every key {@see self::delete()} removed during this run. A deletion used to
+     * be recorded nowhere but the mirror's working tree, so a rejected push's `git reset
+     * --hard FETCH_HEAD` (see {@see self::adoptFetchedHistory()}) silently restored the file
+     * exactly as upstream still had it, the retried push then had nothing left to remove, and
+     * `end()` reported success — deleting nothing while claiming to have deleted something.
+     * `adoptFetchedHistory()` now re-unlinks every key here after the reset, the same way it
+     * already re-writes every key in {@see self::$buffer}.
+     *
+     * A key is tombstoned even when {@see self::delete()} finds nothing to unlink locally:
+     * this mirror is only ever as fresh as its last `begin()` (up to `remoteRefreshSeconds`
+     * stale by design), so a key that is genuinely absent from THIS working tree may still
+     * exist upstream, unfetched. Recording the tombstone regardless means that if a later
+     * reset in this same run lands on a newer upstream tip that turns out to have had it all
+     * along, it is still removed rather than quietly adopted.
+     *
+     * {@see self::put()} and {@see self::delete()} for the same key cancel each other's entry
+     * here and in {@see self::$buffer} — a key can never be in both at once, so whichever of
+     * the two calls happened last on this instance is what {@see self::adoptFetchedHistory()}
+     * replays.
+     *
+     * @var array<string, true>
+     */
+    private array $tombstones = [];
 
     public function __construct(
         string $url,
@@ -141,6 +169,7 @@ final class GitRemoteCache implements RemoteCache
             $this->releaseLock($handle);
             $this->dirty = false;
             $this->buffer = [];
+            $this->tombstones = [];
         }
     }
 
@@ -154,6 +183,9 @@ final class GitRemoteCache implements RemoteCache
         if (AtomicFile::write($this->pathFor($key), $body)) {
             $this->dirty = true;
             $this->buffer[$key] = $body;
+            // Cancels a tombstone from an earlier delete() of this same key on this same
+            // instance: the key is being written, not removed (see self::$tombstones).
+            unset($this->tombstones[$key]);
 
             return true;
         }
@@ -213,11 +245,22 @@ final class GitRemoteCache implements RemoteCache
         $path = $this->pathFor($key);
 
         if (! is_file($path)) {
+            // Already absent locally is still success (idempotent, content-addressed store),
+            // but tombstoned anyway: see self::$tombstones for why an absent-here key is not
+            // necessarily absent upstream.
+            unset($this->buffer[$key]);
+            $this->tombstones[$key] = true;
+
             return true;
         }
 
         if (@unlink($path)) {
             $this->dirty = true;
+            // Cancels a buffered put() of this same key on this same instance: the key is
+            // being removed, not written, so the reset must not bring it back on top of the
+            // very tombstone that is about to remove it (see self::$tombstones).
+            unset($this->buffer[$key]);
+            $this->tombstones[$key] = true;
 
             return true;
         }
@@ -375,7 +418,7 @@ final class GitRemoteCache implements RemoteCache
             $attempts++;
 
             // Never rebase (see the class docblock): adopt whatever is upstream now and
-            // re-write this run's own buffered keys on top of it, then commit and retry.
+            // replay this run's own writes and deletions on top of it, then commit and retry.
             $fetch = $git->result(['fetch', '--depth', '1', 'origin', $this->branch]);
 
             if ($fetch['exitCode'] !== 0) {
@@ -393,11 +436,14 @@ final class GitRemoteCache implements RemoteCache
 
     /**
      * Adopts whatever `FETCH_HEAD` now holds wholesale (`git reset --hard`, discarding
-     * whatever this mirror had committed or staged for the same paths) and re-writes every
-     * key {@see self::put()} buffered during this run on top of it — objects are
-     * content-addressed and append-only (re-writing one is a no-op) and `graph/**` is "ours
-     * wins" by construction, since our own write simply overwrites it again. The caller
-     * commits the result ({@see self::commitStagedChanges()}) and retries the push.
+     * whatever this mirror had committed or staged for the same paths), then replays this
+     * run's own changes on top of it: every key {@see self::put()} buffered is re-written,
+     * and every key {@see self::delete()} tombstoned is re-removed. A key is never in both
+     * ({@see self::$tombstones}'s docblock), so the two loops cannot fight over it — objects
+     * are content-addressed and append-only (re-writing one is a no-op, re-removing an
+     * already-gone one is too) and `graph/**` is "ours wins" by construction, since our own
+     * write simply overwrites it again. The caller commits the result
+     * ({@see self::commitStagedChanges()}) and retries the push.
      */
     private function adoptFetchedHistory(Git $git): void
     {
@@ -405,6 +451,10 @@ final class GitRemoteCache implements RemoteCache
 
         foreach ($this->buffer as $key => $body) {
             AtomicFile::write($this->pathFor($key), $body);
+        }
+
+        foreach (array_keys($this->tombstones) as $key) {
+            @unlink($this->pathFor($key));
         }
     }
 
