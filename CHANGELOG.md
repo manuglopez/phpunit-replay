@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.1] — 2026-09-10
+
+One fix, found while verifying the 0.8.0 upgrade in a consuming project: `vendor/bin/phpunit-replay --version` reported `0.1.0-dev`.
+
+- **Fix: the package misreported its own version, and stamped that wrong version into every graph it ever wrote.** `Version::ID` was a hand-written constant with a docblock reading "Bumped by hand until releases are automated". It was never bumped — it still read `0.1.0-dev` in v0.8.0, eight releases after it was written.
+
+  It has two consumers, and only the first is cosmetic. `Console\Application` passes it as the CLI's version, so `--version` lied. But `Cache\Graph::encode()` writes `"generator": "manuglopez/phpunit-replay " . Version::ID` into **every graph file**, including every graph published to a shared remote cache — so the provenance field of every baseline in existence claims a generator that did not write it. That field exists to answer "which version recorded this baseline?", which is precisely the question asked once a graph turns out to be contaminated, and 0.8.0 shipped on exactly that premise.
+
+  **The fix does not bump the constant, it removes it.** `Version::id()` now returns `Composer\InstalledVersions::getPrettyVersion('manuglopez/phpunit-replay')` verbatim — `v0.8.1` installed as a dependency, `dev-main` in a checkout of this repository — and `Version::UNKNOWN` (`'unknown'`, deliberately not digit-shaped) when Composer's runtime map cannot describe the package. A hand-maintained fallback would be the same fallback that was forgotten eight times. `composer-runtime-api: ^2.0` is now declared in `require`, which is what using that API calls for; `class_exists()` and an `OutOfBoundsException` catch still cover a hand-assembled vendor tree or a PHAR.
+
+  `getReference()` is deliberately not appended. For the *root* package Composer reports the reference recorded when the autoloader was last dumped rather than the working tree's HEAD — verified: it answered a commit four ahead of HEAD — so it is stale exactly where a commit id would be the only useful part.
+
+  **No cache is invalidated.** `generator` is written but never read back, and the version is not part of the fingerprint (`Cache\Fingerprint` carries `schema`, which is unchanged). Graphs recorded before this release keep working; they simply keep their inaccurate `generator` string, which nothing consumes. Every graph written from here on carries a truthful one.
+
 ## [0.8.0] — 2026-09-10
 
 Two correctness fixes, both found by installing the package in a second real project whose

@@ -108,7 +108,7 @@ final class Application extends BaseApplication
 
     public function __construct()
     {
-        parent::__construct('phpunit-replay', Version::ID);
+        parent::__construct('phpunit-replay', Version::id());
 
         foreach (self::ownCommands() as $command) {
             $this->addCommand($command);
