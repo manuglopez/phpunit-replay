@@ -1067,7 +1067,7 @@ final class Graph
 
         $payload = [
             'schema' => self::SCHEMA,
-            'generator' => 'manuglopez/phpunit-replay ' . Version::ID,
+            'generator' => 'manuglopez/phpunit-replay ' . Version::id(),
             'fingerprint' => $this->fingerprint,
             'files' => $sortedFiles,
             'edges' => $edges,

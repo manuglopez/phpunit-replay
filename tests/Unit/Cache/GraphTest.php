@@ -691,7 +691,7 @@ final class GraphTest extends TestCase
         self::assertSame('deadbeef', $encodedResult['k']);
         self::assertTrue($raw['baselines']['main']['complete']);
         self::assertSame(['tests/Feature/ExternalTest.php'], $raw['not_cacheable']);
-        self::assertSame('manuglopez/phpunit-replay ' . Version::ID, $raw['generator']);
+        self::assertSame('manuglopez/phpunit-replay ' . Version::id(), $raw['generator']);
 
         $decoded = Graph::decode($json, $this->root);
         self::assertNotNull($decoded);
