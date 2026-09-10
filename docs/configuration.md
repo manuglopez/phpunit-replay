@@ -94,13 +94,20 @@ Developers lose nothing by `off`: they read the graph and every object, a new te
 executes for real locally (it is new to the graph), the PR job publishes its result, and from then
 on the team replays it.
 
-**Why homogeneous writers matter.** A content key is built from the *structural* fingerprint only.
-PHP's version, the coverage driver and the OS live in the *environmental* bucket, which is
-deliberately excluded from the key — and a remote object is adopted on a key match without
-re-checking them. So an object recorded under PHP 8.2 + Xdebug is replayable by a machine on
-PHP 8.4 + pcov. Local recordings are safe (environmental drift discards them), but that protection
-does not reach remote adoption. Let developer machines publish only when their environment matches
-CI's.
+**Why homogeneous writers matter.** A content key is built from the *structural* fingerprint plus
+the part of the environment that can change a test's outcome — PHP `MAJOR.MINOR` and the OS
+family (`Cache\Fingerprint::canonicalResultEnvironment()`). A remote object is adopted on a key
+match, and nothing re-checks the environment afterwards, so those two keys have to be in the
+address: without them an object recorded under PHP 8.2 would be replayable by a machine on
+PHP 8.4, which local recordings are protected from (environmental drift discards them) but
+adopted ones are not.
+
+What that leaves is a hit-rate question rather than a correctness one. Two machines that differ
+only in coverage driver still share their cache — deliberately, since a driver decides which
+lines are *reported*, not whether an assertion passed. Two machines on different PHP minors, or
+different operating systems, now share nothing at all: a writer whose environment does not match
+the readers' publishes objects nobody can address. Let developer machines publish only when
+their environment matches CI's.
 
 ### Baselines
 

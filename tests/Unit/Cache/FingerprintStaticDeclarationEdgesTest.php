@@ -49,8 +49,10 @@ final class FingerprintStaticDeclarationEdgesTest extends TestCase
     #[Test]
     public function with_the_flag_off_the_content_key_material_is_byte_identical(): void
     {
-        // Cache\ContentKey hashes exactly this string. If it moved, every cached key on
-        // every machine in the world would be invalidated by upgrading. It DID move twice,
+        // Cache\ContentKey hashes exactly this string as the structural segment of its
+        // material (`Fingerprint::canonicalResultEnvironment()` contributes the second
+        // segment). If it moved, every cached key on every machine in the world would be
+        // invalidated by upgrading. It DID move twice,
         // deliberately: for `edges_exclude_ignored` (Fingerprint's own class docblock,
         // "edges_exclude_ignored" section) — a graph is contaminated by definition once an
         // edge can point at a file git ignores, so every graph on every machine had to be
