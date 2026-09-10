@@ -705,6 +705,34 @@ final class Graph
         }
     }
 
+    /**
+     * Every content key ({@see \Manuglopez\Replay\Cache\ContentKey}) any baseline this graph
+     * holds recorded a result under — deduplicated across EVERY branch, not only the current
+     * one, so switching branches never discards what another branch's baseline still needs.
+     * This is the complete set of remote objects this machine can still address
+     * (docs/proposals/remote-layout.md): anything mirrored locally under a key outside this
+     * set is provably from a generation this machine can no longer compute, never merely
+     * "not seen yet".
+     *
+     * @return list<string>
+     */
+    public function addressableKeys(): array
+    {
+        $keys = [];
+
+        foreach ($this->baselines as $baseline) {
+            foreach ($baseline['results'] as $result) {
+                $key = $result['key'] ?? null;
+
+                if (is_string($key) && $key !== '') {
+                    $keys[$key] = true;
+                }
+            }
+        }
+
+        return array_keys($keys);
+    }
+
     /** @return array{files:int, test_files:int, edges:int, branches:int, results:int, tables:int} */
     public function stats(): array
     {

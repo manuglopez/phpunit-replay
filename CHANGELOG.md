@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.0] — 2026-09-10
+
+A shared cache could serve a result recorded under a different PHP minor or a different OS, and every developer's local read-through mirror grew without bound because nothing ever collected it. Both are closed by the same change, and the design record is `docs/proposals/remote-layout.md`.
+
+**Remote objects recorded before this release become unaddressable.** Graphs are not invalidated — `structuralMatches()` is unchanged, so edges and local results survive and keep replaying — but every content key moves, so a machine will not find the previous generation's objects on a remote and will re-record what it needs. The first `prune` after upgrading truncates that generation out of the local mirror.
+
+- **A result's address now carries the part of the environment that can change its outcome.** `Cache\ContentKey` folded only `Fingerprint::canonicalStructural()` into its material, so the environmental half of the fingerprint was excluded from the address — and `RunPipeline::replayFromRemote()` re-checks nothing beyond the key, the object's existence, and whether it holds a status that must be re-run. A result recorded under PHP 8.2 was therefore findable and replayable by a machine on PHP 8.4. Local recordings were never at risk, because environmental drift discards a machine's own results; that protection simply did not extend to what arrives from a remote.
+
+  The new `Fingerprint::canonicalResultEnvironment()` covers `php` (`MAJOR.MINOR`) and `os`, and is deliberately **not** the environmental bucket verbatim. `driver` stays out because a coverage driver changes which lines are *reported*, not whether an assertion passed — and this package's own scripts alternate them (`composer test` is pcov, `composer test:xdebug`), so including it would halve a developer's hit rate daily for no correctness. `coverage` stays out because a remote object carries no coverage snapshot at all; snapshots are local, at `<stateDir>/coverage/<k>.cov`, and are keyed by the test file's own content hash rather than by a content key.
+
+  `php` and `os` remain in the environmental bucket as well, and that redundancy is load-bearing: a graph adopted from another environment still matches structurally, so its **edges** are inherited — correctly, since edges are a property of the tree — while its **results** carry addresses this machine will never compute. `environmentalDrift()` → `clearResults()` is the only thing that removes them.
+
+  This was chosen over scoping the remote object tree by a generation and environment path, which an earlier proposal had recommended. Putting the environment in the address rather than the path is what makes the next item a proof instead of an estimate.
+
+- **`prune` now collects the local read-through mirror, which nothing had ever collected.** Everything read from a remote is mirrored at `<stateDir>/remote/cache/objects/<k>.json`, flat; `--keep-months` existed only on `prune --remote`, which garbage-collects the *remote*. Measured on one populated mirror after a single `composer.lock` change: **726 of 1,452 objects unreachable** — exactly one dead generation, on every developer machine, with no way to remove it. `prune --remote` had always collected the remote by reachability and had simply never applied that rule to its own mirror.
+
+  With the environment in the address, every object a machine can address is by construction from its own environment, so an object recorded elsewhere is *provably* unreachable rather than merely absent from today's graph.
+
+  **Eviction is a truncate, not an unlink**, and needs no change to either code path that reads the mirror. The file does two jobs and each inspects a different part of it: `putObject()` tests `is_file()` for its "already published" marker, and `object()` decodes the contents. A zero-byte file keeps the marker true and fails the decode, so the blocks are freed, nothing is re-published, and the next lookup refetches and refills. `prune --forget-published` unlinks instead, reclaiming the inode at the cost of a redundant `put` — idempotent, because objects are content-addressed and immutable — and is behind a flag because on a client with `remote_push: objects` that re-publication is noise on a shared remote.
+
+- **`prune` also collects `<stateDir>/coverage/`, by a different rule.** Snapshots are keyed by `ContentHash::of()` of the test file itself, not by a content key — a content key additionally needs a `Graph`, which does not exist inside the PHPUnit child process in filtered mode. So a snapshot is live iff its key is the current on-disk content hash of a test file the graph still knows; anything else is stale because the file changed or is gone, and in both cases its key can never be computed again. Nothing had collected these either.
+
+- **`status` reports the mirror**: `mirror: 1452 objects · 726 reachable · 2.4 MB reclaimable`. Answering "how much of this is dead?" previously required reconstructing every baseline's keys by hand.
+
 ## [0.8.1] — 2026-09-10
 
 One fix, found while verifying the 0.8.0 upgrade in a consuming project: `vendor/bin/phpunit-replay --version` reported `0.1.0-dev`.

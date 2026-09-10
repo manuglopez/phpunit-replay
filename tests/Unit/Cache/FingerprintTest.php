@@ -179,6 +179,10 @@ final class FingerprintTest extends TestCase
      * invalidating the dependency EDGES (which are this package's own line maps and are not
      * affected), and `canonicalStructural()` feeds the structural bucket into every content
      * key. Which is also why `SCHEMA_VERSION` was not bumped for it.
+     *
+     * Part of the environmental bucket now feeds the content key as well
+     * (`canonicalResultEnvironment()`), so "not part of the content key input" takes two
+     * assertions rather than one: neither canonical string may name it.
      */
     public function testTheCoverageFormatIsNotPartOfTheContentKeyInput(): void
     {
@@ -186,6 +190,83 @@ final class FingerprintTest extends TestCase
 
         self::assertArrayNotHasKey('coverage', $fingerprint['structural']);
         self::assertStringNotContainsString('coverage', Fingerprint::canonicalStructural($fingerprint));
+        self::assertStringNotContainsString('coverage', Fingerprint::canonicalResultEnvironment($fingerprint));
+    }
+
+    /**
+     * `canonicalResultEnvironment()` answers a narrower question than the bucket it reads:
+     * which part of this machine can change a test's OUTCOME. `php` and `os` can, so they are
+     * in every content key; the driver decides which lines are reported rather than whether an
+     * assertion passed, and the coverage format guards a local snapshot store the address
+     * knows nothing about. Both of those stay in the bucket only, where they clear results
+     * without touching edges.
+     */
+    public function testCanonicalResultEnvironmentCoversPhpAndOsOnly(): void
+    {
+        $fingerprint = Fingerprint::compute($this->repo->root, 'pcov', false);
+
+        self::assertSame(
+            '{"os":"' . PHP_OS_FAMILY . '","php":"' . PHP_MAJOR_VERSION . '.' . PHP_MINOR_VERSION . '"}',
+            Fingerprint::canonicalResultEnvironment($fingerprint),
+        );
+    }
+
+    public function testTheCoverageDriverIsNotPartOfTheContentKeyInput(): void
+    {
+        $pcov = Fingerprint::compute($this->repo->root, 'pcov', false);
+        $xdebug = Fingerprint::compute($this->repo->root, 'xdebug', false);
+
+        self::assertSame(['driver'], Fingerprint::environmentalDrift($pcov, $xdebug));
+        self::assertSame(
+            Fingerprint::canonicalResultEnvironment($pcov),
+            Fingerprint::canonicalResultEnvironment($xdebug),
+        );
+    }
+
+    /**
+     * `php` and `os` are in the address AND in the bucket, and that redundancy is
+     * load-bearing: a graph adopted from a machine they differ on still `structuralMatches()`,
+     * so its edges are inherited while its results carry addresses this machine will never
+     * compute. Environmental drift is the only thing that sweeps those out.
+     */
+    public function testPhpAndOsStillDriftEnvironmentally(): void
+    {
+        $stored = Fingerprint::compute($this->repo->root, 'pcov', false);
+        $current = $stored;
+
+        $stored['environmental']['php'] = '1.0';
+        $stored['environmental']['os'] = 'Haiku';
+
+        self::assertSame(['php', 'os'], Fingerprint::environmentalDrift($stored, $current));
+    }
+
+    public function testCanonicalResultEnvironmentIsDeterministicRegardlessOfKeyOrder(): void
+    {
+        $a = ['environmental' => ['php' => '8.4', 'driver' => 'pcov', 'os' => 'Linux', 'coverage' => 'x']];
+        $b = ['environmental' => ['coverage' => 'x', 'os' => 'Linux', 'driver' => 'pcov', 'php' => '8.4']];
+
+        self::assertSame(
+            Fingerprint::canonicalResultEnvironment($a),
+            Fingerprint::canonicalResultEnvironment($b),
+        );
+        self::assertSame('{"os":"Linux","php":"8.4"}', Fingerprint::canonicalResultEnvironment($a));
+    }
+
+    /**
+     * Every graph.json written before this key existed, plus the malformed ones
+     * `Graph::decode()` tolerates. `bucket()` already answers "no bucket" with an empty array,
+     * and this must not stack a second failure mode on top of it: a key that is missing stays
+     * missing from the canonical string rather than being invented as null.
+     */
+    public function testCanonicalResultEnvironmentToleratesAMissingBucketOrKey(): void
+    {
+        self::assertSame('[]', Fingerprint::canonicalResultEnvironment([]));
+        self::assertSame('[]', Fingerprint::canonicalResultEnvironment(['environmental' => 'not an array']));
+        self::assertSame('[]', Fingerprint::canonicalResultEnvironment(['environmental' => ['driver' => 'pcov']]));
+        self::assertSame(
+            '{"php":"8.2"}',
+            Fingerprint::canonicalResultEnvironment(['environmental' => ['php' => '8.2']]),
+        );
     }
 
     public function testChangingTrackedPhpunitXmlChangesStructuralAndIsReportedByDrift(): void

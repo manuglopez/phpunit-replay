@@ -31,10 +31,35 @@ use Symfony\Component\Process\Process;
  * leaves the dependency edges standing but throws away the recorded outcomes, because those
  * were observed under conditions that no longer hold.
  *
+ * `environmental` is not entirely out of the address, though. The part of it that can change
+ * a test's OUTCOME — `php` and `os` — feeds the content key as well, through
+ * `canonicalResultEnvironment()`, whose docblock argues which keys qualify and why `driver`
+ * and `coverage` do not.
+ *
+ * ## `php` and `os` sit in both halves
+ *
+ * The keys `canonicalResultEnvironment()` names stay in the `environmental` bucket too, and
+ * that redundancy is load-bearing rather than a duplicate waiting to be tidied away. A graph
+ * adopted from another machine still `structuralMatches()`, so its EDGES are inherited —
+ * correctly, since an edge is a property of the tree and not of the machine that observed it
+ * — while its RESULTS carry content keys this machine will now never compute.
+ * `environmentalDrift()` → `Graph::clearResults()` is the only thing that sweeps that dead
+ * weight out of `baselines[<branch>]['results']`; take `php`/`os` out of the bucket and drift
+ * stops firing, so the adopted results stay there forever, unaddressable and unreachable.
+ *
  * `SCHEMA_VERSION` is deliberately NOT the knob for an environmental change: it sits in the
  * structural bucket, `canonicalStructural()` feeds it into every content key, and bumping it
  * therefore discards every graph on every machine. It describes the shape of this array, and
  * only moves when that shape does.
+ *
+ * It was not bumped when `canonicalResultEnvironment()` was folded into the content key
+ * either, and neither was a named structural key added for it. Both exist to force a fresh
+ * record when a graph's edges have become untrustworthy, and this change does not touch what
+ * an edge means: it changes every address at once, so nothing recorded under the old material
+ * can be found, while a graph whose structural bucket is genuinely unchanged rightly keeps
+ * its edges and the results it recorded here itself. The one thing a stale stored key costs
+ * is a single skipped flip check per test (`GraphUpdater::detectFlip()` needs the old and
+ * new keys to match), which is what any address change costs.
  *
  * ## `static_declaration_edges`
  *
@@ -122,6 +147,9 @@ final readonly class Fingerprint
         'replay_config' => 'phpunit-replay.php',
     ];
 
+    /** @var list<string> environmental keys that feed the content key ({@see self::canonicalResultEnvironment()}) */
+    private const RESULT_ENVIRONMENT_KEYS = ['php', 'os'];
+
     /**
      * `$staticDeclarationEdges` has no default on purpose. It used to default to `false`, and
      * inside one diff that omission silently disabled the structural key twice — in
@@ -166,6 +194,11 @@ final readonly class Fingerprint
         return [
             'structural' => $structural,
             'environmental' => [
+                // `php` and `os` are ALSO in every content key
+                // ({@see self::canonicalResultEnvironment()}) and are kept here as well on
+                // purpose: this bucket is what discards the results of a graph adopted from
+                // a machine those two keys differ on, whose addresses this machine can no
+                // longer compute (the class docblock's "`php` and `os` sit in both halves").
                 'php' => PHP_MAJOR_VERSION . '.' . PHP_MINOR_VERSION,
                 'driver' => $driver,
                 'os' => PHP_OS_FAMILY,
@@ -233,6 +266,63 @@ final readonly class Fingerprint
         ksort($structural);
 
         return json_encode($structural, JSON_UNESCAPED_SLASHES) ?: '{}';
+    }
+
+    /**
+     * Canonical JSON of the outcome-relevant subset of the environmental bucket (ksort,
+     * JSON_UNESCAPED_SLASHES) — the second input to the content key, beside
+     * `canonicalStructural()`.
+     *
+     * The question this answers is deliberately narrower than "is this the same machine", and
+     * the method's name is what keeps the two apart: it is *which part of this machine can
+     * change a test's outcome*. Only `php` (`MAJOR.MINOR`) and `os` (`PHP_OS_FAMILY`) can — a
+     * result may legitimately differ across a PHP minor, which is a thing suites exist to
+     * catch, and across an OS by way of path separators, locale and filesystem behaviour — so
+     * those two, and nothing else, are in the address. A key missing from the stored bucket
+     * stays missing from the JSON, exactly as in `canonicalStructural()`; an old graph
+     * recorded before a key existed is addressed by what it does have.
+     *
+     * `driver` is deliberately OUT. Which coverage driver is loaded decides which lines get
+     * *reported*, not whether an assertion passed. This package's own composer scripts
+     * alternate the two (`test` runs under pcov, `test:xdebug` under xdebug) and a project
+     * doing the same would halve its hit rate daily in exchange for no correctness at all.
+     * The residual risk is timing and error handling, which xdebug does change: a
+     * timing-sensitive test could in principle flip. That is traded away knowingly.
+     *
+     * `coverage` ({@see CoverageFormat}) is deliberately OUT for a different reason: it
+     * protects the LOCAL snapshot store and nothing else. Snapshots are written under
+     * `<stateDir>/coverage/` at record time and are never published, so a result adopted from
+     * a remote carries no snapshot for a format mismatch to corrupt — which is why
+     * `Report\CoverageMerger` counts a replayed file with no readable snapshot rather than
+     * trusting one. Discarding the results whose snapshots became unreadable is the whole of
+     * that key's job, and this bucket already does it.
+     *
+     * Why the address rather than one more check: environmental drift only ever discards the
+     * results a machine recorded itself (`RunPipeline::reconcile()` → `Graph::clearResults()`).
+     * Nothing re-checks the environment of a result ADOPTED from a remote cache —
+     * `RunPipeline::replayFromRemote()` weighs the key, the object's existence and whether it
+     * holds a status that forces a re-run, and that is all — so a result recorded under one
+     * PHP minor was findable, and replayable, by a machine on another. Inside the address that
+     * read is unreachable instead of merely unchecked, which is also what makes an object
+     * recorded elsewhere provably collectable rather than just absent from today's graph.
+     *
+     * @param array<string, mixed> $fingerprint
+     */
+    public static function canonicalResultEnvironment(array $fingerprint): string
+    {
+        $environmental = self::bucket($fingerprint, 'environmental');
+
+        $subset = [];
+
+        foreach (self::RESULT_ENVIRONMENT_KEYS as $key) {
+            if (array_key_exists($key, $environmental)) {
+                $subset[$key] = $environmental[$key];
+            }
+        }
+
+        ksort($subset);
+
+        return json_encode($subset, JSON_UNESCAPED_SLASHES) ?: '{}';
     }
 
     /**

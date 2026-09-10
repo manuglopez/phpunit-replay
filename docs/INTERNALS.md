@@ -82,6 +82,13 @@ final readonly class Cache\Fingerprint       // port, structural list per SPEC �
     public static function environmentalDrift(array $stored, array $current): array;
     /** Canonical JSON of the structural bucket (ksort, JSON_UNESCAPED_SLASHES) — input to the content key. */
     public static function canonicalStructural(array $fingerprint): string;
+    /** Canonical JSON of the environmental keys that can change a test's OUTCOME — the content key's second input. */
+    public static function canonicalResultEnvironment(array $fingerprint): string;
+    //   php + os only. driver is out (it decides which lines are REPORTED, not whether an
+    //   assertion passed, and alternating pcov/xdebug must not halve a hit rate); coverage is
+    //   out (it guards the local snapshot store, and a result adopted from a remote carries no
+    //   snapshot). Both stay in the bucket, which is what clears the results of a graph
+    //   adopted from another environment — those addresses can no longer be computed here.
 }
 
 final class Cache\ProjectKey                 // port of Pest Storage::projectKey

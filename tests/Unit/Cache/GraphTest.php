@@ -594,6 +594,34 @@ final class GraphTest extends TestCase
         self::assertArrayHasKey('T3', $own);
     }
 
+    // -- addressable keys --------------------------------------------------------
+
+    public function test_addressable_keys_spans_every_branch_and_deduplicates(): void
+    {
+        $graph = new Graph($this->root);
+        $graph->setDefaultBranch('main');
+
+        $graph->setResult('main', 'T1', $this->makeResult(file: 'tests/FooTest.php', key: 'key-a'));
+        $graph->setResult('main', 'T2', $this->makeResult(file: 'tests/BarTest.php', key: 'key-b'));
+        // A branch that is neither the default nor (in a caller's terms) the one currently
+        // checked out — still counts (docs/proposals/remote-layout.md: "every baseline the
+        // local graph holds, not just the current branch").
+        $graph->setResult('feature', 'T3', $this->makeResult(file: 'tests/BazTest.php', key: 'key-b'));
+        $graph->setResult('feature', 'T4', $this->makeResult(file: 'tests/QuxTest.php', key: 'key-c'));
+        // Never published anywhere (e.g. no remote configured) — contributes nothing.
+        $graph->setResult('feature', 'T5', $this->makeResult(file: 'tests/NoKeyTest.php'));
+
+        $keys = $graph->addressableKeys();
+        sort($keys);
+
+        self::assertSame(['key-a', 'key-b', 'key-c'], $keys);
+    }
+
+    public function test_addressable_keys_is_empty_for_a_fresh_graph(): void
+    {
+        self::assertSame([], (new Graph($this->root))->addressableKeys());
+    }
+
     // -- stats -----------------------------------------------------------------
 
     public function test_stats_reports_expected_counters(): void

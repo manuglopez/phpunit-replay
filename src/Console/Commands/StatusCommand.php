@@ -6,6 +6,7 @@ namespace Manuglopez\Replay\Console\Commands;
 
 use Manuglopez\Replay\Cache\Fingerprint;
 use Manuglopez\Replay\Cache\GraphStore;
+use Manuglopez\Replay\Cache\Remote\ObjectStore;
 use Manuglopez\Replay\Cache\Remote\RemoteCacheFactory;
 use Manuglopez\Replay\Cache\StateDirectory;
 use Manuglopez\Replay\Change\BaselineResolver;
@@ -81,6 +82,13 @@ final class StatusCommand extends Command
         $store = new GraphStore($stateDir, $root);
         $graph = $store->load();
 
+        // Local mirror reachability (docs/proposals/remote-layout.md §6): computed
+        // regardless of whether a baseline exists yet, same as `remote:`/`push:` above —
+        // no graph simply means nothing is addressable, which an all-zero line already
+        // says correctly, with no special case needed.
+        $reachable = $graph !== null ? array_fill_keys($graph->addressableKeys(), true) : [];
+        $mirrorStats = ObjectStore::mirrorStats($stateDir, $reachable);
+
         if ($graph === null) {
             $output->writeln((new StatusReport(
                 root: $root,
@@ -104,6 +112,9 @@ final class StatusCommand extends Command
                 divergence: $divergence,
                 remote: $remoteLine,
                 remotePush: $config->remotePush,
+                mirrorObjects: $mirrorStats['objects'],
+                mirrorReachable: $mirrorStats['reachable'],
+                mirrorReclaimableBytes: $mirrorStats['reclaimableBytes'],
             ))->lines());
 
             return Command::SUCCESS;
@@ -173,6 +184,9 @@ final class StatusCommand extends Command
             divergence: $divergence,
             remote: $remoteLine,
             remotePush: $config->remotePush,
+            mirrorObjects: $mirrorStats['objects'],
+            mirrorReachable: $mirrorStats['reachable'],
+            mirrorReclaimableBytes: $mirrorStats['reclaimableBytes'],
             baseline: $baseline,
         ))->lines());
 
