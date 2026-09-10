@@ -9,7 +9,7 @@ use Manuglopez\Replay\Cache\Remote\ObjectStore;
 use Manuglopez\Replay\Config;
 
 /**
- * Picks the baseline a pass should diff against (DECISIONS.md D-039, docs/INTERNALS.md
+ * Picks the baseline a pass should diff against (docs/DECISIONS.md D-039, docs/INTERNALS.md
  * "Nearest baseline"). A git-flow project has more than one long-lived branch, and the
  * useful baseline for a feature branch cut from `develop` is `develop`, not `main`:
  * diffing against `main` would select every test touched by everything `develop` has

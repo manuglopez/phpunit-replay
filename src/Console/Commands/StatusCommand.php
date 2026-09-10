@@ -122,7 +122,7 @@ final class StatusCommand extends Command
 
         $graph->setDefaultBranch($defaultBranch);
 
-        // DECISIONS.md D-039: which baseline this branch would actually diff against.
+        // docs/DECISIONS.md D-039: which baseline this branch would actually diff against.
         // Resolved locally only — `status` never touches the network.
         $baseline = ($branch !== null && $head !== null)
             ? (new BaselineResolver($git, $graph, null, $config, $defaultBranch))->resolve($branch, $head)
