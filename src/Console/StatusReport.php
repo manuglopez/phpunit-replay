@@ -50,6 +50,10 @@ final readonly class StatusReport
         public ?array $divergence = null,
         public string $remote = 'none',
         public string $remotePush = 'objects',
+        /** {@see \Manuglopez\Replay\Cache\Remote\ObjectStore::mirrorStats()} — computed regardless of `$hasBaseline` (docs/proposals/remote-layout.md §6), same as `$remote`/`$remotePush` above. */
+        public int $mirrorObjects = 0,
+        public int $mirrorReachable = 0,
+        public int $mirrorReclaimableBytes = 0,
         public ?array $baseline = null,
         /**
          * How many of `$graph`'s currently-recorded dependency edges point at a file
@@ -75,6 +79,12 @@ final readonly class StatusReport
             'framework: ' . $this->framework,
             'remote:    ' . $this->remote,
             'push:      ' . $this->remotePush,
+            'mirror:    ' . sprintf(
+                '%d objects · %d reachable · %s reclaimable',
+                $this->mirrorObjects,
+                $this->mirrorReachable,
+                Format::bytes($this->mirrorReclaimableBytes),
+            ),
         ];
 
         $nearest = $this->baseline === null ? null : BaselineResolver::describe($this->baseline, $this->branch ?? '');

@@ -9,11 +9,14 @@ use FilesystemIterator;
 use Manuglopez\Replay\Cache\GraphStore;
 use Manuglopez\Replay\Cache\Remote\GitRemoteCache;
 use Manuglopez\Replay\Cache\Remote\NullRemoteCache;
+use Manuglopez\Replay\Cache\Remote\ObjectStore;
 use Manuglopez\Replay\Cache\Remote\RemoteCacheFactory;
 use Manuglopez\Replay\Cache\StateDirectory;
 use Manuglopez\Replay\Change\Git;
 use Manuglopez\Replay\Config;
 use Manuglopez\Replay\Hermeticity\Quarantine;
+use Manuglopez\Replay\Record\CoverageSnapshots;
+use Manuglopez\Replay\Report\Format;
 use Manuglopez\Replay\Support\Json;
 use RecursiveDirectoryIterator;
 use RecursiveIteratorIterator;
@@ -40,6 +43,7 @@ final class PruneCommand extends Command
             ->addOption('remote', null, InputOption::VALUE_NONE, 'Garbage-collects the configured remote cache instead of the local graph.')
             ->addOption('keep-months', null, InputOption::VALUE_REQUIRED, 'Months of object shards to keep with --remote.', '3')
             ->addOption('squash', null, InputOption::VALUE_NONE, 'With --remote (git backend only): rewrite the remote branch as one orphan commit.')
+            ->addOption('forget-published', null, InputOption::VALUE_NONE, 'Unlinks unreachable local mirror objects instead of truncating them, reclaiming the inode at the cost of a redundant re-publish.')
         ;
     }
 
@@ -61,6 +65,7 @@ final class PruneCommand extends Command
         $branches = $input->getOption('branches') === true;
         $all = $input->getOption('all') === true;
         $staleEdges = $input->getOption('stale-edges') === true;
+        $forgetPublished = $input->getOption('forget-published') === true;
 
         if ($all) {
             foreach (['graph.json', 'flaky.json', 'last-run.json', 'divergence.json'] as $file) {
@@ -138,6 +143,45 @@ final class PruneCommand extends Command
             }
 
             $store->save($graph);
+        }
+
+        // Local mirror + coverage snapshot collection (docs/proposals/remote-layout.md
+        // §§3-6): unconditional for every local prune, independent of the flags above —
+        // none of them bear on which content keys this machine can still address, exactly
+        // like --remote's own reachability sweep runs unconditionally whenever that mode is
+        // selected, --keep-months/--squash only ever changing HOW it runs. Read $graph
+        // AFTER the block above (deliberately, not before it): a branch/test-file/edge this
+        // very run just pruned is already excluded from what counts as reachable, so one
+        // `prune` call cascades correctly instead of leaving a now-dead mirror object for
+        // a second run to notice.
+        $reachable = $graph !== null ? array_fill_keys($graph->addressableKeys(), true) : [];
+        $mirror = ObjectStore::collectMirror($stateDir, $reachable, $forgetPublished);
+
+        if ($mirror['objects'] > 0) {
+            $messages[] = sprintf(
+                'mirror prune: %s %d unreachable object(s) (%s reclaimed), kept %d reachable object(s)',
+                $forgetPublished ? 'unlinked' : 'truncated',
+                $mirror['evicted'],
+                Format::bytes($mirror['reclaimedBytes']),
+                $mirror['reachable'],
+            );
+        }
+
+        // A coverage snapshot's key is a different space from a mirror object's (SPEC.md
+        // §3.2, Record\CoverageSnapshots' own docblock): never stored anywhere, so it is
+        // reproduced fresh from every test file the graph still knows, rather than read off
+        // $reachable above.
+        $testFiles = $graph !== null ? $graph->allTestFiles() : [];
+        $coverageReachable = array_fill_keys(CoverageSnapshots::addressableKeys($testFiles, $root), true);
+        $coverage = (new CoverageSnapshots($stateDir))->collect($coverageReachable);
+
+        if ($coverage['snapshots'] > 0) {
+            $messages[] = sprintf(
+                'coverage prune: unlinked %d unreachable snapshot(s) (%s reclaimed), kept %d reachable snapshot(s)',
+                $coverage['evicted'],
+                Format::bytes($coverage['reclaimedBytes']),
+                $coverage['reachable'],
+            );
         }
 
         if ($messages === []) {

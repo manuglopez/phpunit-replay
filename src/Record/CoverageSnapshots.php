@@ -33,6 +33,12 @@ use SebastianBergmann\CodeCoverage\CodeCoverage;
  * hit maps (11-14.2 store the test ids inline, 14.3 interns them behind an index table), and
  * {@see Snapshot} owns the file shape, which is deliberately no longer a serialized
  * php-code-coverage object. Both are documented on those classes.
+ *
+ * Collection ({@see self::collect()}, docs/proposals/remote-layout.md §5): a snapshot's key
+ * is a DIFFERENT space from {@see \Manuglopez\Replay\Cache\Remote\ObjectStore}'s mirror
+ * (`Cache\ContentKey`, stored in `graph.json`) — it is never stored anywhere, so there is no
+ * set to read; {@see self::addressableKeys()} instead reproduces it fresh, per known test
+ * file, exactly as {@see self::capture()} did originally.
  */
 final class CoverageSnapshots
 {
@@ -90,7 +96,103 @@ final class CoverageSnapshots
     /** `<stateDir>/coverage/<k>.cov`. */
     public function path(string $key): string
     {
-        return rtrim($this->stateDir, '/') . '/coverage/' . $key . '.cov';
+        return $this->root() . '/' . $key . '.cov';
+    }
+
+    /**
+     * The snapshot key of every test file `$testFiles` names, recomputed fresh from disk —
+     * NOT {@see \Manuglopez\Replay\Cache\ContentKey}, which is a different key space keyed
+     * into `graph.json` itself (this class's own docblock): a snapshot's key is never stored
+     * anywhere, so the only way to know which keys are still live is to hash the test files
+     * on disk exactly as {@see self::capture()} did, and exactly as
+     * {@see \Manuglopez\Replay\Console\Runner\RunPipeline::finalizeCoveragePhp()} already does
+     * to find a snapshot back. A file whose content changed hashes to a different key than
+     * whatever snapshot it used to have — that old snapshot can never be addressed again,
+     * permanently, not merely until the next record — and a file that no longer exists
+     * contributes no key at all ({@see \Manuglopez\Replay\Cache\ContentHash::of()} returns
+     * null for it), which is exactly the same "provably unreachable" verdict.
+     *
+     * @param list<string> $testFiles project-relative
+     * @return list<string>
+     */
+    public static function addressableKeys(array $testFiles, string $projectRoot): array
+    {
+        $keys = [];
+
+        foreach ($testFiles as $relative) {
+            $key = ContentHash::of(Paths::join($projectRoot, $relative));
+
+            if ($key !== null) {
+                $keys[$key] = true;
+            }
+        }
+
+        return array_keys($keys);
+    }
+
+    /**
+     * The snapshot store's state against `$reachable`, without changing anything on disk —
+     * what {@see self::collect()} would do (docs/proposals/remote-layout.md §5).
+     *
+     * @param array<string, true> $reachable snapshot keys {@see self::addressableKeys()} produced
+     * @return array{snapshots: int, reachable: int, reclaimableBytes: int}
+     */
+    public function stats(array $reachable): array
+    {
+        $reachableCount = 0;
+        $reclaimable = 0;
+        $entries = $this->scan($reachable);
+
+        foreach ($entries as $entry) {
+            if ($entry['reachable']) {
+                $reachableCount++;
+            } else {
+                $reclaimable += $entry['bytes'];
+            }
+        }
+
+        return [
+            'snapshots' => count($entries),
+            'reachable' => $reachableCount,
+            'reclaimableBytes' => $reclaimable,
+        ];
+    }
+
+    /**
+     * Unlinks every snapshot `$reachable` no longer addresses. Unlike the remote object
+     * mirror ({@see \Manuglopez\Replay\Cache\Remote\ObjectStore::collectMirror()}), a snapshot
+     * carries no "already published" marker to preserve — it is never published anywhere,
+     * only ever read back locally — so there is no reason to truncate rather than unlink.
+     *
+     * @param array<string, true> $reachable snapshot keys {@see self::addressableKeys()} produced
+     * @return array{snapshots: int, reachable: int, evicted: int, reclaimedBytes: int}
+     */
+    public function collect(array $reachable): array
+    {
+        $reachableCount = 0;
+        $evicted = 0;
+        $reclaimed = 0;
+        $entries = $this->scan($reachable);
+
+        foreach ($entries as $entry) {
+            if ($entry['reachable']) {
+                $reachableCount++;
+
+                continue;
+            }
+
+            if (@unlink($entry['path'])) {
+                $evicted++;
+                $reclaimed += $entry['bytes'];
+            }
+        }
+
+        return [
+            'snapshots' => count($entries),
+            'reachable' => $reachableCount,
+            'evicted' => $evicted,
+            'reclaimedBytes' => $reclaimed,
+        ];
     }
 
     /**
@@ -110,5 +212,36 @@ final class CoverageSnapshots
         }
 
         return $out;
+    }
+
+    /**
+     * Every snapshot currently on disk, classified against `$reachable`.
+     *
+     * @param array<string, true> $reachable
+     * @return list<array{key: string, path: string, bytes: int, reachable: bool}>
+     */
+    private function scan(array $reachable): array
+    {
+        $entries = [];
+
+        foreach (glob($this->root() . '/*.cov') ?: [] as $path) {
+            $key = basename($path, '.cov');
+            $bytes = @filesize($path);
+
+            $entries[] = [
+                'key' => $key,
+                'path' => $path,
+                'bytes' => $bytes !== false ? $bytes : 0,
+                'reachable' => isset($reachable[$key]),
+            ];
+        }
+
+        return $entries;
+    }
+
+    /** `<stateDir>/coverage` — the one flat directory {@see self::path()} keys into. */
+    private function root(): string
+    {
+        return rtrim($this->stateDir, '/') . '/coverage';
     }
 }
