@@ -1,16 +1,41 @@
-# Proposal: environment-scoped remote layout
+# Proposal: the environment belongs in the address, not in the path
 
-**Status: proposed, not implemented.** Nothing in the package behaves this way today. This
-document exists so the decisions below get made before code, because they change the remote's
-on-disk layout and that is cheap to change exactly once.
+**Status: accepted, implementation in progress.** This replaces an earlier version of this
+document that proposed scoping the remote object tree by generation and environment
+(`objects/<generation>/<environment>/<yyyy-mm>/<k>.json`). That design is **dropped**. What
+follows closes the same correctness hole with a longer content key instead of a deeper tree,
+and closes a growth problem the path design would have left untouched.
 
-It closes one correctness hole and one operational one, and it is deliberately smaller than the
-"two-part remote object" idea it partly replaces (see [Relationship to the two-part
-object](#relationship-to-the-two-part-object)).
+The earlier version is worth summarising only for why it was wrong, which is the first section.
 
-## The two problems
+## What the path proposal got wrong
 
-### 1. A result can be adopted across environments that cannot compare (correctness)
+It argued that scoping objects by environment was a correctness necessity, and its sharpest
+claim was about coverage:
+
+> A snapshot recorded under one format read back under another is not merely suspect — it is
+> unreadable, and silently counts as missing coverage.
+
+**That danger is real and it is local.** It has nothing to do with remote objects. A remote
+object has exactly three keys, verified against a populated remote holding 1,452 of them:
+
+```json
+{"k": "<content key>", "file": "tests/Unit/…Test.php", "results": {"<test id>": {…}}}
+```
+
+No coverage. Coverage snapshots live at `<stateDir>/coverage/<k>.cov`
+(`Record\CoverageSnapshots::path()`) and are never published — which is also why
+`Report\CoverageMerger` warns `N replayed test file(s) had no readable coverage snapshot` when
+a result is adopted from a remote rather than recorded here. The `coverage` fingerprint key
+protects the *local* snapshot store, exactly as its own comment in `Cache\Fingerprint::compute()`
+says: *"A recorded result is only replayable while its **stored** coverage snapshot is still
+readable."*
+
+So the proposal imported a local concern into a remote argument. With that removed, the
+correctness hole is narrower than it claimed — and, more importantly, a path level is the wrong
+instrument for it.
+
+## The hole that is real
 
 A result's address is built from the **structural** half of the fingerprint only:
 
@@ -19,9 +44,7 @@ A result's address is built from the **structural** half of the fingerprint only
 $material = Fingerprint::canonicalStructural($fingerprint) . $testHash . implode('', $parts);
 ```
 
-The **environmental** half — `php` (MAJOR.MINOR), `driver`, `os`, `coverage` — is deliberately
-excluded (`Cache/Fingerprint.php`, `compute()`). And nothing re-checks it when an object is
-adopted from a remote:
+The environmental half is excluded, and nothing re-checks it when an object is adopted:
 
 ```php
 // src/Console/Runner/RunPipeline.php, replayFromRemote()
@@ -31,215 +54,198 @@ $object = $key === null ? null : $objects->object($key);
 if ($key === null || $object === null || $this->holdsARerun($object['results'])) {
 ```
 
-Key, existence, and whether the result forces a re-run. Nothing else. So a result recorded under
-PHP 8.2 with Xdebug is findable — and replayable — by a machine on PHP 8.4 with pcov.
+Key, existence, and whether the result forces a re-run. Nothing else. Locally this cannot bite —
+environmental drift discards the machine's own results (`reconcile()` → `clearResults()`) — but
+that protection does not extend to what arrives from a remote.
 
-Locally this cannot bite: environmental drift discards the machine's own cached results
-(`reconcile()` → `clearResults()`). That protection does not extend to what is adopted from a
-remote.
+What survives of the risk, key by key, is not uniform, and the difference decides the design.
 
-The `coverage` key makes this sharper than "a result might differ". `CoverageFormat::id()` is in
-the environmental bucket because php-code-coverage changes both the `--coverage-php`
-serialization *and* the shape of the coverage data between majors. A snapshot recorded under one
-format read back under another is not merely suspect — it is unreadable, and silently counts as
-missing coverage.
+## The growth problem the path design would not have touched
 
-### 2. Dead generations accumulate and are expensive to identify (operational)
+Everything read from a remote is mirrored at `<stateDir>/remote/cache/objects/<k>.json`, flat
+(`Cache\Remote\ObjectStore.php:25`, `:304-307`). **Nothing ever collects it.** `keep-months`
+exists only on `prune --remote`, which garbage-collects the *remote*.
 
-Measured on a real cache repository serving one project of ~9,000 tests: after a single
-`composer.lock` change, the remote held **1,452 objects of which 726 were reachable**. The
-structural fingerprint changed, so every content key changed, and the previous generation became
-unaddressable but not deleted. Repository size went from 7 MB to 14 MB.
+Measured on one project's mirror after a single `composer.lock` change — the local `graph.json`'s
+addressable keys against the mirror's contents:
 
-Every dependency bump adds a full generation. `prune --remote --keep-months=N` does not reclaim
-them until the *month shard* ages out, and it reclaims by walking every object and testing it
-against every baseline's referenced keys:
+| | |
+|---|---|
+| distinct content keys the local graph can address | 726 |
+| objects in the mirror | 1,452 |
+| reachable | 726 |
+| **unreachable, i.e. one dead generation** | **726** |
+| in the graph but never fetched | 0 |
+| mirror size, apparent / allocated | 5,099,022 B / 8.3 MB |
+| of which the dead half | 2.4 MB |
 
-```php
-// src/Console/Commands/PruneCommand.php:188
-foreach ($cache->keys('graph/') as $graphKey) {
-```
+Exactly half dead after one dependency bump, on every developer machine, with no tooling. The
+2.4 MB is small; the shape is not — every bump adds a generation and nothing removes one. The
+3.2 MB gap between apparent and allocated is block overhead from 1,452 small files, which
+matters to how the fix is built.
 
-## Today's layout
+The framing that makes this obvious: **`prune --remote` already collects the remote by
+reachability, and never applies that same rule to its own mirror.** This is an omission, not a
+missing design.
 
-```php
-// src/Cache/Remote/ObjectStore.php:82
-return 'graph/' . $projectKey . '/' . self::slug($branch) . '.json';
-// src/Cache/Remote/ObjectStore.php:87
-return 'objects/' . $shard . '/' . $k . '.json';     // $shard = yyyy-mm
-```
+## The design
 
-## The proposed layout
+### 1. The outcome-relevant environment goes into the content key
 
-```
-graph/<projectKey>/<branch>.json                       ← unchanged
-objects/<generation>/<environment>/<yyyy-mm>/<k>.json  ← two new levels
-```
+Add a `Fingerprint::canonicalResultEnvironment()` beside the existing `canonicalStructural()`,
+and fold it into `ContentKey`'s material. It is deliberately **not** the environmental bucket
+verbatim — it is the part of the environment that can change a test's *outcome*:
 
-Both new levels are short hashes a machine computes locally from state it already has. No
-listing, no extra round trip: a client knows its own generation and environment before it asks
-for anything.
-
-The effect on problem 1 is the point: **a machine only ever reads inside its own environment's
-subtree.** The mismatch stops being something to validate and becomes something unreachable.
-There is no check to forget and no policy to choose.
-
-### Why the graph does not move
-
-The graph holds edges and results. Edges are a property of the tree, not of the machine; results
-are not. The package already draws exactly that line — `structuralDrift()` makes a graph
-unusable, `environmentalDrift()` keeps the edges and discards the results. So the branch baseline
-stays project- and branch-scoped, and a consumer whose environment differs inherits the edges
-(valuable, portable) while `reconcile()` throws away the results (not portable). Scoping objects
-by environment does not make the graph environment-safe; the existing reconcile already does,
-by discarding.
-
-This layout is a directory-level reflection of a rule the code already enforces.
-
-## What goes in each level
-
-### `<environment>`
-
-The environmental bucket, verbatim, as it already exists:
-
-| key | source | why it must separate |
+| key | in the address | why |
 |---|---|---|
-| `php` | `PHP_MAJOR_VERSION.PHP_MINOR_VERSION` | a test's result can legitimately differ across a PHP minor — which is a thing suites exist to catch |
-| `driver` | `pcov` \| `xdebug` | the drivers do not report identical executed lines |
-| `os` | `PHP_OS_FAMILY` | path separators, locale, filesystem behaviour |
-| `coverage` | `CoverageFormat::id()` | a snapshot from another major is unreadable, not just suspect |
+| `php` (`MAJOR.MINOR`) | **yes** | a result can legitimately differ across a PHP minor, which is a thing suites exist to catch |
+| `os` (`PHP_OS_FAMILY`) | **yes** | path separators, locale, filesystem behaviour |
+| `driver` (`pcov` \| `xdebug`) | **no** | it changes which lines are *reported*, not whether an assertion passed. This repository's own scripts alternate them (`composer test` is pcov, `composer test:xdebug`), and a developer doing the same would halve their hit rate daily in exchange for no correctness at all |
+| `coverage` (`CoverageFormat::id()`) | **no** | the object carries no snapshot, per the first section |
 
-`hash('xxh128', canonicalEnvironmental($fingerprint))`, truncated. A `canonicalEnvironmental()`
-alongside the existing `canonicalStructural()` is the whole of the new hashing code.
+There is no digest to size. `canonicalStructural()` is not a hash — it is canonical JSON that
+*contains* hashes — so the environment enters the material the same way, as a whole canonical
+JSON object. JSON objects are self-delimiting, so the concatenation addresses exactly one
+(project, environment) pair with the same collision properties the structural half already had,
+and needs no separator.
 
-### `<generation>`
+**Two notions of "compatible" is normally how correctness bugs get in**, and the earlier version
+of this document said so. The split survives that objection because it is not arbitrary: the
+line is exactly *"can this change the outcome"* versus *"can this change the coverage"*, and the
+two halves already serve different consumers — results and edges. Naming the subset in a method
+whose name says which question it answers is what keeps it honest.
 
-Here there is a real decision, and it is the main thing this document exists to settle. The
-structural bucket today is:
+### 2. `php` and `os` stay in the environmental bucket as well
 
-| key | changes when | in the path? |
+This is addition, not relocation, and the redundancy is load-bearing. A graph adopted from
+another environment still `structuralMatches()`, so its **edges** are inherited — correctly,
+because edges are a property of the tree. But its **results** carry keys this machine will now
+never compute, so they are dead weight inside `baselines[<branch>]['results']`.
+`environmentalDrift()` → `clearResults()` is what removes them. Take `php`/`os` out of the
+bucket and the adopted corpse stays.
+
+### 3. Mirror collection becomes a certainty rather than a heuristic
+
+With the environment in the address, *every object a machine can address is by construction from
+its own environment*. So:
+
+- an object recorded elsewhere has an address this machine will never compute — **provably**
+  unreachable, not merely absent from today's graph;
+- and when the environment does change, every key changes at once, so the whole mirror dies in
+  one step instead of decaying indistinguishably.
+
+That is the whole argument for putting the environment in the key rather than the path: it turns
+eviction from an estimate into a proof. A path level would have given the same correctness and
+none of this.
+
+The one thing keeping the old environment's objects buys is a hit on switching back. With
+`php` + `os` only, switching back means rolling back a PHP upgrade or changing OS — rare enough
+that paying a refetch is right. Had `driver` been in the key, switching back would be every
+`composer test:xdebug`, and keeping both sets would have mattered.
+
+### 4. Eviction is a truncate, not an unlink
+
+The mirror file does two jobs, and each reads a different part of the file:
+
+| role | what it inspects | with a 0-byte file |
 |---|---|---|
-| `schema` | the package's cache schema version bumps | **yes** — a new schema genuinely is a new generation, for everyone at once |
-| `edges_exclude_ignored` | never (unconditionally `true`) | irrelevant either way |
-| `composer_lock` | dependencies change | **yes** — this is the case that motivated the proposal |
-| `phpunit_xml`, `phpunit_xml_dist` | the suite's configuration changes | **yes** — it can change which files are even sources |
-| `replay_config` | `phpunit-replay.php` changes | **questionable — see below** |
-| `static_declaration_edges`, `analysis_rules` | only present when the flag is on | **yes** — the flag changes what an edge means |
+| "already published" marker (`ObjectStore.php:214`) | `is_file($this->mirrorPath($k))` | **true** → still skips re-publishing |
+| read cache (`ObjectStore::object()`) | `decodeObject()` of the contents | **null** → falls through to the remote and refills it |
 
-**The `replay_config` question.** Adding one `watch` glob changes `replay_config`, therefore the
-structural fingerprint, therefore every content key — and under this proposal it would also
-create a whole new generation directory. But a `watch` pattern has nothing to do with whether a
-recorded result is still comparable; it only affects *selection*. Today's coarseness is already
-paid for in key churn; this proposal would additionally pay for it in directory churn.
+Verified in code, not assumed: `Support\AtomicFile::read()` returns `null` only when the file is
+absent or unreadable — on an empty file it returns `''` — and `decodeObject('')` fails at
+`Json::decodeArray()`. So truncation frees the blocks, keeps the marker, and **requires no change
+to either path**. Collection is purely additive.
 
-Two options, and this is a decision, not an oversight:
+Two levels, the second behind a flag:
 
-1. **Use the whole structural bucket.** Generation == "graphs that are mutually usable", which is
-   exactly what `structuralMatches()` already means. Simple, consistent, and one extra generation
-   per config edit.
-2. **Use a narrower subset** (`schema` + `composer_lock` + `phpunit_xml*` + the flag keys) so a
-   config edit does not fork a generation. Cheaper operationally, but it introduces a *second*
-   notion of "compatible" alongside `structuralMatches()`, and two notions of compatibility is
-   how correctness bugs get in.
+| | effect | cost if wrong |
+|---|---|---|
+| `prune` (default) | truncates unaddressable objects | one refetch from the remote |
+| `prune --forget-published` | unlinks, reclaiming the inode | a redundant `put`, idempotent because objects are content-addressed and immutable |
 
-**Recommendation: option 1.** The churn is real but bounded and visible, and one definition of
-compatibility is worth more than a few directories. A narrower key can be introduced later
-without moving anything if the churn turns out to hurt; the reverse is not true.
+The flag exists because on a client with `remote_push: objects` an unlink causes re-publication —
+noise on a shared git repository, never data loss. Losing a marker cannot lose an object: the
+marker is an optimisation, and the invariant it rests on (*mirror present ⟹ object durable in the
+remote*) is only ever established by a successful read or by `confirmPublished()` after a landed
+push.
 
-## What purge becomes
+### 5. `<stateDir>/coverage/<k>.cov` needs a different rule, not the same one
 
-A dead generation stops being a scan and becomes a directory.
+An earlier draft of this document said snapshots are keyed by content key too. **They are not**,
+and the difference matters. `Record\CoverageSnapshots.php:68` keys them by
+`Cache\ContentHash::of()` of the **test file itself**, and the class docblock gives the reason: a
+content key additionally needs a `Graph` for the file's dependencies, which does not exist inside
+the PHPUnit child process in filtered/wrapper mode. A replaying pass can still find the snapshot
+because it re-hashes a file that — for the replay to be valid at all — has not changed.
 
-**The safety rule does not change.** "Dead" is not "old" — it is *"no live branch baseline
-references it"*, exactly what `prune --remote` already enforces. A developer on an older branch
-with an older `composer.lock` resolves to the older generation, and purging it takes their cache
-away. What changes is only the cost of evaluating that rule: compare generation directory names
-against the fingerprints the live baselines carry, instead of walking every object and testing it
-against a set of referenced keys.
+Two consequences, and the first is why this section is short.
 
-This also makes the state legible for the first time. Today "how much of this remote is dead?" is
-answerable only by reconstructing every baseline's keys. After, it is a directory listing — which
-means `status` and `prune --remote --dry-run` can *tell* you, and a machine sitting alone in an
-otherwise-empty generation could be told so, instead of silently finding nothing.
+**Nothing in section 1 orphans a snapshot.** Snapshot keys are content hashes of files, so moving
+every *content key* leaves every snapshot addressable exactly as before. There is no one-time
+local coverage gap on upgrade.
+
+**But the collection rule is its own.** A snapshot is live iff its `k` equals
+`ContentHash::of()` of a test file the graph currently knows, at that file's *current on-disk
+content*. Everything else is stale for one of two permanent reasons: the file changed, so its
+hash changed and the old key can never be computed again; or the file is gone. That is cheaper
+than the mirror's rule rather than harder — no key set to reconstruct from baselines, just the
+known test files hashed as they are now.
+
+`PruneCommand` does not mention snapshots once. The directory does not exist on any state
+directory inspected here, so it is not growing today — but nothing would collect it if it did.
+
+### 6. `status` can finally say what the state is
+
+`mirror: 1452 objects · 726 reachable · 2.4 MB reclaimable`. This is the legibility the path
+proposal claimed for the remote — *"answerable only by reconstructing every baseline's keys"* —
+delivered locally, with no migration, by the same set comparison the collector runs.
+
+It also answers that proposal's open question 3, "a machine cannot tell *nobody has recorded in
+my environment* from *the remote is empty*", from the other side: with the environment in the
+address, an empty result for a populated remote **is** the answer "nobody in your environment",
+and `status` can say so.
 
 ## Costs, stated plainly
 
 | | |
 |---|---|
-| **cross-environment sharing ends** | today a Linux/pcov CI runner and a macOS/Xdebug laptop *do* share results, unsafely. After, never. That is the intent, but a heterogeneous team's hit rate drops, by an amount this document does not measure. It is also the strongest argument for the recommended "only CI writes" posture: with one producing environment, nothing is lost |
-| **more directories** | the same objects, more tree entries. Git handles it, and deleting a subtree is one tree change rather than N blob deletions |
-| **generation churn** | one new generation per structural change, including config edits under the recommended option 1 |
-| **migration** | the path layout changes. No object *format* change, which is the significant saving over the two-part object design — no read-modify-write, no variant collections, writes stay conflict-free immutable files |
+| **cross-environment sharing ends** | intended. But far cheaper than under the path design: a Linux/8.4 CI runner and a Linux/8.4 laptop still share, whichever coverage driver each uses. Only a different OS or a different PHP minor separates them |
+| **every remote object is invalidated once** | the address changes. v0.8.0 has just invalidated every graph for an unrelated reason, so doing this now costs one recording that is already being paid |
+| **hit-rate loss is unmeasured** | inherited from the earlier version and still true. It could be measured by recording the same suite under two PHP minors and counting addressable overlap |
+| **no format change, no path change** | objects keep their three keys and their `objects/<yyyy-mm>/<k>.json` location. Writes stay conflict-free immutable files |
 
 ## Migration
 
-Objects are content-addressed and immutable, so there is no data to transform — only a location
-to change. Three options:
+Objects are content-addressed, so there is nothing to transform — the addresses simply change.
+Drop `objects/` and let the baseline job republish, exactly as before. Graphs are unaffected in
+shape; their `results` are cleared by the environmental drift that the new keys accompany.
 
-1. **Re-seed.** Drop `objects/` and let the baseline job republish. Costs one full recording. The
-   graph is unaffected. Simplest, and cheapest while the number of populated remotes is small.
-2. **Dual read for one release.** Look in the new path, fall back to the old flat path, never
-   write the old one. Then re-seed at leisure. Costs a compatibility branch in `ObjectStore` and
-   the discipline to remove it.
-3. **Move in place.** A one-off command that reads each object, recomputes its destination, and
-   rewrites the tree. Needs listing (see the open questions) and cannot determine the environment
-   an existing object was recorded under — **the information is not stored anywhere**, which is
-   the very hole this proposal closes. So option 3 is impossible for existing objects, not merely
-   expensive.
+## What is dropped, and why it is safe to drop
 
-**Recommendation: option 1**, and do it before there is a second populated remote.
+The path design's second motivation was making dead-generation purge a directory delete instead
+of a full object scan. Weighed against what was actually measured, this does not carry a
+migration:
 
-## Relationship to the two-part object
+- reclaiming space on the git backend is **already implemented** —
+  `prune --remote --squash` force-pushes an orphan commit and clients re-clone on their next
+  `begin()` (`GitRemoteCache.php:242-286`);
+- the scan it would have replaced walks ~1,500 files in a local working tree;
+- and `prune --remote` is not, today, run by anything at all — which is a workflow line, not a
+  layout.
 
-An earlier design proposed moving the dependency list out of the address and into the object
-body, so adoption validates the producer's dependency list against the consumer's tree. That
-design and this one are complementary, not alternatives:
-
-| | closes | cost |
-|---|---|---|
-| **this proposal** | the **correctness** hole: environment | low — paths only |
-| two-part object | the **completeness** hole: a dependency the producer knew about and the consumer's graph never recorded is currently never checked | high — object format |
-
-This proposal also disposes of the two-part design's unresolved problem. With a stable address,
-one address could have several legitimate bodies (different environments, different converging
-dependency lists), forcing a choice between last-write-wins, variant collections inside an
-object, or a second address level. **This proposal *is* that second level**, placed where it
-belongs — so the collision never arises.
-
-Do this first. The two-part object becomes optional rather than necessary.
+A generation level can be added later without moving any object, if a remote ever grows to where
+the scan hurts. The reverse — unwinding a path migration — is not true, which is the reason to
+prefer the key now.
 
 ## Open questions
 
-These are unresolved. Naming them is the point of writing this down.
-
-1. **The HTTP backend cannot list.** `prune --remote` already requires the filesystem or git
-   backend for exactly this reason. Purge-by-generation needs to enumerate generation directories,
-   so on HTTP it gains nothing and the age-based path remains the only option. Either the design
-   accepts a backend-dependent purge story, or `RemoteCache` grows a listing capability that S3
-   can satisfy (it can — prefix listing is native) and a bare WebDAV endpoint may not.
-
-2. **Two GC axes may fight.** The `yyyy-mm` shard exists so age-based collection is cheap. With
-   generations as the unit of purge, is the month shard still carrying weight, or does it just
-   fragment a generation across shards and make "delete this generation" N deletes again? Likely
-   answer: keep it, because a *live* generation still accumulates objects over months and needs
-   age-based trimming within itself. Not verified.
-
-3. **Discovery.** A machine computes its own generation and environment, so it never needs a
-   listing to *read*. But it therefore cannot tell "nobody has ever recorded in my environment"
-   from "the remote is empty" — the two look identical, and the first is worth a warning while
-   the second is not. Needs a cheap probe or an index object, and an index object reintroduces a
-   mutable shared document.
-
-4. **Hit-rate loss is unmeasured.** The claim that ending cross-environment sharing costs a
-   heterogeneous team something is stated but not quantified anywhere. It could be measured by
-   recording the same suite under two environments and counting addressable overlap.
-
-5. **Truncation length.** Both new levels are truncated hashes. `ProjectKey` uses 16 hex
-   characters. A collision between two generations would be a correctness failure, not a cache
-   miss, so the length should be argued rather than copied.
-
-6. **`trackedHash()` returns null for untracked files.** An untracked `phpunit-replay.php` or
-   `phpunit.xml` therefore produces a *different structural fingerprint* on the machine that has
-   it — which under this proposal means a different generation directory, silently. This is
-   already a documented hazard for addresses; the proposal makes it visible as an orphan
-   directory, which is arguably an improvement, but it is not a fix.
+1. **Does `driver` belong out for good?** The claim is that a coverage driver cannot change an
+   assertion's outcome. Xdebug also changes error handling and timing, so a timing-sensitive test
+   could in principle flip. Unmeasured, and deliberately traded away for hit rate.
+2. **Should collection run automatically?** A silent cache eviction is defensible, and
+   `GitRemoteCache` already has automatic maintenance. Starting explicit (`prune` only, reported
+   by `status`) is the conservative order; the reverse is hard to undo.
+3. **The HTTP backend still cannot list.** Irrelevant to mirror collection, which is entirely
+   local, and to remote collection, which already requires the filesystem or git backend. Noted
+   only so it is not rediscovered.
