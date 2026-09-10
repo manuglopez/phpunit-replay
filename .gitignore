@@ -3,5 +3,6 @@
 /.phpunit.cache/
 /.phpunit-replay/
 /build/
+/.claude/worktrees/
 .php-cs-fixer.cache
 .phpunit.result.cache

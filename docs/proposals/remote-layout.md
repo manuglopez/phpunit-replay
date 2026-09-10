@@ -1,6 +1,7 @@
-# Proposal: the environment belongs in the address, not in the path
+# Design record: the environment belongs in the address, not in the path
 
-**Status: implemented.** This replaces an earlier version of this
+**Status: implemented** (v0.9.0; short form in `docs/DECISIONS.md` D-044). The file keeps its
+path because `src/` and `tests/` cite it by section. This replaces an earlier version of this
 document that proposed scoping the remote object tree by generation and environment
 (`objects/<generation>/<environment>/<yyyy-mm>/<k>.json`). That design is **dropped**. What
 follows closes the same correctness hole with a longer content key instead of a deeper tree,

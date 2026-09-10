@@ -324,7 +324,7 @@ final class Graph
     }
 
     /**
-     * DECISIONS.md D-039: the baseline `Change\BaselineResolver` picked as the nearest
+     * docs/DECISIONS.md D-039: the baseline `Change\BaselineResolver` picked as the nearest
      * ancestor of HEAD, consulted for results BEFORE the default branch and AFTER this
      * branch's own baseline.
      *

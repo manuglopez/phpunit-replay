@@ -15,7 +15,7 @@ use SplFileInfo;
 
 /**
  * Remote cache backed by a dedicated (non-code) git repository (SPEC.md §9, docs/INTERNALS.md
- * "GitRemoteCache — automatic maintenance", DECISIONS.md D-038). Keeps a shallow single-branch
+ * "GitRemoteCache — automatic maintenance", docs/DECISIONS.md D-038). Keeps a shallow single-branch
  * mirror on disk under `<stateDir>/remote/git/`; `get`/`has`/`keys`/`delete` read/write that
  * working tree directly, `begin()` refreshes it (clone or fetch+reset) and `end()` commits and
  * pushes whatever was written.

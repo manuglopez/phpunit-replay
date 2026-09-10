@@ -443,7 +443,7 @@ final class RunPipeline
     }
 
     /**
-     * DECISIONS.md D-039: tell the graph which baseline to fall back to before the default
+     * docs/DECISIONS.md D-039: tell the graph which baseline to fall back to before the default
      * branch. Only when it lives on ANOTHER branch — the current branch's own baseline is
      * already the first thing `Graph::results()` reads.
      */

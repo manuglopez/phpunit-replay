@@ -28,7 +28,7 @@ final readonly class Config
     /** @var list<string> */
     private const LARAVEL_MODES = ['auto', 'on', 'off'];
 
-    /** @var list<string> what a pass may publish to the remote (SPEC.md §9, DECISIONS.md D-038) */
+    /** @var list<string> what a pass may publish to the remote (SPEC.md §9, docs/DECISIONS.md D-038) */
     private const REMOTE_PUSH_MODES = ['objects', 'all', 'off'];
 
     /**

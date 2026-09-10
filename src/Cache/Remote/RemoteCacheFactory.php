@@ -54,7 +54,7 @@ final class RemoteCacheFactory
 
     /**
      * `git+ssh://`, `git+https://`, `ssh://`, the scp-like `git@host:org/repo` form, or any
-     * URL whose path ends in `.git` (SPEC.md §9, DECISIONS.md D-038).
+     * URL whose path ends in `.git` (SPEC.md §9, docs/DECISIONS.md D-038).
      */
     public static function looksLikeGit(string $remote): bool
     {
