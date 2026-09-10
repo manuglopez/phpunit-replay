@@ -319,6 +319,154 @@ final class ObjectStoreTest extends TestCase
         self::assertNull($store->graph('develop'));
     }
 
+    /**
+     * The two cases that matter most (docs/proposals/remote-layout.md §4): truncation must
+     * be invisible to both consumers of the mirror file — the "already published" marker
+     * ({@see ObjectStore::putObject()}) and the read cache ({@see ObjectStore::object()}).
+     */
+    public function testCollectMirrorTruncatesAnUnreachableObjectAndPutObjectStillSkipsIt(): void
+    {
+        $store = $this->store();
+        self::assertTrue($store->putObject('deadbeef', 'tests/MoneyTest.php', $this->results()));
+        $store->confirmPublished();
+
+        $path = $store->mirrorPath('deadbeef');
+        $sizeBefore = (int) filesize($path);
+        self::assertGreaterThan(0, $sizeBefore);
+
+        $result = ObjectStore::collectMirror($this->stateDir, [], false);
+
+        self::assertSame(
+            ['objects' => 1, 'reachable' => 0, 'evicted' => 1, 'reclaimedBytes' => $sizeBefore],
+            $result,
+        );
+
+        // Truncated, not unlinked: the marker file survives, empty.
+        self::assertFileExists($path);
+        self::assertSame(0, filesize($path));
+
+        // A fresh store — the next run — reads the very marker putObject() checks: still
+        // there, so the skip check still fires, exactly as the design requires.
+        $nextRun = new ObjectStore($this->backend(), $this->stateDir, 'shop-abc');
+        self::assertFalse(
+            $nextRun->putObject('deadbeef', 'tests/MoneyTest.php', $this->results()),
+            'a truncated (but still present) marker must still make putObject() skip',
+        );
+    }
+
+    public function testAnObjectTruncatedByCollectionRefetchesFromTheRemoteAndRefillsTheMirror(): void
+    {
+        $store = $this->store();
+        self::assertTrue($store->putObject('deadbeef', 'tests/MoneyTest.php', $this->results()));
+        $store->confirmPublished();
+
+        $path = $store->mirrorPath('deadbeef');
+        $originalBody = (string) file_get_contents($path);
+
+        ObjectStore::collectMirror($this->stateDir, [], false);
+        self::assertSame(0, filesize($path));
+
+        // decodeObject('') fails, so object() falls through to the remote exactly like a
+        // first-ever read would, and refills the mirror with the full body.
+        $reader = new ObjectStore($this->backend(), $this->stateDir, 'shop-abc');
+        $object = $reader->object('deadbeef');
+
+        self::assertNotNull($object);
+        self::assertSame('deadbeef', $object['k']);
+        self::assertSame($this->results(), $object['results']);
+
+        self::assertGreaterThan(0, filesize($path));
+        self::assertSame($originalBody, (string) file_get_contents($path));
+    }
+
+    public function testAnAddressableObjectIsLeftByteForByteUntouchedByCollection(): void
+    {
+        $store = $this->store();
+        self::assertTrue($store->putObject('reachablekey', 'tests/MoneyTest.php', $this->results()));
+        self::assertTrue($store->putObject('deadkey', 'tests/MoneyTest.php', $this->results()));
+        $store->confirmPublished();
+
+        $reachablePath = $store->mirrorPath('reachablekey');
+        $deadPath = $store->mirrorPath('deadkey');
+        $originalBody = (string) file_get_contents($reachablePath);
+
+        $result = ObjectStore::collectMirror($this->stateDir, ['reachablekey' => true], false);
+
+        self::assertSame(2, $result['objects']);
+        self::assertSame(1, $result['reachable']);
+        self::assertSame(1, $result['evicted']);
+
+        self::assertSame($originalBody, (string) file_get_contents($reachablePath));
+        self::assertSame(0, filesize($deadPath));
+    }
+
+    public function testForgetPublishedUnlinksAndTheNextPutObjectDoesNotSkip(): void
+    {
+        $store = $this->store();
+        self::assertTrue($store->putObject('deadbeef', 'tests/MoneyTest.php', $this->results()));
+        $store->confirmPublished();
+
+        $path = $store->mirrorPath('deadbeef');
+        self::assertFileExists($path);
+
+        $result = ObjectStore::collectMirror($this->stateDir, [], true);
+
+        self::assertSame(1, $result['evicted']);
+        self::assertFileDoesNotExist($path, '--forget-published unlinks, reclaiming the inode');
+
+        $nextRun = new ObjectStore($this->backend(), $this->stateDir, 'shop-abc');
+        self::assertTrue(
+            $nextRun->putObject('deadbeef', 'tests/MoneyTest.php', $this->results()),
+            'no marker on disk at all: putObject() must not skip',
+        );
+    }
+
+    /** Numeric correctness: what {@see ObjectStore::mirrorStats()} predicts and what {@see ObjectStore::collectMirror()} actually does must agree, before and after. */
+    public function testMirrorStatsAndCollectMirrorReportMatchingCounts(): void
+    {
+        $store = $this->store();
+        self::assertTrue($store->putObject('keep', 'tests/MoneyTest.php', $this->results()));
+        self::assertTrue($store->putObject('gone1', 'tests/MoneyTest.php', $this->results()));
+        self::assertTrue($store->putObject('gone2', 'tests/MoneyTest.php', $this->results()));
+        $store->confirmPublished();
+
+        $sizeGone1 = (int) filesize($store->mirrorPath('gone1'));
+        $sizeGone2 = (int) filesize($store->mirrorPath('gone2'));
+        $reachable = ['keep' => true];
+
+        $stats = ObjectStore::mirrorStats($this->stateDir, $reachable);
+        self::assertSame(
+            ['objects' => 3, 'reachable' => 1, 'reclaimableBytes' => $sizeGone1 + $sizeGone2],
+            $stats,
+        );
+
+        $result = ObjectStore::collectMirror($this->stateDir, $reachable, false);
+        self::assertSame(
+            ['objects' => 3, 'reachable' => 1, 'evicted' => 2, 'reclaimedBytes' => $sizeGone1 + $sizeGone2],
+            $result,
+        );
+
+        // Nothing left to reclaim now that the sweep has run.
+        self::assertSame(
+            ['objects' => 3, 'reachable' => 1, 'reclaimableBytes' => 0],
+            ObjectStore::mirrorStats($this->stateDir, $reachable),
+        );
+    }
+
+    public function testMirrorStatsNeverChangesAnythingOnDisk(): void
+    {
+        $store = $this->store();
+        self::assertTrue($store->putObject('deadbeef', 'tests/MoneyTest.php', $this->results()));
+        $store->confirmPublished();
+
+        $path = $store->mirrorPath('deadbeef');
+        $before = (string) file_get_contents($path);
+
+        ObjectStore::mirrorStats($this->stateDir, []);
+
+        self::assertSame($before, (string) file_get_contents($path));
+    }
+
     /** @return array<string, array{status:int, message:string, time:float, assertions:int, file:string}> */
     private function results(): array
     {

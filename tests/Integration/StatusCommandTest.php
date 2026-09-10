@@ -39,6 +39,7 @@ final class StatusCommandTest extends TestCase
         // running under xdebug alone must not fail an assertion hardcoded to "pcov".
         self::assertStringContainsString(DriverDetector::loadedExtension() ?? 'none', $result['stdout']);
         self::assertStringContainsString('framework: plain', $result['stdout']);
+        self::assertStringContainsString('mirror:    0 objects · 0 reachable · 0 KB reclaimable', $result['stdout']);
         self::assertStringContainsString('no baseline yet', $result['stdout']);
     }
 
@@ -58,6 +59,9 @@ final class StatusCommandTest extends TestCase
         self::assertStringContainsString('complete', $result['stdout']);
         self::assertStringContainsString('35 results', $result['stdout']);
         self::assertStringContainsString('fingerprint:', $result['stdout']);
+        // No remote configured in this fixture, so the mirror this machine can address is
+        // empty regardless of how many results the baseline itself just recorded.
+        self::assertStringContainsString('mirror:    0 objects · 0 reachable · 0 KB reclaimable', $result['stdout']);
         self::assertStringContainsString('quarantined: 0', $result['stdout']);
         self::assertStringNotContainsString('no baseline yet', $result['stdout']);
     }

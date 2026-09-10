@@ -35,6 +35,15 @@ use Manuglopez\Replay\Support\Json;
  * `putObject()`'s own skip check would see the marker and never retry that object again, on
  * any later run. See {@see self::confirmPublished()}, which now owns writing it.
  *
+ * Nothing ever collected that mirror until {@see self::collectMirror()}: every generation a
+ * dependency bump invalidates left its objects behind forever, one flat file each. It is
+ * collected by ADDRESSABILITY rather than age, same as `prune --remote` already collects the
+ * remote itself — a key the local graph's own baselines no longer reference (across every
+ * branch, {@see Graph::addressableKeys()}) is provably unreachable, not merely unseen today
+ * (docs/proposals/remote-layout.md). Collection truncates rather than unlinks by default,
+ * precisely so it never has to touch the marker invariant above — see
+ * {@see self::collectMirror()}'s own docblock.
+ *
  * @phpstan-import-type TestResultArray from Graph
  * @phpstan-type RemoteObject array{k: string, file: string, results: array<string, TestResultArray>}
  */
@@ -304,7 +313,113 @@ final class ObjectStore
     /** `<stateDir>/remote/cache/objects/<k>.json` — the flat local mirror. */
     public function mirrorPath(string $k): string
     {
-        return rtrim($this->stateDir, '/') . '/remote/cache/objects/' . $k . '.json';
+        return self::mirrorRoot($this->stateDir) . '/' . $k . '.json';
+    }
+
+    /** `<stateDir>/remote/cache/objects` — the one flat directory {@see self::mirrorPath()} keys into. */
+    public static function mirrorRoot(string $stateDir): string
+    {
+        return rtrim($stateDir, '/') . '/remote/cache/objects';
+    }
+
+    /**
+     * The local mirror's state against `$reachable`, without changing anything on disk —
+     * what {@see self::collectMirror()} would do, for `status` (docs/proposals/remote-
+     * layout.md §6).
+     *
+     * @param array<string, true> $reachable content keys the local graph can still address
+     * @return array{objects: int, reachable: int, reclaimableBytes: int}
+     */
+    public static function mirrorStats(string $stateDir, array $reachable): array
+    {
+        $reachableCount = 0;
+        $reclaimable = 0;
+        $entries = self::scanMirror($stateDir, $reachable);
+
+        foreach ($entries as $entry) {
+            if ($entry['reachable']) {
+                $reachableCount++;
+            } else {
+                $reclaimable += $entry['bytes'];
+            }
+        }
+
+        return [
+            'objects' => count($entries),
+            'reachable' => $reachableCount,
+            'reclaimableBytes' => $reclaimable,
+        ];
+    }
+
+    /**
+     * Collects every mirrored object `$reachable` no longer addresses (docs/proposals/
+     * remote-layout.md §§2-4): truncated to zero bytes by default, which frees the disk
+     * blocks while leaving {@see self::putObject()}'s "already published" marker intact —
+     * `is_file()` stays true, only the now-empty body makes {@see self::object()} fail
+     * {@see self::decodeObject()} and fall through to the remote, refilling the file exactly
+     * as a first read would have. `$forgetPublished` unlinks instead, reclaiming the inode at
+     * the cost of one redundant, harmless `put` if this machine ever addresses that key again
+     * (objects are content-addressed and append-only) — never data loss, since the marker
+     * this drops is a re-publish optimisation, never the only copy of the object.
+     *
+     * @param array<string, true> $reachable content keys the local graph can still address
+     * @return array{objects: int, reachable: int, evicted: int, reclaimedBytes: int}
+     */
+    public static function collectMirror(string $stateDir, array $reachable, bool $forgetPublished): array
+    {
+        $reachableCount = 0;
+        $evicted = 0;
+        $reclaimed = 0;
+        $entries = self::scanMirror($stateDir, $reachable);
+
+        foreach ($entries as $entry) {
+            if ($entry['reachable']) {
+                $reachableCount++;
+
+                continue;
+            }
+
+            $ok = $forgetPublished ? @unlink($entry['path']) : AtomicFile::write($entry['path'], '');
+
+            if ($ok) {
+                $evicted++;
+                $reclaimed += $entry['bytes'];
+            }
+        }
+
+        return [
+            'objects' => count($entries),
+            'reachable' => $reachableCount,
+            'evicted' => $evicted,
+            'reclaimedBytes' => $reclaimed,
+        ];
+    }
+
+    /**
+     * Every object currently in the local mirror, classified against `$reachable`. The
+     * mirror is flat ({@see self::mirrorRoot()}), so one `glob()` is the whole inventory —
+     * no shard tree to walk, unlike the remote itself.
+     *
+     * @param array<string, true> $reachable
+     * @return list<array{key: string, path: string, bytes: int, reachable: bool}>
+     */
+    private static function scanMirror(string $stateDir, array $reachable): array
+    {
+        $entries = [];
+
+        foreach (glob(self::mirrorRoot($stateDir) . '/*.json') ?: [] as $path) {
+            $key = basename($path, '.json');
+            $bytes = @filesize($path);
+
+            $entries[] = [
+                'key' => $key,
+                'path' => $path,
+                'bytes' => $bytes !== false ? $bytes : 0,
+                'reachable' => isset($reachable[$key]),
+            ];
+        }
+
+        return $entries;
     }
 
     /** The full key of an object in a shard older than the lookback window, when listable. */

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Manuglopez\Replay\Tests\Unit\Record;
 
+use Manuglopez\Replay\Cache\ContentHash;
 use Manuglopez\Replay\Coverage\Snapshot;
 use Manuglopez\Replay\Record\CoverageSnapshots;
 use Manuglopez\Replay\Tests\Support\CoverageFixture;
@@ -155,6 +156,63 @@ final class CoverageSnapshotsTest extends TestCase
         $map = (new CoverageSnapshots($this->stateDir))->capture($results, $coverage, $this->projectRoot);
 
         self::assertSame([], $map);
+    }
+
+    /**
+     * (docs/proposals/remote-layout.md §5): a snapshot's key is never stored anywhere, so
+     * addressableKeys() must reproduce it exactly the way capture() computed it originally
+     * — {@see ContentHash::of()} of the test file itself, nothing else.
+     */
+    #[Test]
+    public function addressable_keys_hashes_known_test_files_fresh_from_disk(): void
+    {
+        $fileA = $this->writeTestFile('tests/ATest.php', 'A');
+        $fileB = $this->writeTestFile('tests/BTest.php', 'B');
+
+        $keys = CoverageSnapshots::addressableKeys(['tests/ATest.php', 'tests/BTest.php'], $this->projectRoot);
+        sort($keys);
+
+        $expected = [ContentHash::of($fileA), ContentHash::of($fileB)];
+        sort($expected);
+
+        self::assertSame($expected, $keys);
+    }
+
+    #[Test]
+    public function addressable_keys_skips_a_test_file_that_no_longer_exists_on_disk(): void
+    {
+        self::assertSame([], CoverageSnapshots::addressableKeys(['tests/GoneTest.php'], $this->projectRoot));
+    }
+
+    #[Test]
+    public function collect_unlinks_unreachable_snapshots_and_leaves_reachable_ones_untouched(): void
+    {
+        $snapshots = new CoverageSnapshots($this->stateDir);
+        TempDir::write($snapshots->path('keep'), 'x');
+        TempDir::write($snapshots->path('gone'), 'yy');
+
+        $result = $snapshots->collect(['keep' => true]);
+
+        self::assertSame(
+            ['snapshots' => 2, 'reachable' => 1, 'evicted' => 1, 'reclaimedBytes' => 2],
+            $result,
+        );
+        self::assertFileExists($snapshots->path('keep'));
+        self::assertFileDoesNotExist($snapshots->path('gone'));
+    }
+
+    #[Test]
+    public function stats_reports_what_collect_would_do_without_changing_anything(): void
+    {
+        $snapshots = new CoverageSnapshots($this->stateDir);
+        TempDir::write($snapshots->path('keep'), 'x');
+        TempDir::write($snapshots->path('gone'), 'yy');
+
+        $stats = $snapshots->stats(['keep' => true]);
+
+        self::assertSame(['snapshots' => 2, 'reachable' => 1, 'reclaimableBytes' => 2], $stats);
+        self::assertFileExists($snapshots->path('keep'));
+        self::assertFileExists($snapshots->path('gone'), 'stats() is read-only');
     }
 
     private function read(string $path): Snapshot
