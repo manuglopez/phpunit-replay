@@ -11,17 +11,17 @@ Nothing here is required. `phpunit-replay` works fully locally with `remote` lef
 default); read this guide when re-recording the same test files on every machine and every CI job
 starts costing more than it's worth.
 
-## The five options, compared
+## The six options, compared
 
-| | Local only | Shared folder (`file://`) | HTTP (S3/MinIO, nginx WebDAV) | Dedicated git repository | CI artifacts |
-|---|---|---|---|---|---|
-| Prerequisites | none | a mounted path all machines can reach (NFS, `rclone mount`, a shared volume) | an HTTP endpoint with GET/PUT/HEAD (S3 presigned URLs, MinIO, nginx with `dav_methods`) | an empty git repo + a deploy key for CI | none — built into GitHub Actions |
-| What's shared | nothing | `objects/**` and, from CI, `graph/**` | same | same, versioned in git history | the whole state directory, keyed by branch |
-| Who writes what (`remote_push`) | — | whoever mounts it; directory permissions are the only enforcement | whoever holds the bearer token; a prefix-scoped policy can split `objects/**` from `graph/**` | whoever holds a write key — per repository, never per path, so give write to CI only | the job that ran `record`/`verify` |
-| Recommended | n/a | developers `off`, CI `objects`, baseline job also `push --graph` | same | same | n/a |
-| Failure behaviour | n/a | remote unreachable → warning to stderr, run continues local-only | same | same — an offline mirror still serves what it has | cache miss → that job does a fresh record |
-| Size / GC | one `graph.json` per machine, no GC needed | grows unbounded; you delete under the mount by hand | same, or use your object store's lifecycle rules | ≈ 1–20 KB per test file per content version, monthly shards; `prune --remote --keep-months=N [--squash]` | governed by GitHub's own cache size/eviction limits |
-| Best for | solo projects, evaluating the package | one office/VPN, or a CI runner class with a persistent disk | teams already running object storage | teams with git/GitHub but no object storage — no infrastructure to run | GitHub-only projects that want zero extra infrastructure |
+| | Local only | Shared folder (`file://`) | HTTP (S3/MinIO, nginx WebDAV) | Dedicated git repository | CI artifacts | Orphan branch in the project repo |
+|---|---|---|---|---|---|---|
+| Prerequisites | none | a mounted path all machines can reach (NFS, `rclone mount`, a shared volume) | an HTTP endpoint with GET/PUT/HEAD (S3 presigned URLs, MinIO, nginx with `dav_methods`) | an empty git repo + a deploy key for CI | none — built into GitHub Actions | **none** — no new repository, no deploy key, no secret |
+| What's shared | nothing | `objects/**` and, from CI, `graph/**` | same | same, versioned in git history | the whole state directory, keyed by branch | same as the dedicated repo, on an orphan branch of the project's own repository |
+| Who writes what (`remote_push`) | — | whoever mounts it; directory permissions are the only enforcement | whoever holds the bearer token; a prefix-scoped policy can split `objects/**` from `graph/**` | whoever holds a write key — per repository, never per path, so give write to CI only | the job that ran `record`/`verify` | whoever can push to the project; in CI, the token the job already has |
+| Recommended | n/a | developers `off`, CI `objects`, baseline job also `push --graph` | same | same | n/a | same |
+| Failure behaviour | n/a | remote unreachable → warning to stderr, run continues local-only | same | same — an offline mirror still serves what it has | cache miss → that job does a fresh record | same |
+| Size / GC | one `graph.json` per machine, no GC needed | grows unbounded; you delete under the mount by hand | same, or use your object store's lifecycle rules | ≈ 1–20 KB per test file per content version, monthly shards; `prune --remote --keep-months=N [--squash]` | governed by GitHub's own cache size/eviction limits | same shards and the same `prune --remote`, but the cache lands in every plain `git clone` of the project, so `--squash` matters more here |
+| Best for | solo projects, evaluating the package | one office/VPN, or a CI runner class with a persistent disk | teams already running object storage | teams with git/GitHub but no object storage — no infrastructure to run | GitHub-only projects that want zero extra infrastructure | small teams who want no setup at all and accept a few MB in everyone's clone |
 
 None of these can ever break your test run. A remote that's down, unreachable, or misconfigured
 always degrades to a warning on stderr and a local-only pass — this is the same rule the rest of
@@ -205,6 +205,67 @@ constantly with real commits.
     `prune --remote --keep-months=3` (the `tia-gc.yml` default) drops shards older than that window
     except for any object still referenced by a current `graph/**` baseline — so the retained
     history stays bounded regardless of how long the project lives.
+
+## Setup: an orphan branch in the project's own repository (least setup)
+
+The dedicated repository above asks two things of you that teams actually stall on: create a
+repository, and give the whole team read access to it. Both disappear if the cache lives on a
+branch of the repository you already have.
+
+```php
+// phpunit-replay.php
+return [
+    // The project's own repository — not a new one.
+    'remote' => 'git@github.com:your-org/your-project.git',
+
+    // A branch name that does NOT exist there. The first push creates it, with no common
+    // ancestor and none of the project's files: an orphan branch.
+    'remote_branch' => 'phpunit-replay-cache',
+
+    'remote_push' => 'off',   // developers read; CI declares itself, as in the section above
+];
+```
+
+Nothing else changes. `remote_branch` has always existed, no code path rejects a remote URL equal
+to `origin`, and the mechanics are the same git backend documented above.
+
+**What happens on the first push.** `establishMirror()` tries `git clone --depth 1
+--single-branch --branch phpunit-replay-cache`, which fails because the branch is not there yet.
+The remote is reachable, so `initMirror()` runs `git init -b phpunit-replay-cache` in the state
+directory and the push creates the branch. It is genuinely orphan — `git merge-base main
+phpunit-replay-cache` prints nothing — and its tree holds only `objects/**` and `graph/**`, never
+a file of yours.
+
+**What it buys.**
+
+| | |
+|---|---|
+| creating a cache repository | nothing to create |
+| granting the team read access | whoever can read the project can read the cache. No provisioning at all |
+| a deploy key for CI | none. A GitHub Actions job writes with the `GITHUB_TOKEN` it already has, given `contents: write` |
+| a secret in the project's repository | none |
+| `origin` must exist | it already does — the URL comes from it |
+
+A consumer that only wants the cache pays nothing for the project's history either: a
+`--single-branch` clone of the cache branch fetches that branch alone.
+
+**What it costs, and why this is not the recommended default.** A plain `git clone` of the project
+fetches *every* branch, so the cache lands in the clone of everyone who checks the project out —
+including people who never run this package. That is not opt-in, and it is bounded only if
+someone actually runs `prune --remote --squash`, which rewrites the branch as a single orphan
+commit and keeps the cost to the live generation instead of one generation per dependency bump.
+
+So weigh it like this:
+
+- **A small team, one repository, a few MB in each clone is noise** → this is the cheapest thing
+  in this document, by a distance.
+- **A repository whose clone size people already complain about, or a policy against unexpected
+  branches** → use the dedicated repository above.
+
+Two operational notes. `--squash` force-pushes a branch inside your production repository, so
+name the branch something no protection rule matches and no human will mistake for a release
+branch. And if your CI checks the project out with a full fetch, that job pays for the cache
+branch too — check before assuming it is free there.
 
 ## Git-flow branching (`baseline_branches`)
 

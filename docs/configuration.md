@@ -20,7 +20,7 @@ return [
     'remote' => null,                     // null | 'file:///mnt/replay-cache' | 'https://cache.example.com/replay/' | 'git@github.com:org/project-replay-cache.git'
     'remote_token' => null,               // bearer token for the HTTP backend
     'remote_push' => 'objects',           // 'objects' | 'all' | 'off'
-    'remote_branch' => 'main',            // git backend: which branch of the cache repo to use
+    'remote_branch' => 'main',            // git backend: which branch holds the cache
     'remote_refresh_seconds' => 300,      // git backend: how often the local mirror re-fetches
     'remote_timeout' => 60,               // git backend: total time budget for a push
     'default_branch' => null,             // null = autodetect
@@ -52,7 +52,7 @@ Full setup guide, per backend: [sharing-the-cache.md](sharing-the-cache.md).
 | `remote` | `null` | Backend URL. `file://` for a mounted path, `https://` for an S3/MinIO/WebDAV endpoint with GET/PUT/HEAD, or an SSH/HTTPS git URL for a dedicated cache repository. |
 | `remote_token` | `null` | Bearer token, HTTP backend only. |
 | `remote_push` | `'objects'` | What this machine may publish. `off` — pull only, never writes. `objects` — its own test-file results, keyed by content; safe from anywhere and never conflicts, but it *is* a write. `all` — also the branch baseline under `graph/**`, which is what everyone else's cold start reads; for the one CI job that owns the branch. **See the note below before leaving this at its default on a write-restricted cache.** |
-| `remote_branch` | `'main'` | Git backend: which branch of the cache repo holds the objects. |
+| `remote_branch` | `'main'` | Git backend: which branch holds the objects. Usually a branch of a dedicated cache repository, but it can equally be an orphan branch of the project's own repository — a name that does not exist there yet is created orphan on the first push, which removes the whole setup at the price of the cache landing in every plain `git clone`. See [sharing-the-cache.md](sharing-the-cache.md). |
 | `remote_refresh_seconds` | `300` | Git backend: how stale the local mirror may get before it re-fetches. |
 | `remote_timeout` | `60` | Git backend: total seconds a push may take before giving up. Giving up is a warning, never a failure. |
 

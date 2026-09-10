@@ -383,7 +383,7 @@ So: let developers publish results only if their environment matches CI's. It's 
 
 An unreachable, unauthorised or misconfigured remote is always a warning on stderr and a local-only pass. It can never break a test run.
 
-Setup for each backend, plus troubleshooting: **[docs/sharing-the-cache.md](docs/sharing-the-cache.md)**.
+Setup for each backend, plus troubleshooting: **[docs/sharing-the-cache.md](docs/sharing-the-cache.md)**. The least setup of the six is an orphan branch of the repository you already have — no new repository, no deploy key, no secret — which that document covers along with the reason it is not the default.
 
 ## CI in two lanes
 
