@@ -425,21 +425,19 @@ different addresses from another's:
 - `prune --stale-edges` is opt-in, and it removes dependency edges. Whether a machine has run
   it changes that machine's addresses.
 
-A third hazard is the opposite shape: not one machine computing a different address from
-another's, but two different machines computing the *same* address for content that should not
-be interchangeable. A content key is built from the **structural** fingerprint only — verified
-at `src/Cache/ContentKey.php:46`, `Fingerprint::canonicalStructural($fingerprint) . $testHash .
-implode('', $parts)`. The environmental bucket (PHP `MAJOR.MINOR`, coverage driver, OS family) is
-deliberately excluded. And remote adoption does not re-check it: `RunPipeline::replayFromRemote()`
-(the loop around `src/Console/Runner/RunPipeline.php:1341-1345`) computes the key, fetches the
-object, and tests only whether the object exists and whether it holds a status that must be
-re-run. So **an object recorded under PHP 8.2 + Xdebug is findable and replayable by a machine on
-PHP 8.4 + pcov.** Local recordings are protected, because environmental drift discards the
-machine's own cached results; that protection does not extend to what is adopted from a remote.
+A third hazard was the opposite shape: not one machine computing a different address from
+another's, but two different machines computing the *same* address for content that should not be
+interchangeable. **It is closed.** A content key was built from the **structural** fingerprint
+only, the environmental bucket was excluded, and `RunPipeline::replayFromRemote()` re-checked
+nothing — so an object recorded under one PHP minor was findable and replayable by a machine on
+another. `Cache\ContentKey` now folds `Fingerprint::canonicalResultEnvironment()` into its
+material as well, covering PHP `MAJOR.MINOR` and OS family, so a machine in a different
+environment computes an address the other one never wrote and simply finds nothing.
 
-This is exactly what item 2 above ("Address on what is stable, validate on what is recorded")
-already proposes to fix, by storing the environmental fingerprint inside the object — so treat it
-as one problem already on that list, not a second proposal. The mitigation available today with
-no code change is the same "one producer" measure already listed as item 1: when a single job
-records and everyone else pulls, every object came off one image and the question does not
-arise.
+The coverage driver and the coverage format stay out of the address deliberately: a driver
+changes which lines are *reported*, not whether an assertion passed, and a remote object carries
+no coverage snapshot at all. `docs/proposals/remote-layout.md` is the design record, including
+why this went into the key rather than into a deeper object path — the same choice is what makes
+the local mirror collectable, since every object a machine can address is now by construction
+from its own environment.
+

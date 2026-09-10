@@ -1,6 +1,6 @@
 # Proposal: the environment belongs in the address, not in the path
 
-**Status: accepted, implementation in progress.** This replaces an earlier version of this
+**Status: implemented.** This replaces an earlier version of this
 document that proposed scoping the remote object tree by generation and environment
 (`objects/<generation>/<environment>/<yyyy-mm>/<k>.json`). That design is **dropped**. What
 follows closes the same correctness hole with a longer content key instead of a deeper tree,
@@ -243,9 +243,13 @@ prefer the key now.
 1. **Does `driver` belong out for good?** The claim is that a coverage driver cannot change an
    assertion's outcome. Xdebug also changes error handling and timing, so a timing-sensitive test
    could in principle flip. Unmeasured, and deliberately traded away for hit rate.
-2. **Should collection run automatically?** A silent cache eviction is defensible, and
-   `GitRemoteCache` already has automatic maintenance. Starting explicit (`prune` only, reported
-   by `status`) is the conservative order; the reverse is hard to undo.
+2. ~~**Should collection run automatically?**~~ **Settled: no.** Collection runs on every local
+   `prune` invocation — not on every test run, and not from `GitRemoteCache`'s automatic
+   maintenance. It is unconditional *within* `prune` rather than behind its own flag, because
+   none of `prune`'s existing flags bear on which content keys a machine can address, and every
+   sweep prints what it did. `status` reports the reclaimable total so a machine that never runs
+   `prune` can still see the number. Making it automatic later is easy; making an automatic
+   eviction explicit again after users have relied on it is not.
 3. **The HTTP backend still cannot list.** Irrelevant to mirror collection, which is entirely
    local, and to remote collection, which already requires the filesystem or git backend. Noted
    only so it is not rediscovered.
