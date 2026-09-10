@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="vendor/phpunit/phpunit/phpunit.xsd"
+         bootstrap="vendor/autoload.php"
+         colors="false"
+         cacheDirectory=".phpunit.cache"
+         failOnRisky="true"
+         failOnPhpunitWarning="false">
+    <!--
+      failOnPhpunitWarning explicit: PHPUnit's OWN XML loader defaults this attribute to
+      true when absent (Xml/Loader.php), unlike failOnWarning (default false) - so an
+      ordinary phpunit.xml, exactly like every OTHER fixture in this repo, would already
+      make `SweepBaseTest`'s "declared ... is abstract" PHPUnit-runner warning fail the
+      whole run. That is a separate, pre-existing PHPUnit concern (an abstract class
+      matching the configured test suffix) this fixture deliberately reproduces as ONE of
+      its two variants - not the defect this fixture exists to prove, which is which FILE
+      an executed test's edges/results land under. Silencing it here keeps this fixture's
+      own exit code meaningful for that one question.
+    -->
+    <testsuites>
+        <testsuite name="default">
+            <directory>tests</directory>
+        </testsuite>
+    </testsuites>
+    <source>
+        <include>
+            <directory>src</directory>
+        </include>
+    </source>
+</phpunit>

@@ -86,6 +86,22 @@ final class FixtureProject
         return self::fromProject('keydrift', $root);
     }
 
+    /**
+     * Same, for tests/Fixtures/Projects/abstract-base: a shared abstract base class
+     * declares a test method, and two `final` concrete subclasses each extend it with no
+     * test methods of their own — twice over, once with the base named with the
+     * configured test suffix (`SweepBaseTest`/`ConcreteOneTest`/`ConcreteTwoTest`) and once
+     * without it (`SweepScenario`/`ConcreteThreeTest`/`ConcreteFourTest`). The fixture for
+     * the defect where `PHPUnit\Event\Code\TestMethod::file()` resolves to the file that
+     * DECLARES an inherited test method rather than the file of the class actually running
+     * it, so a concrete subclass whose methods are all inherited never accumulates a
+     * single recorded edge.
+     */
+    public static function abstractBase(?string $root = null): self
+    {
+        return self::fromProject('abstract-base', $root);
+    }
+
     private static function fromProject(string $name, ?string $root = null): self
     {
         $repo = GitRepo::init($root);

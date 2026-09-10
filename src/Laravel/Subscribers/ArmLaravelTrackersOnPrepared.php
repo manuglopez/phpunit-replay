@@ -8,6 +8,7 @@ use Manuglopez\Replay\Laravel\BladeTracker;
 use Manuglopez\Replay\Laravel\MigrationTables;
 use Manuglopez\Replay\Laravel\TableTracker;
 use Manuglopez\Replay\Laravel\UsesDatabaseCollector;
+use Manuglopez\Replay\PHPUnit\TestMethodFile;
 use Manuglopez\Replay\Record\Recorder;
 use PHPUnit\Event\Code\TestMethod;
 use PHPUnit\Event\Test\Prepared;
@@ -47,7 +48,14 @@ final readonly class ArmLaravelTrackersOnPrepared implements PreparedSubscriber
         $this->armTrackers();
 
         if (MigrationTables::usesDatabase($test->className())) {
-            $this->usesDatabase->add($test->file());
+            // The running class's file (TestMethodFile::of()): LaravelIntegration::augment()
+            // widens $partial->tables by this same string, keyed against $partial->tables
+            // itself — which Record\Recorder populates from whatever file beginTest() opened
+            // (StartRecordingOnPreparationStarted, now also TestMethodFile::of()). Using
+            // $test->file() here instead would key the widened set under the declaring
+            // class's file and leave the recorder's own table edges under the running
+            // class's file, so the two would never merge.
+            $this->usesDatabase->add(TestMethodFile::of($test));
         }
     }
 

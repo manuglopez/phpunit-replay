@@ -319,6 +319,18 @@ One class per event, `final readonly`, constructor takes the collaborator. Names
 `FlushOnExecutionFinished(RunWriter)`, `MarkTruncatedOnExecutionAborted(RunWriter)`.
 Only `TestMethod` tests are recorded (`$event->test() instanceof TestMethod`); `wasSuppressed()` issues are ignored.
 
+Every place that needs "the file this test's edges/result/not-cacheable-marker/database-table
+widening counts against" — `StartRecordingOnPreparationStarted` (both its replay-decision and its
+`beginTest()` calls), `CollectResultOnPreparationStarted`, the class-level branch of
+`RecordNotCacheableOnPreparationStarted`, and `Laravel\Subscribers\ArmLaravelTrackersOnPrepared` —
+calls `PHPUnit\TestMethodFile::of(TestMethod $test): string` rather than `$test->file()` directly.
+`file()` resolves through `ReflectionMethod::getFileName()`, which returns the DECLARING class's
+file for an inherited method (an abstract base a concrete `final` subclass extends with no test
+methods of its own); `of()` instead reflects `$test->className()` — always `$testCase::class`, the
+concrete, actually-running class — and falls back to `$test->file()` only when that class cannot
+be reflected (does not happen in ordinary operation: a `TestMethod` is only ever built from an
+already-instantiated test object). See "Abstract-base test classes" below.
+
 ### Run partials (written by the extension, read by the wrapper) — `<stateDir>/runs/<run-id>/`
 
 ```php
@@ -1099,3 +1111,109 @@ backslash-free string fragments (`implode('\\', ['App', 'Console', 'Commands', '
 specifically so `Analysis\FactsVisitor` cannot parse it as a name reference — a literal `use`
 statement would let the static hop supply the same edge regardless of shape and the test would
 pass unfixed, proving nothing.
+
+### Abstract-base test classes attribute their edges to the wrong file — `src/PHPUnit/TestMethodFile.php`
+
+**Reproduction (a real Laravel suite, 4820 tests).** Two `final` test classes extending a shared
+abstract base, adding no test methods of their own — the base declares them and is never itself
+run by PHPUnit. `baselines['<branch>']['results']` correctly held all of both classes' results,
+keyed by test id. `edges` did not: the abstract base (which PHPUnit never executes) had 841
+recorded dependencies, and the two concrete classes that actually ran had none. Consequence: the
+two concrete files were permanently "unknown test files" (`Select\RunListBuilder::build()`) and
+re-ran on every pass — the two most expensive files in the suite, measured at 466s under pcov.
+
+**Root cause.** `StartRecordingOnPreparationStarted`, `CollectResultOnPreparationStarted`, the
+class-level branch of `RecordNotCacheableOnPreparationStarted`, and
+`Laravel\Subscribers\ArmLaravelTrackersOnPrepared` all called `PHPUnit\Event\Code\TestMethod::file()`
+to decide which file a test's edges/result/not-cacheable-marker/database-table-widening counts
+against. `file()` resolves through `Event\Code\TestMethodBuilder::fromTestCase()` ->
+`Util\Reflection::sourceLocationFor($testCase::class, $methodName)` ->
+`(new ReflectionMethod($className, $methodName))->getFileName()` — native PHP reflection, which
+for an inherited method returns the file of the class that DECLARES the method body, never the
+class actually running it. `TestMethod::className()`, by contrast, is always `$testCase::class` —
+the concrete, running class, regardless of where its methods are declared.
+
+**Two variants, not one.** The abstract base above happened to be named with the configured test
+suffix, which makes PHPUnit's own directory-based discovery try to load it as a test file too and
+convert `Runner\TestSuiteLoader`'s `ClassIsAbstractException` into a `testRunnerTriggeredPhpunitWarning`
+(`Framework\TestSuite::addTestFile()`) — a warning a project with `failOnPhpunitWarning` on (PHPUnit's
+own XML loader default when the attribute is absent, unlike `failOnWarning`) sees as a build failure.
+Renaming the base away from the test suffix silences that warning, but is a *different* fix for a
+*different* problem (this package's own business only in as much as `Select\TestPaths::isTestFile()`
+then stops matching the base at all) — the file-attribution defect above survives the rename
+undiminished, since it never depended on the base's filename matching any convention.
+`tests/Fixtures/Projects/abstract-base/` reproduces both: `SweepBaseTest` (abstract, matches the
+suffix) and `SweepScenario` (abstract, does not), each with two `final` concrete subclasses.
+
+**The fix.** `PHPUnit\TestMethodFile::of(TestMethod $test): string` reflects `$test->className()`
+and returns ITS file, falling back to `$test->file()` only when that class cannot be reflected (in
+ordinary operation this cannot happen: a `TestMethod` is only ever built from an already-instantiated
+test object, so its class necessarily exists). All four call sites above now go through it — the
+fifth and sixth `$test->file()`-adjacent computations in the codebase, `PHPUnit\Replayable::
+__replayDecision()`'s `(new ReflectionClass(static::class))->getFileName()` and
+`RecordNotCacheableOnPreparationStarted`'s own method-level branch (keyed by `Class::method`, never a
+file), were already correct or already file-independent and are unchanged. Neither a
+`#[DataProvider]` dataset nor a `#[Depends]`/`#[DependsExternal]` relationship changes which class is
+running (`TestMethodBuilder::dataFor()` only attaches test data to the same instance; a dependency
+resolves by class+method id, never by file — `ReplayState::isDependsProvider()`), so both fall out
+unaffected — checked empirically, not just read: `tests/Fixtures/Projects/abstract-base/tests/
+SweepBaseTest.php` has a `#[DataProvider]`-driven inherited method, and its concrete subclass's
+recorded edges are identical to the plain-method ones.
+
+**Ordering curiosity, not a bug this needed to fix.** `ReplayState::decide()` memoises per test id;
+`StartRecordingOnPreparationStarted` (fired from `Test\PreparationStarted`, which PHPUnit's
+`TestCase::runBare()` emits before `setUp()`/`invokeTestMethod()`) always calls it before
+`Replayable::__replayDecision()` ever runs, so the trait's own (already-correct) file computation
+never actually reached `decide()` — the subscriber's file argument was the only one that mattered.
+After this fix both computations agree, so which one wins the memoisation race is no longer
+observable.
+
+**Second guard considered and rejected: refusing to key `edges` by an abstract class's file at
+record time.** Checked rather than assumed: with the fix above, the abstract base cannot become a
+key in `edges` at all, on any path. Every one of the four call sites above now resolves through
+`TestMethod::className()`, and PHPUnit never instantiates a test whose class is abstract
+(`Runner\TestSuiteLoader::load()` throws `ClassIsAbstractException` before constructing one), so
+`className()` can never name one. No other code path in the package creates a NEW key in `edges` —
+`Cache\GraphUpdater::apply()`'s `unionEdges()`/`markKnownTestFiles()` are driven entirely by
+`RunPartial::$edges`/`$results`, themselves populated only by the four fixed call sites;
+`Analysis\StaticEdges::expand()` only extends an EXISTING test file's dependency list, never
+introduces a new key; `Select\RunListBuilder`/`TestPaths::isTestFile()` only read the graph, never
+write it. And the structural-drift-forced fresh record `edges_by_running_class` below guarantees at
+least once starts from a genuinely empty `Graph` (`ReplayState::freshGraph()`,
+`Console\Runner\RunPipeline`'s `record()`/`verify()`), so even a stale pre-fix key does not linger.
+Confirmed empirically too: `Graph::knowsTest()` is `false` for both abstract bases in
+`tests/Integration/AbstractBaseTestClassEdgesTest.php`'s recorded graph, in both variants. A second,
+independent guard would therefore be dead code.
+
+**The abstract base as a dependency, not merely an absent key.** The base is source the concrete
+tests depend on — its method bodies are the lines that execute — so it must appear INSIDE the
+concrete files' own dependency lists, not merely stop being a key of its own: editing it must still
+select both concrete tests (`Select\Rules\PhpEdgeRule`). This falls out of the fix with no extra
+code: `Record\PcovDriver::stop()`/`Record\XdebugDriver` report coverage for whatever `SourceScope`
+includes, which covers `tests/` by default (`SourceScope::fromProjectRoot()`'s `topLevelProjectDirs()`
+half, independent of `<source><include>`), so the abstract base's executed method-body lines are
+already in the coverage data handed to `Recorder::endTest()` — attributed to whichever file
+`beginTest()` opened, now correctly the concrete one. Verified, not assumed:
+`tests/Integration/AbstractBaseTestClassEdgesTest.php` asserts each concrete file's edges are
+non-empty AND contain the abstract base's own path, and separately drives `Select\Selector` to
+confirm changing the base's file selects both concrete subclasses.
+
+**Fingerprint: `edges_by_running_class: true`, unconditional, alongside `edges_exclude_ignored`**
+(`Cache\Fingerprint`'s own class docblock has the full argument). A graph recorded before this fix
+has an inherited test method's edges under the wrong file entirely — not merely stale, but
+attributed to a file that is not even a test file this package selects — so, same as
+`edges_exclude_ignored`, a bare `SCHEMA_VERSION` bump would force the same one-time fresh record but
+could never be *named* in a drift report (`structuralDrift()` always skips `'schema'`). `status`
+names it `edges_by_running_class (drift)`.
+
+**Acceptance test.** `tests/Fixtures/Projects/abstract-base/` (`FixtureProject::abstractBase()`):
+two abstract bases (`SweepBaseTest`/`SweepScenario`, with/without the test suffix), five `final`
+concrete subclasses between them (four plain, one `#[DataProvider]`-driven), two tiny source
+classes (`Alpha`/`Beta`) each family actually calls. `tests/Integration/
+AbstractBaseTestClassEdgesTest.php` records the fixture and asserts, per variant: every concrete
+file is known to the graph and has a non-empty, base-inclusive edge list; the abstract base is
+never a key in `edges`; every test id (plain and dataset-suffixed) has a result; and
+`Select\Selector::affected([abstractBaseFile])` selects every concrete subclass. `tests/Unit/PHPUnit/
+TestMethodFileTest.php` covers `TestMethodFile::of()` directly: the ordinary case (declaring file ==
+running file, a no-op), the inherited case (resolves to the running class regardless of what
+`$test->file()` says), and the unreflectable-class fallback.

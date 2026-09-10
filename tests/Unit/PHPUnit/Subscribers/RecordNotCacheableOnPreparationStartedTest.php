@@ -58,18 +58,31 @@ final class RecordNotCacheableOnPreparationStartedTest extends TestCase
         );
     }
 
-    public function test_a_class_level_attribute_records_the_test_files_relative_path(): void
+    /**
+     * `$file` is deliberately a path `FixtureClassLevelNotCacheableSubject` is NOT declared
+     * at — the same mismatch an inherited test method produces between `TestMethod::file()`
+     * (the declaring class's file) and the file of the class actually running it. Before
+     * the fix that shipped alongside this test change, the subscriber trusted `$file`
+     * verbatim regardless of where the named class actually lived, so this exact fixture
+     * shape (a real, reflectable class, an unrelated `$file` argument) could not
+     * distinguish "records the argument" from "records the class's own file" — it had to
+     * happen to agree, which is exactly the assumption an inherited method breaks. Using
+     * the package root as `$projectRoot` (not a throwaway temp dir) makes this test file's
+     * OWN real location — where `FixtureClassLevelNotCacheableSubject` is truly declared —
+     * a meaningful project-relative path to assert against.
+     */
+    public function test_a_class_level_attribute_records_the_running_classs_own_file(): void
     {
-        $file = $this->root . '/tests/ClassLevelTest.php';
+        $projectRoot = dirname(__DIR__, 4);
         $collector = new NotCacheableCollector();
 
-        $subscriber = new RecordNotCacheableOnPreparationStarted($collector, $this->root);
+        $subscriber = new RecordNotCacheableOnPreparationStarted($collector, $projectRoot);
         $subscriber->notify(new PreparationStarted(
             $this->telemetryInfo(),
-            $this->testMethod(FixtureClassLevelNotCacheableSubject::class, 'testOne', $file),
+            $this->testMethod(FixtureClassLevelNotCacheableSubject::class, 'testOne', '/nonexistent/DeclaringFile.php'),
         ));
 
-        self::assertSame(['tests/ClassLevelTest.php'], $collector->all());
+        self::assertSame(['tests/Unit/PHPUnit/Subscribers/RecordNotCacheableOnPreparationStartedTest.php'], $collector->all());
     }
 
     public function test_a_method_level_attribute_records_the_class_method_id(): void

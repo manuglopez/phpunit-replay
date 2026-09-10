@@ -62,6 +62,37 @@ use Symfony\Component\Process\Process;
  * a separate key rather than folded into the flag's value: `structuralDrift()` then names
  * `analysis_rules` when only the rules moved, and a user who changed nothing gets told why.
  *
+ * ## `edges_by_running_class`
+ *
+ * Present UNCONDITIONALLY, same as `edges_exclude_ignored` below and for the same kind of
+ * reason: a test method inherited from an abstract base used to have its edges, its result,
+ * and any class-level `#[NotCacheable]` marker all attributed to the file that DECLARES the
+ * method (`PHPUnit\Event\Code\TestMethod::file()`, which reflects the declaring class) rather
+ * than the file of the concrete class actually running it (`PHPUnit\Subscribers\*`, now
+ * `PHPUnit\TestMethodFile::of()`, reflecting `TestMethod::className()` instead). A graph
+ * recorded before this fix has every one of those inherited tests' edges sitting under the
+ * abstract base's file — which is never itself a file this package selects or re-runs — and
+ * has nothing at all under the concrete subclass that actually needs to be. `Cache\ContentKey`
+ * is computed from a test file's dependency list, so the concrete file's content key was
+ * computed from an empty (or altogether absent) dependency set: wrong in the specific
+ * direction that makes it look permanently uncached rather than merely stale, since an
+ * ordinary structural drift at least leaves a REAL, if outdated, key to invalidate.
+ *
+ * This key changes what an edge means in exactly the sense `static_declaration_edges` and
+ * `edges_exclude_ignored` already document: the SET of files an edge can be recorded under is
+ * different before and after, so a content key computed under the old attribution and one
+ * computed under the new one are never comparable, which is what makes this structural rather
+ * than environmental. It has no opt-in to gate on, unlike `static_declaration_edges` — every
+ * project either has this class of test shape or does not, there is no configuration
+ * describing it — so, like `edges_exclude_ignored`, it is simplest and safest to always be
+ * present rather than present-only-when-relevant: a project with no abstract-base test
+ * classes at all is unaffected either way (the concrete-class file and the declaring file are
+ * the same file, so nothing about its recorded edges actually changes), and pays only the one
+ * one-time fresh record every graph recorded before this key existed forces via
+ * `structuralDrift()` (which, same as `edges_exclude_ignored`, can name it — `status` reports
+ * `edges_by_running_class (drift)` — rather than the user seeing an unexplained full discard,
+ * the bare `SCHEMA_VERSION` bump `structuralDrift()`'s `detectDrift()` always skips would be).
+ *
  * ## `edges_exclude_ignored`
  *
  * Unlike `static_declaration_edges` above, this key is present UNCONDITIONALLY — always
@@ -111,7 +142,17 @@ final readonly class Fingerprint
         // skips the 'schema' key, so the user would see every graph discarded with nothing
         // saying why. This key gets the same one-time invalidation and `status` can name
         // it (`edges_exclude_ignored (drift)`).
-        $structural = ['schema' => self::SCHEMA_VERSION, 'edges_exclude_ignored' => true];
+        //
+        // `edges_by_running_class` (see class docblock) rides the same unconditional
+        // treatment, for the same reason: an inherited test method's edges move from the
+        // declaring (abstract base) file to the running (concrete) class's file, which is
+        // a change of meaning every graph recorded before this key existed needs one fresh
+        // record to correct.
+        $structural = [
+            'schema' => self::SCHEMA_VERSION,
+            'edges_exclude_ignored' => true,
+            'edges_by_running_class' => true,
+        ];
 
         foreach (self::STRUCTURAL_FILES as $key => $relative) {
             $structural[$key] = self::trackedHash($projectRoot, $relative);
