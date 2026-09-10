@@ -287,12 +287,15 @@ Rules:
 ```
 k = xxh128(
   fingerprint.structural (canonical json) .
+  fingerprint.environmental ∩ {php, os} (canonical json) .
   ContentHash(testFile) .
   join(sorted(map(deps, f => rel(f) . ':' . ContentHash(f))))
 )
 ```
 
 `k` is computed while recording and saved with each result. It serves two purposes: (a) the remote cache is indexed by `k` (`objects/<k>.json` holding the results of every test in that file), so any machine with the same contents gets the same results without needing the same `sha`; (b) quarantine detects flips: same `k`, different `s` → not hermetic.
+
+The second segment is the part of the environment that can change a test's *outcome* — nothing else (`Cache\Fingerprint::canonicalResultEnvironment()`, §4.5). Environmental drift only ever discards the results a machine recorded itself, and nothing re-checks the environment of a result adopted from a remote cache (§9 weighs the key, the object's existence and whether the cached status forces a re-run), so a result recorded under one PHP minor used to be findable and replayable by a machine on another. In the address that read is unreachable rather than merely unchecked. The coverage driver and the coverage format are deliberately excluded: the driver decides which lines are *reported*, not whether an assertion passed, and the format guards a local snapshot store (§3.2) that a remote object has no part in.
 
 #### 4.3.1 `static_declaration_edges` (opt-in, default off)
 
@@ -453,7 +456,7 @@ setting.
 ### 4.5 Fingerprint
 
 - **Structural** (change → graph fully discarded, fresh record): `composer.lock`, `phpunit.xml`, `phpunit.xml.dist`, `phpunit-replay.php`, and the package's `SCHEMA_VERSION` constant. Only hashed if tracked by git. Plus `static_declaration_edges: true` and `analysis_rules: DeclarationScanner::RULES_VERSION`, both present only while that flag is on (§4.3.1) — a rules bump has to force a fresh record, since the graph's edges are never re-derived otherwise. Plus `edges_exclude_ignored: true`, present **unconditionally** (not gated on any flag): it names, in a drift report, the one-time fresh record every existing graph needs once an edge can no longer point at a file `git` ignores (§7.3) — a bare `SCHEMA_VERSION` bump would force the same fresh record but could never be *named*, since `structuralDrift()` always skips the `schema` key.
-- **Environmental** (change → results discarded, edges kept): PHP `MAJOR.MINOR` version, driver, `PHP_OS_FAMILY`.
+- **Environmental** (change → results discarded, edges kept): PHP `MAJOR.MINOR` version, driver, `PHP_OS_FAMILY`, `coverage` (`Coverage\CoverageFormat::id()` — a recorded result is only replayable while its stored coverage snapshot is still readable). The `php` and `os` keys **also** feed every content key (§4.3), and they stay in this bucket as well: the redundancy is load-bearing, because a graph adopted from another environment still matches structurally, so its edges are rightly inherited while its results carry addresses this machine can never compute again — and environmental drift is the only thing that sweeps those out.
 - Checked at the start **and at the end** of the run: if it changed during execution, the edges recorded in that run are discarded.
 
 ---
