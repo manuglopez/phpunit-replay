@@ -103,6 +103,12 @@ verbatim — it is the part of the environment that can change a test's *outcome
 | `driver` (`pcov` \| `xdebug`) | **no** | it changes which lines are *reported*, not whether an assertion passed. This repository's own scripts alternate them (`composer test` is pcov, `composer test:xdebug`), and a developer doing the same would halve their hit rate daily in exchange for no correctness at all |
 | `coverage` (`CoverageFormat::id()`) | **no** | the object carries no snapshot, per the first section |
 
+There is no digest to size. `canonicalStructural()` is not a hash — it is canonical JSON that
+*contains* hashes — so the environment enters the material the same way, as a whole canonical
+JSON object. JSON objects are self-delimiting, so the concatenation addresses exactly one
+(project, environment) pair with the same collision properties the structural half already had,
+and needs no separator.
+
 **Two notions of "compatible" is normally how correctness bugs get in**, and the earlier version
 of this document said so. The split survives that objection because it is not arbitrary: the
 line is exactly *"can this change the outcome"* versus *"can this change the coverage"*, and the
@@ -164,12 +170,30 @@ marker is an optimisation, and the invariant it rests on (*mirror present ⟹ ob
 remote*) is only ever established by a successful read or by `confirmPublished()` after a landed
 push.
 
-### 5. `<stateDir>/coverage/<k>.cov` takes the same rule
+### 5. `<stateDir>/coverage/<k>.cov` needs a different rule, not the same one
 
-Snapshots are keyed by content key too (`CoverageSnapshots::path()`), and `PruneCommand` does not
-mention them once. The directory does not exist on any state directory inspected here, so it is
-not growing today — but nothing would collect it if it did, and the same addressability rule
-covers it for free.
+An earlier draft of this document said snapshots are keyed by content key too. **They are not**,
+and the difference matters. `Record\CoverageSnapshots.php:68` keys them by
+`Cache\ContentHash::of()` of the **test file itself**, and the class docblock gives the reason: a
+content key additionally needs a `Graph` for the file's dependencies, which does not exist inside
+the PHPUnit child process in filtered/wrapper mode. A replaying pass can still find the snapshot
+because it re-hashes a file that — for the replay to be valid at all — has not changed.
+
+Two consequences, and the first is why this section is short.
+
+**Nothing in section 1 orphans a snapshot.** Snapshot keys are content hashes of files, so moving
+every *content key* leaves every snapshot addressable exactly as before. There is no one-time
+local coverage gap on upgrade.
+
+**But the collection rule is its own.** A snapshot is live iff its `k` equals
+`ContentHash::of()` of a test file the graph currently knows, at that file's *current on-disk
+content*. Everything else is stale for one of two permanent reasons: the file changed, so its
+hash changed and the old key can never be computed again; or the file is gone. That is cheaper
+than the mirror's rule rather than harder — no key set to reconstruct from baselines, just the
+known test files hashed as they are now.
+
+`PruneCommand` does not mention snapshots once. The directory does not exist on any state
+directory inspected here, so it is not growing today — but nothing would collect it if it did.
 
 ### 6. `status` can finally say what the state is
 
@@ -216,15 +240,12 @@ prefer the key now.
 
 ## Open questions
 
-1. **Truncation length for the environment digest.** Both halves of the key are hashes; a
-   collision between two environments would be a wrong result, not a cache miss, so the length
-   should be argued rather than copied from `ProjectKey`'s 16 hex characters.
-2. **Does `driver` belong out for good?** The claim is that a coverage driver cannot change an
+1. **Does `driver` belong out for good?** The claim is that a coverage driver cannot change an
    assertion's outcome. Xdebug also changes error handling and timing, so a timing-sensitive test
    could in principle flip. Unmeasured, and deliberately traded away for hit rate.
-3. **Should collection run automatically?** A silent cache eviction is defensible, and
+2. **Should collection run automatically?** A silent cache eviction is defensible, and
    `GitRemoteCache` already has automatic maintenance. Starting explicit (`prune` only, reported
    by `status`) is the conservative order; the reverse is hard to undo.
-4. **The HTTP backend still cannot list.** Irrelevant to mirror collection, which is entirely
+3. **The HTTP backend still cannot list.** Irrelevant to mirror collection, which is entirely
    local, and to remote collection, which already requires the filesystem or git backend. Noted
    only so it is not rediscovered.
