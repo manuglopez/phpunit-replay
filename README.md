@@ -268,6 +268,7 @@ abstract class TestCase extends \PHPUnit\Framework\TestCase
 | `explain <path>` | Which test files a change to `<path>` would affect, and why. Runs nothing |
 | `prune` | Drops stale state. `--flaky` `--branches` `--all` `--remote --keep-months=N` `--squash` |
 | `push` / `pull` | Publish to, or fetch from, the configured remote. `push --graph` also publishes the branch baseline |
+| `remote:init` | Sets a shared cache up in one command: reads `origin`, creates a private cache repository, proves the round trip works, writes the config. Never touches a credential and never writes a secret. `--dry-run` `--same-repo` `--name=` `--owner=` `--branch=` `--no-create` |
 | `baseline-path` | Prints the state directory and nothing else, for CI to archive |
 
 Full option reference: **[docs/configuration.md](docs/configuration.md)**.
