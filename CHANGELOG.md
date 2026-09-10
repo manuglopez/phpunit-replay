@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.10.0] — 2026-09-11
 
 - **New: `phpunit-replay remote:init` — sharing the cache stops being a document you read.** Every remote shape worked and every one of them needed a manual setup a user had to find, read and translate, which is where adoption dies. The command reads the project's `origin`, proposes a **private** cache repository beside it named `<project>-replay-cache` (from origin's repository name, never the working directory's), creates it through `gh` when `gh` is authenticated, publishes a probe object and reads it back **from a separate clone** to prove the round trip works, and writes `phpunit-replay.php`. `--dry-run` prints every action and takes none.
 
@@ -13,6 +13,14 @@ All notable changes to this project will be documented in this file.
   `docs/sharing-the-cache.md` now opens on this command instead of on a six-option comparison table.
 
   **Known gap, pinned rather than closed:** `--name value` as two tokens is not recognised, only `--name=value`. `Console\Application`'s argv pre-splitter recognises a value-taking option only with its value attached by `=`, and the same already holds for `run --log-junit` and `prune --keep-months`; closing it changes shared argv behaviour and belongs in its own change.
+
+- **Fix: a rejected remote push silently discarded every deletion the run had made, and then reported success.** `prune --remote` is the only caller that deletes, so it could print a count of objects it had not removed. Found while building `remote:init`, which needed to delete its own probe object and could not.
+
+  All inside `Cache\Remote\GitRemoteCache`: `doEnd()` commits the deletion, the push is rejected by a concurrent client, and `adoptFetchedHistory()` does `git reset --hard FETCH_HEAD` — which discards the local commit *and* restores the deleted file exactly as upstream still holds it. The helper then replays `$buffer`, which holds `put()` bodies and knew nothing about deletions, so `commitStagedChanges()` found nothing staged and the retried push succeeded with `lastError` null. **Root cause: the reconciliation helper could replay a run's writes but had no representation of its deletions.** A second, narrower shape of the same cause: `put($k, …)` then `delete($k)` on one instance, where the buffer resurrected the object even after the reset.
+
+  Fixed with a tombstone set beside the write buffer, and the cancellations in both directions are the part a naive fix gets wrong — `delete()` also drops any buffered `put()` of that key, `put()` also drops any tombstone for it, and `adoptFetchedHistory()` replays the buffer and then unlinks every tombstoned key. A `delete()` of a key absent from the local mirror tombstones too, deliberately: the mirror is only as fresh as its last `begin()`, so a key can be absent here and present upstream, and gating the tombstone on local presence would reintroduce the same bug through staleness instead of push timing.
+
+  Nothing was ever corrupted — this is garbage collection, and a later run retried — but it was silent, which is what the retry loop exists to prevent.
 
 ## [0.9.0] — 2026-09-11
 
