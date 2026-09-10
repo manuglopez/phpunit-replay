@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.9.0] — 2026-09-10
+## [0.9.0] — 2026-09-11
 
 A shared cache could serve a result recorded under a different PHP minor or a different OS, and every developer's local read-through mirror grew without bound because nothing ever collected it. Both are closed by the same change, and the design record is `docs/proposals/remote-layout.md`.
 
@@ -25,6 +25,10 @@ A shared cache could serve a result recorded under a different PHP minor or a di
 - **`prune` also collects `<stateDir>/coverage/`, by a different rule.** Snapshots are keyed by `ContentHash::of()` of the test file itself, not by a content key — a content key additionally needs a `Graph`, which does not exist inside the PHPUnit child process in filtered mode. So a snapshot is live iff its key is the current on-disk content hash of a test file the graph still knows; anything else is stale because the file changed or is gone, and in both cases its key can never be computed again. Nothing had collected these either.
 
 - **`status` reports the mirror**: `mirror: 1452 objects · 726 reachable · 2.4 MB reclaimable`. Answering "how much of this is dead?" previously required reconstructing every baseline's keys by hand.
+
+- **Documentation: `DECISIONS.md` is back, and two things the docs claimed the code no longer did.** The decisions log had been deleted wholesale — 216 lines, 43 entries — for a single line naming a vendor namespace from an early spec draft, while seven places in `src/` went on citing it at a path that did not exist. Restored at `docs/DECISIONS.md`, that line reworded, all seven citations repointed, and two new entries: why the environment went into a result's address rather than into a deeper object path, and why the cache *may* live on an orphan branch of the project's own repository while a dedicated repository stays the recommendation. `docs/INTERNALS.md` said a rejected remote push reconciles with `fetch` + `rebase`; `GitRemoteCache` never rebases, and its docblock explains why — a `--depth 1` fetch severs the parent link, so two mirrors that really are descendants of one history can look unrelated to `git rebase`. It also documented every `prune` flag and neither collection sweep this release adds.
+
+- **Documentation: `docs/sharing-the-cache.md` leads with what to do.** It opened on a seven-by-seven comparison of six options, asking a reader who does not yet know what any of them are to choose between all of them. A **Start here** section now gives the recommendation and its four steps, the table is a reference near the end, and the guide says at the point the repository is created why it must be private (the cache stores test names, file paths and failure messages) and why the config uses HTTPS for people and SSH for CI.
 
 ## [0.8.1] — 2026-09-10
 
