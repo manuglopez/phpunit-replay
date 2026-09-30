@@ -183,6 +183,87 @@ final class TwoMachinesSharedCacheTest extends TestCase
         self::assertSame(35, ReplayAssert::replayedCount($run['stdout']));
     }
 
+    public function test_push_publishes_a_result_only_under_the_key_it_was_recorded_at(): void
+    {
+        // An object says "a test file with exactly this content key produced these results".
+        // `push` recomputes each key from the working tree, so a cached result recorded on
+        // other content — a later edit nobody ran, or a layer recorded before a revert —
+        // must not be published under the key the tree has now.
+        $offline = ['PHPUNIT_REPLAY_REMOTE' => 'file://' . $this->sharedCache, 'PHPUNIT_REPLAY_REMOTE_PUSH' => 'off', 'CI' => ''];
+
+        $recorded = $this->machine1->replay(['record'], $offline);
+        self::assertSame(0, $recorded['exitCode'], $recorded['stdout'] . $recorded['stderr']);
+
+        // Break Money::add without running anything: 6 of the 7 test files depend on it
+        // (all but GreeterTest).
+        $this->machine1->write('src/Money.php', str_replace(
+            'return new self($this->amount + $other->amount, $this->currency);',
+            'return new self($this->amount - $other->amount, $this->currency);',
+            $this->machine1->read('src/Money.php'),
+        ));
+
+        $pushed = $this->machine1->replay(['push'], $offline);
+
+        self::assertSame(0, $pushed['exitCode'], $pushed['stdout'] . $pushed['stderr']);
+        self::assertStringContainsString('pushed 1 object(s) to the file remote', $pushed['stdout']);
+        self::assertCount(1, $this->remoteObjects());
+    }
+
+    public function test_an_incomplete_pass_publishes_only_the_results_it_recorded_under_the_new_key(): void
+    {
+        // A pass cut short (`--stop-on-skipped` aborts execution: incomplete) never runs
+        // pruneStaleResults(), so the own layer still holds an id the edited test file no
+        // longer declares, recorded under the OLD key. The post-run push must not publish it
+        // under the new one.
+        $env = $this->env();
+
+        $recorded = $this->machine1->replay(['record'], $env);
+        self::assertSame(0, $recorded['exitCode'], $recorded['stdout'] . $recorded['stderr']);
+
+        $this->machine1->write('tests/MoneyTest.php', str_replace(
+            'testMultiplyRoundsToNearestCent',
+            'testMultiplyRoundsToTheNearestCent',
+            $this->machine1->read('tests/MoneyTest.php'),
+        ));
+        // A second selected file after it, so MoneyTest's skipped test aborts with work left.
+        $this->machine1->write('tests/TaxCalculatorTest.php', str_replace(
+            'final class TaxCalculatorTest extends TestCase' . "\n{",
+            'final class TaxCalculatorTest extends TestCase' . "\n{\n    public function testNothingMuch(): void\n    {\n        self::assertTrue(true);\n    }\n",
+            $this->machine1->read('tests/TaxCalculatorTest.php'),
+        ));
+
+        $run = $this->machine1->replay(['run', '--', '--stop-on-skipped'], $env);
+        self::assertContains($run['exitCode'], [0, 1], $run['stdout'] . $run['stderr']);
+
+        $graph = ReplayAssert::loadGraph($this->machine1);
+        self::assertNotNull($graph);
+        self::assertArrayHasKey(
+            'App\Tests\MoneyTest::testMultiplyRoundsToNearestCent',
+            $graph->ownResults('main'),
+            'precondition: the pass was incomplete, so the renamed id was not pruned',
+        );
+
+        $published = [];
+
+        foreach ($this->remoteObjects() as $path) {
+            $object = json_decode((string) file_get_contents($path), true);
+
+            if (is_array($object) && ($object['file'] ?? null) === 'tests/MoneyTest.php') {
+                $published[] = array_keys($object['results']);
+            }
+        }
+
+        self::assertCount(2, $published, 'the recorded object and the new-key one');
+
+        foreach ($published as $ids) {
+            self::assertFalse(
+                in_array('App\Tests\MoneyTest::testMultiplyRoundsToNearestCent', $ids, true)
+                && in_array('App\Tests\MoneyTest::testMultiplyRoundsToTheNearestCent', $ids, true),
+                'an id the file no longer declares was published beside the ones it now runs: ' . implode(', ', $ids),
+            );
+        }
+    }
+
     public function test_push_and_pull_report_a_remote_that_is_not_configured(): void
     {
         $push = $this->machine1->replay(['push']);

@@ -27,6 +27,8 @@ namespace Manuglopez\Replay\Cache;
  * is argued on `Fingerprint::canonicalResultEnvironment()`. Both fingerprint segments are
  * canonical JSON objects and therefore self-delimiting: the concatenation addresses exactly
  * one (project, environment) pair without a separator or a truncated digest of either half.
+ *
+ * @phpstan-import-type TestResultArray from Graph
  */
 final readonly class ContentKey
 {
@@ -66,6 +68,31 @@ final readonly class ContentKey
     public function forTestFile(Graph $graph, string $testFileRel): ?string
     {
         return $this->compute($graph->fingerprint(), $testFileRel, $graph->dependenciesOf($testFileRel));
+    }
+
+    /**
+     * What a remote object under `$key` may hold for `$testFile`: only the results recorded
+     * under that very key (`GraphUpdater` stamps each executed result with the key it ran
+     * at). An object vouches for exactly the content its key addresses, so a cached result
+     * recorded on other content — an edit never run since, a layer recorded before a revert,
+     * or an id an incomplete pass left behind (a renamed or removed method `pruneStaleResults`
+     * never got to drop) — must not be published as a verdict on content it never ran
+     * against. Shared by every publisher: `push`, and both post-run push loops.
+     *
+     * @param  array<string, TestResultArray>  $results
+     * @return array<string, TestResultArray>
+     */
+    public static function resultsRecordedAt(array $results, string $testFile, string $key): array
+    {
+        $recorded = [];
+
+        foreach ($results as $testId => $result) {
+            if (($result['file'] ?? null) === $testFile && ($result['key'] ?? null) === $key) {
+                $recorded[$testId] = $result;
+            }
+        }
+
+        return $recorded;
     }
 
     private function absolute(string $relative): string

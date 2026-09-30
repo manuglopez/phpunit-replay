@@ -23,11 +23,15 @@ final readonly class ChangedFiles
     }
 
     /**
+     * @param bool $requireAncestor false compares trees only, for a sha that is not a
+     *        baseline to diff FROM but a result layer to check (`Select\LayerAudit`): what a
+     *        layer's results are valid for depends on the content at its sha, not on where
+     *        that sha sits in the history. Still null when git does not have the sha.
      * @return list<string>|null null when the sha is unreachable (baseline unusable) or git failed
      */
-    public function since(?string $sha): ?array
+    public function since(?string $sha, bool $requireAncestor = true): ?array
     {
-        if ($sha !== null && $sha !== '' && ! $this->git->isAncestor($sha)) {
+        if ($requireAncestor && $sha !== null && $sha !== '' && ! $this->git->isAncestor($sha)) {
             return null;
         }
 

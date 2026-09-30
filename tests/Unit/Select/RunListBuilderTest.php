@@ -9,6 +9,7 @@ use Manuglopez\Replay\Config;
 use Manuglopez\Replay\Hermeticity\Policy;
 use Manuglopez\Replay\Hermeticity\Quarantine;
 use Manuglopez\Replay\PHPUnit\ConfigurationReader;
+use Manuglopez\Replay\Select\Reason;
 use Manuglopez\Replay\Select\RunList;
 use Manuglopez\Replay\Select\RunListBuilder;
 use Manuglopez\Replay\Select\TestPaths;
@@ -236,6 +237,98 @@ final class RunListBuilderTest extends TestCase
             ['tests/BarTest.php', 'tests/FooTest.php'],
             $this->builder($this->graph())->allTestFilesOnDisk(),
         );
+    }
+
+    public function test_a_stale_file_with_a_valid_result_left_for_every_id_is_served_not_run(): void
+    {
+        // Select\LayerAudit dropped the own layer's FooTest results; main still holds one
+        // for each of them, so FooTest is served from main.
+        $graph = $this->graph(['FooTest::a' => 0, 'FooTest::b' => 0]);
+        $stale = ['tests/FooTest.php' => ['reason' => new Reason('StaleLayer', 'src/Foo.php', 'feature@abc1234'), 'ids' => ['FooTest::a', 'FooTest::b']]];
+
+        $list = $this->builder($graph)->build([], 'main', $stale);
+
+        self::assertSame([], $list->stale);
+        self::assertSame([], $list->files());
+    }
+
+    public function test_a_stale_file_one_of_whose_ids_nobody_else_holds_executes_and_says_why(): void
+    {
+        $graph = $this->graph(['FooTest::a' => 0]);
+        $stale = ['tests/FooTest.php' => ['reason' => new Reason('StaleLayer', 'src/Foo.php', 'feature@abc1234'), 'ids' => ['FooTest::a', 'FooTest::b']]];
+
+        $list = $this->builder($graph)->build([], 'main', $stale);
+
+        self::assertSame(['tests/FooTest.php'], $list->stale);
+        self::assertSame(['tests/FooTest.php'], $list->files());
+        self::assertSame('uncached', $list->primaryReasonFor('tests/FooTest.php'));
+        self::assertEquals(new Reason('StaleLayer', 'src/Foo.php', 'feature@abc1234'), $list->reasonsFor('tests/FooTest.php')[0]);
+    }
+
+    public function test_a_file_whose_only_results_were_withheld_executes_once_as_stale_not_also_as_no_result(): void
+    {
+        // FooTest's only results sit in main's layer, which Select\LayerAudit withheld for
+        // this pass. The builder then reads no id for it at all: the no-result invariant
+        // and the stale bucket both describe it, and it must execute exactly once, with the
+        // one reason that says why (StaleLayer), not also "Uncached (no cached result)".
+        $graph = $this->graph(['FooTest::a' => 0, 'FooTest::b' => 0]);
+        $graph->withholdResults('main', ['tests/FooTest.php']);
+        $reason = new Reason('StaleLayer', 'src/Foo.php', 'main@abc1234');
+        $stale = ['tests/FooTest.php' => ['reason' => $reason, 'ids' => ['FooTest::a', 'FooTest::b']]];
+
+        $list = $this->builder($graph)->build([], 'feature', $stale);
+
+        self::assertSame(['tests/FooTest.php'], $list->files());
+        self::assertSame(['tests/FooTest.php'], $list->stale);
+        self::assertNotContains('tests/FooTest.php', $list->unknown);
+        self::assertEquals([$reason], $list->reasonsFor('tests/FooTest.php'));
+        self::assertSame('uncached', $list->primaryReasonFor('tests/FooTest.php'));
+
+        // Control: the same absence with no audit behind it is the no-result invariant's.
+        $graph = $this->graph(['FooTest::a' => 0]);
+        $graph->withholdResults('main', ['tests/FooTest.php']);
+
+        $list = $this->builder($graph)->build([], 'feature');
+
+        self::assertSame(['tests/FooTest.php'], $list->files());
+        self::assertSame([], $list->stale);
+        self::assertEquals([new Reason('Uncached', 'no cached result')], $list->reasonsFor('tests/FooTest.php'));
+    }
+
+    public function test_a_stale_file_rerun_for_the_failure_underneath_leads_with_the_stale_reason(): void
+    {
+        // The own layer's pass was invalid; what is left is main's failure, which re-runs.
+        $graph = $this->graph(['FooTest::a' => 7]);
+        $stale = ['tests/FooTest.php' => ['reason' => new Reason('StaleLayer', 'src/Foo.php', 'feature@abc1234'), 'ids' => ['FooTest::a']]];
+
+        $list = $this->builder($graph)->build([], 'main', $stale);
+
+        self::assertSame([], $list->stale);
+        self::assertSame(['tests/FooTest.php'], $list->rerun);
+        self::assertSame(['StaleLayer', 'Rerun'], array_map(static fn (Reason $r): string => $r->rule, $list->reasonsFor('tests/FooTest.php')));
+    }
+
+    public function test_select_leaves_the_builders_own_watch_patterns_alone(): void
+    {
+        $watch = new WatchPatterns();
+        $graph = $this->graph();
+        $builder = new RunListBuilder(
+            $graph,
+            new TestPaths(['tests'], [], ['Test.php']),
+            $watch,
+            ConfigurationReader::fromXmlFile($this->root . '/phpunit.xml'),
+            new Policy($graph, Config::defaults(), Quarantine::load($this->root . '/state'), $this->root),
+            $this->root,
+            [],
+            true,
+        );
+
+        // src/Unattributed.php is a PHP file no edge names: the residue fallback covers it.
+        self::assertNotSame([], $builder->select(['src/Unattributed.php'])->testFiles());
+        self::assertSame([], $watch->patterns(), 'the residue fallback of an audited diff must not leak into the pass');
+
+        $builder->build(['src/Unattributed.php'], 'main');
+        self::assertArrayHasKey('src/Unattributed.php', $watch->patterns(), 'control: build() itself does add it');
     }
 
     public function test_status_names_cover_the_phpunit_status_ints(): void

@@ -102,6 +102,33 @@ final readonly class LastRunTree
     }
 
     /**
+     * Whether this snapshot may narrow a pass's change set: the snapshot is of the tree the
+     * branch's OWN result layer was last recorded on (dirty files and all), so dropping a
+     * file "unchanged since the last run" is only sound when the results the pass will
+     * serve for that file's dependents come from that layer — when the pass diffs from the
+     * branch's own baseline. Diffing from another branch's (a nearer baseline won), a
+     * dependent the own layer does not hold would be served from a layer recorded without
+     * the dirty content (`Select\LayerAudit` applies the snapshot to the own layer's own
+     * change set instead).
+     */
+    public function appliesTo(string $branch, ?string $ownSha, string $diffBase): bool
+    {
+        return $this->describes($branch, $ownSha) && $ownSha === $diffBase;
+    }
+
+    /**
+     * Whether this snapshot is of the tree `$branch`'s layer was last recorded on at
+     * `$layerSha`. Same branch is not enough: a pass saves a snapshot even when it did not
+     * move the layer's sha (a CI pass without `--allow-ci-baseline`, a pass that executed
+     * nothing and had nothing to finalize), and a snapshot taken at another head says
+     * nothing about the tree the layer's sha stands for.
+     */
+    public function describes(string $branch, ?string $layerSha): bool
+    {
+        return $this->branch === $branch && $layerSha !== null && $this->sha === $layerSha;
+    }
+
+    /**
      * @param list<string> $candidates
      * @return list<string>
      */

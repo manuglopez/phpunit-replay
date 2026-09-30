@@ -42,8 +42,13 @@ final class RunListBuilder
     ) {
     }
 
-    /** @param list<string> $changed project-relative changed files */
-    public function build(array $changed, string $branch): RunList
+    /**
+     * @param list<string> $changed project-relative changed files
+     * @param array<string, array{reason: Reason, ids: list<string>}> $stale what
+     *        {@see LayerAudit::apply()} stopped serving: a file one of whose audited test
+     *        ids has no result left anywhere in the merged view executes, as `StaleLayer`
+     */
+    public function build(array $changed, string $branch, array $stale = []): RunList
     {
         if ($this->staticDeclarationEdges) {
             // SPEC.md §4.3.1: whatever neither technique could attribute is covered
@@ -56,6 +61,7 @@ final class RunListBuilder
             ->affected($changed);
 
         $results = $this->graph->results($branch);
+        [$staleFiles, $staleReasons] = $this->staleBucket($stale, $results);
 
         $unknown = [];
         $allTestFiles = [];
@@ -98,10 +104,17 @@ final class RunListBuilder
         // truncated record, a layer that never held it) has nothing to replay and no rule
         // selecting it: it would silently run nothing. It joins the uncached bucket and
         // executes, which also records the results the next pass replays.
+        //
+        // `$results` is read after Select\LayerAudit has already forgotten/withheld what the
+        // current tree invalidated (the callers audit before building), so a file whose every
+        // result was audited away has no ids here either. It already executes as `stale`,
+        // with the reason that explains it (StaleLayer), and is kept out of this bucket so
+        // `--explain` gives it one reason rather than a StaleLayer and an Uncached.
         $noResult = [];
+        $isStale = array_fill_keys($staleFiles, true);
 
         foreach ($allTestFiles as $rel) {
-            if ($this->graph->knowsTest($rel) && ! isset($idsByFile[$rel])) {
+            if ($this->graph->knowsTest($rel) && ! isset($idsByFile[$rel]) && ! isset($isStale[$rel])) {
                 $noResult[] = $rel;
             }
         }
@@ -140,7 +153,64 @@ final class RunListBuilder
             $notCacheable,
             $notCacheableReasons,
             $noResult,
+            $staleFiles,
+            $staleReasons,
         );
+    }
+
+    /**
+     * The rule chain's selection for a change set, with no side effect on this builder:
+     * what {@see LayerAudit} asks of a layer's own diff. The residue fallback goes into a
+     * copy of the watch patterns, so it cannot leak into the pass's own {@see self::build()}.
+     *
+     * @param list<string> $changed project-relative changed files
+     */
+    public function select(array $changed): Selection
+    {
+        $watch = clone $this->watch;
+
+        if ($this->staticDeclarationEdges) {
+            $watch->add((new ResiduePatterns($this->graph, $this->testPaths))->for($changed));
+        }
+
+        return Selector::default($this->graph, $this->testPaths, $watch, $this->projectRoot, $this->extraRules)
+            ->affected($changed);
+    }
+
+    /**
+     * A stale file is served from whatever valid layer still holds a result for each of its
+     * test ids; one id with nothing left to serve it and the whole file executes — the
+     * wrapper runs files, not ids, and an id nobody holds would otherwise be neither
+     * executed nor replayed. Its reason is kept either way, so a file in the run list for
+     * another reason (the layer underneath holds a failure) still says why its own cached
+     * result was not used.
+     *
+     * @param array<string, array{reason: Reason, ids: list<string>}> $stale
+     * @param array<string, array{file?: string}> $results
+     * @return array{0: list<string>, 1: array<string, Reason>}
+     */
+    private function staleBucket(array $stale, array $results): array
+    {
+        $files = [];
+        $reasons = [];
+
+        foreach ($stale as $file => $entry) {
+            if (! is_file(Paths::join($this->projectRoot, $file))) {
+                continue;
+            }
+
+            $reasons[$file] = $entry['reason'];
+
+            foreach ($entry['ids'] as $testId) {
+                if (($results[$testId]['file'] ?? null) !== $file) {
+                    $files[] = $file;
+
+                    break;
+                }
+            }
+        }
+
+        return [$files, $reasons];
     }
 
     /**
