@@ -1201,7 +1201,27 @@ Each step ships on its own, and none can produce a false green by itself.
 10. **The local path adopts verification:** local results stored as self-describing candidates,
     layers retired, F2 gone rather than patched.
 
-## Open questions for the owner
+## Decisions (2026-09-30)
+
+The owner answered the open questions below. Each answer is the one this proposal recommended.
+
+| # | Question | Decision |
+|---|---|---|
+| 1 | Scope precision | Accept Blade and sibling over-invalidation to begin with. Refine only if `status` shows the misses. |
+| 2 | What `exact` means | `{php minor, OS family, eol}`. Extensions, ICU and PHP patch are recorded, not matched, until the cross-OS measurement says otherwise. |
+| 3 | Vendor | A′ (normalised lock) now; C after measurement. A package with no immutable reference makes the candidate **unpublishable**; it does not fall back to A′. |
+| 4 | `composer.json` | `autoload`, `autoload-dev` and `extra` become a structural input. Cost: one fresh recording per project. |
+| 5 | Trust | Developers publish objects. Laptops accept entries from anyone. **CI accepts only CI entries.** |
+| 6 | Disagreement | A failing entry on identical inputs keeps blocking replay of those inputs. `status` reports them as flaky. They do not expire. |
+| 7 | Hash definition | `c2`: normalised content, CRLF→LF, comment-insensitive, no git needed. |
+| 8 | Graph-less consumers without the flag | Allowed after pulling a graph, which supplies the dependencies the cover rule needs. |
+| 9 | Retention | 3 months and 20 candidates per bucket, configurable. |
+| 10 | HTTP | Trim on write. Add a listing endpoint only if buckets are seen to grow unbounded. |
+| 11 | The local path | Keep the diff path as the fast local mode. From 0.12 every served result is also validated by its stamp. Candidate verification is used for remote reads. Step 10 is not scheduled. |
+
+Related, decided the same day for the local path, and shipping on its own as 0.12.0: every result is stamped with its content key and a digest of its non-edge inputs, and is served only when both still match. Objects are always publishable, because they are addressed by the content that actually ran. A graph is published only from a clean working tree.
+
+## Open questions for the owner (answered above)
 
 1. **Scope precision.** Accept the Blade and sibling over-invalidation to begin with, and
    refine only if the misses show up in `status`?
