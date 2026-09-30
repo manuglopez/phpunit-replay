@@ -344,6 +344,43 @@ final class GraphTest extends TestCase
         self::assertArrayHasKey('T3', $results);
     }
 
+    public function test_a_withheld_file_of_a_complete_layer_lets_the_layer_below_show_through(): void
+    {
+        $graph = new Graph($this->root);
+        $graph->setDefaultBranch('main');
+        $graph->setNearestBranch('develop');
+
+        $graph->setResult('main', 'T1', $this->makeResult(status: 0, message: 'main', file: 'tests/FooTest.php'));
+        $graph->setResult('develop', 'T1', $this->makeResult(status: 7, message: 'develop', file: 'tests/FooTest.php'));
+        $graph->setResult('develop', 'T2', $this->makeResult(status: 0, message: 'develop', file: 'tests/BarTest.php'));
+        $graph->markBaselineComplete('develop');
+
+        $graph->withholdResults('develop', ['tests/FooTest.php']);
+
+        // develop no longer covers FooTest.php, so its authority over it is gone too.
+        self::assertSame('main', $graph->results('feature')['T1']['message']);
+        self::assertSame('develop', $graph->results('feature')['T2']['message']);
+        self::assertCount(2, $graph->ownResults('develop'), 'withheld, never edited');
+
+        $graph->withholdResults('develop', null);
+
+        self::assertSame(['T1'], array_keys($graph->results('feature')));
+    }
+
+    public function test_forget_results_drops_only_the_given_files_from_that_layer(): void
+    {
+        $graph = new Graph($this->root);
+        $graph->setResult('feature', 'T1', $this->makeResult(file: 'tests/FooTest.php'));
+        $graph->setResult('feature', 'T2', $this->makeResult(file: 'tests/FooTest.php'));
+        $graph->setResult('feature', 'T3', $this->makeResult(file: 'tests/BarTest.php'));
+        $graph->setResult('main', 'T1', $this->makeResult(file: 'tests/FooTest.php'));
+
+        self::assertSame(['T1', 'T2'], $graph->forgetResults('feature', ['tests/FooTest.php']));
+        self::assertSame(['T3'], array_keys($graph->ownResults('feature')));
+        self::assertSame(['T1'], array_keys($graph->ownResults('main')));
+        self::assertSame(['feature', 'main'], $graph->layersOf('feature'));
+    }
+
     public function test_own_results_are_unaffected_by_merge(): void
     {
         $graph = new Graph($this->root);

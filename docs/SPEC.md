@@ -617,7 +617,9 @@ Documented limitation: `#[Depends]` on a replayed test receives `null`. The defa
 3. `git status --porcelain=v1 -z --untracked-files=all`.
 4. Union → `git check-ignore --no-index -z --stdin` to drop ignored files.
 5. Content filter: for each candidate, `ContentHash::of(workingTree) === ContentHash::ofContent(git show <sha>:<path>)` → dropped. Deletions and new files remain.
-6. `LastRunTree`: candidates ∪ keys from `last-run.tree`; kept only if the current hash differs from the snapshot (or the file disappeared). A dirty file already tested isn't tested again; a reverted one is re-run.
+6. `LastRunTree`: candidates ∪ keys from `last-run.tree`; kept only if the current hash differs from the snapshot (or the file disappeared). A dirty file already tested isn't tested again; a reverted one is re-run. Only when the snapshot is of this branch AND the pass diffs from the branch's own baseline: the snapshot describes the own result layer, and a pass diffing from another branch's baseline does not serve from it.
+
+The change set speaks for one result layer only — the one whose sha it was diffed from. A result recorded in any other layer at sha s may be served for a test file only if the rule chain would not select that file for the change set between s and the current tree; layers below the diff base need no check, any other one is checked against its own diff before anything is served, and one whose sha is missing or unknown to git serves nothing (docs/INTERNALS.md "Result layers").
 
 ### 7.2 Selector::affected(changed): set<testFile>
 

@@ -43,6 +43,7 @@ use Manuglopez\Replay\Record\RunPartial;
 use Manuglopez\Replay\Record\RunWriter;
 use Manuglopez\Replay\Record\SourceScope;
 use Manuglopez\Replay\Report\Summary;
+use Manuglopez\Replay\Select\LayerAudit;
 use Manuglopez\Replay\Select\RunList;
 use Manuglopez\Replay\Select\RunListBuilder;
 use Manuglopez\Replay\Select\TestPaths;
@@ -814,7 +815,7 @@ final class ReplayState
 
         $lastRun = LastRunTree::load($stateDir);
 
-        if ($lastRun !== null && $lastRun->branch === $branch) {
+        if ($lastRun !== null && $sha !== null && $lastRun->appliesTo($branch, $graph->ownRecordedSha($branch), $sha)) {
             $changed = $lastRun->filterUnchanged($changed, $changedFiles);
         }
 
@@ -836,7 +837,7 @@ final class ReplayState
         $reader = self::$reader ?? new ConfigurationReader($configuration);
 
         self::$policy = $policy;
-        $runList = (new RunListBuilder(
+        $builder = new RunListBuilder(
             $graph,
             $testPaths,
             $watch,
@@ -845,7 +846,14 @@ final class ReplayState
             $root,
             LaravelIntegration::rulesFor($graph, $root, $config),
             $config->staticDeclarationEdges,
-        ))->build($changed, $branch);
+        );
+
+        // The diff above only speaks for the layer whose sha it was taken from (the
+        // branch's own, or the default branch's when the branch has none yet): any other
+        // layer `decideFresh()` would read a cached result from is checked against its own
+        // (Select\LayerAudit) — here, own results recorded with no sha to check them by.
+        $stale = $sha === null ? [] : (new LayerAudit($graph, $changedFiles, $builder->select(...)))->apply($branch, $sha, $lastRun);
+        $runList = $builder->build($changed, $branch, $stale);
         self::$runList = self::replayAffectedFromRemote($graph, $runList, $branch, $root);
 
         Warnings::debug('changed: ' . ($changed === [] ? '(none)' : implode(', ', $changed)));

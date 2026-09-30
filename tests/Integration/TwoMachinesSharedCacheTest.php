@@ -183,6 +183,32 @@ final class TwoMachinesSharedCacheTest extends TestCase
         self::assertSame(35, ReplayAssert::replayedCount($run['stdout']));
     }
 
+    public function test_push_publishes_a_result_only_under_the_key_it_was_recorded_at(): void
+    {
+        // An object says "a test file with exactly this content key produced these results".
+        // `push` recomputes each key from the working tree, so a cached result recorded on
+        // other content — a later edit nobody ran, or a layer recorded before a revert —
+        // must not be published under the key the tree has now.
+        $offline = ['PHPUNIT_REPLAY_REMOTE' => 'file://' . $this->sharedCache, 'PHPUNIT_REPLAY_REMOTE_PUSH' => 'off', 'CI' => ''];
+
+        $recorded = $this->machine1->replay(['record'], $offline);
+        self::assertSame(0, $recorded['exitCode'], $recorded['stdout'] . $recorded['stderr']);
+
+        // Break Money::add without running anything: 6 of the 7 test files depend on it
+        // (all but GreeterTest).
+        $this->machine1->write('src/Money.php', str_replace(
+            'return new self($this->amount + $other->amount, $this->currency);',
+            'return new self($this->amount - $other->amount, $this->currency);',
+            $this->machine1->read('src/Money.php'),
+        ));
+
+        $pushed = $this->machine1->replay(['push'], $offline);
+
+        self::assertSame(0, $pushed['exitCode'], $pushed['stdout'] . $pushed['stderr']);
+        self::assertStringContainsString('pushed 1 object(s) to the file remote', $pushed['stdout']);
+        self::assertCount(1, $this->remoteObjects());
+    }
+
     public function test_push_and_pull_report_a_remote_that_is_not_configured(): void
     {
         $push = $this->machine1->replay(['push']);

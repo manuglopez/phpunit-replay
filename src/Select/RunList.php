@@ -46,7 +46,14 @@ final class RunList
      *   quarantine (docs/INTERNALS.md "Hermeticity", SPEC.md §8)
      * @param array<string, Reason> $notCacheableReasons test file => why it is not cacheable
      * @param list<string> $noResult the subset of {@see self::$unknown} the graph knows but holds no
-     *   result for (only the reason text differs from a brand-new test file)
+     *   result for (only the reason text differs from a brand-new test file). Never a file of
+     *   `$stale`: a file whose results {@see LayerAudit} stopped serving is explained by that,
+     *   not by the bare absence it leaves behind
+     * @param list<string> $stale test files whose cached results no valid layer can serve
+     *   any more ({@see LayerAudit}): the layer holding them was recorded on a tree the
+     *   current one has moved away from, and nothing underneath covers every test id
+     * @param array<string, Reason> $staleReasons test file => why a layer stopped serving it,
+     *   for every audited file (also those served from a layer underneath instead)
      */
     public function __construct(
         public readonly Selection $selection,
@@ -58,6 +65,8 @@ final class RunList
         public readonly array $notCacheable = [],
         private readonly array $notCacheableReasons = [],
         private readonly array $noResult = [],
+        public readonly array $stale = [],
+        private readonly array $staleReasons = [],
     ) {
     }
 
@@ -74,6 +83,7 @@ final class RunList
             ...$this->rerun,
             ...$this->quarantined,
             ...$this->notCacheable,
+            ...$this->stale,
         ]));
 
         sort($files);
@@ -90,13 +100,20 @@ final class RunList
 
     /**
      * Every reason this file is in the run list: the rule-chain reasons first, then the
-     * synthetic ones (`Uncached`, `Rerun`, `Quarantine`, `NotCacheable`).
+     * synthetic ones (`StaleLayer`, `Uncached`, `Rerun`, `Quarantine`, `NotCacheable`).
+     * `StaleLayer` leads the synthetic ones because it is the cause of whichever follows: a
+     * file whose own cached pass was not valid on this tree and whose layer underneath
+     * holds a failure is re-run for that failure, and would have been served without it.
      *
      * @return list<Reason>
      */
     public function reasonsFor(string $testFileRel): array
     {
         $reasons = $this->selection->reasons()[$testFileRel] ?? [];
+
+        if (isset($this->staleReasons[$testFileRel])) {
+            $reasons[] = $this->staleReasons[$testFileRel];
+        }
 
         if (in_array($testFileRel, $this->unknown, true)) {
             $reasons[] = new Reason('Uncached', in_array($testFileRel, $this->noResult, true) ? 'no cached result' : 'new test file');
@@ -163,13 +180,15 @@ final class RunList
             $this->notCacheable,
             $this->notCacheableReasons,
             $this->noResult,
+            $this->stale,
+            $this->staleReasons,
         );
     }
 
     /**
      * The single bucket an executed test file's tests are counted under for
      * Report\Summary (docs/INTERNALS.md "Summary counters", SPEC.md §11): the rule-chain
-     * selection first (`'affected'`), then the synthetic unknown/rerun buckets
+     * selection first (`'affected'`), then the synthetic unknown/rerun/stale buckets
      * (`'uncached'`), then quarantine (`'quarantined'`) — the same precedence
      * {@see self::reasonsFor()} lists reasons in. Every file actually in {@see self::files()}
      * matches at least one of the three, so this always returns one of them.
@@ -186,7 +205,9 @@ final class RunList
             return 'affected';
         }
 
-        $this->uncachedIndex ??= array_fill_keys([...$this->unknown, ...$this->rerun], true);
+        // A stale file has no valid cached result to replay: uncached, as far as the
+        // summary is concerned.
+        $this->uncachedIndex ??= array_fill_keys([...$this->unknown, ...$this->rerun, ...$this->stale], true);
 
         if (isset($this->uncachedIndex[$testFileRel])) {
             return 'uncached';

@@ -185,4 +185,16 @@ final class LastRunTreeTest extends TestCase
 
         $repo->destroy();
     }
+
+    public function test_it_narrows_a_change_set_only_when_the_pass_diffs_from_the_branchs_own_baseline(): void
+    {
+        $lastRun = new LastRunTree('feature', 'abc', ['a.txt' => 'h'], time());
+
+        self::assertTrue($lastRun->appliesTo('feature', 'abc', 'abc'));
+        // A nearer baseline won: what the snapshot vouches for lives in the own layer, and
+        // the pass is not serving from it.
+        self::assertFalse($lastRun->appliesTo('feature', 'abc', 'def'));
+        self::assertFalse($lastRun->appliesTo('feature', null, 'def'));
+        self::assertFalse($lastRun->appliesTo('other', 'abc', 'abc'));
+    }
 }

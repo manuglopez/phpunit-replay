@@ -51,6 +51,16 @@ final class Graph
     /** @var array<string, list<string>>|null */
     private ?array $reverseIndex = null;
 
+    /**
+     * This pass only, never encoded: per OTHER branch's layer, the test files whose results
+     * that layer must not serve on the current tree (`Select\LayerAudit`), or `true` for a
+     * layer that must not serve anything. Another branch's layer is only ever masked, never
+     * edited — it is still valid for that branch's own tree.
+     *
+     * @var array<string, true|array<string, true>>
+     */
+    private array $withheld = [];
+
     public function __construct(string $projectRoot)
     {
         $real = @realpath($projectRoot);
@@ -436,10 +446,81 @@ final class Graph
     }
 
     /**
+     * Drops every result `$branch`'s OWN layer holds for these test files — the layer a
+     * pass is about to re-base onto the current tree (`Select\LayerAudit`), so an entry the
+     * current tree has invalidated must not survive into the baseline this pass records.
+     *
+     * @param list<string> $testFiles project-relative
+     * @return list<string> the test ids dropped
+     */
+    public function forgetResults(string $branch, array $testFiles): array
+    {
+        $drop = array_fill_keys($testFiles, true);
+        $dropped = [];
+
+        foreach ($this->baselines[$branch]['results'] ?? [] as $testId => $result) {
+            $file = $result['file'] ?? null;
+
+            if (is_string($file) && isset($drop[$file])) {
+                unset($this->baselines[$branch]['results'][$testId]);
+                $dropped[] = $testId;
+            }
+        }
+
+        return $dropped;
+    }
+
+    /**
+     * For this pass only (never encoded): `$branch`'s layer stops serving results for these
+     * test files, or for everything when `$testFiles` is null. For a layer that is not the
+     * current branch's own — it is still valid on its own branch, so it is masked rather
+     * than edited (`Select\LayerAudit`).
+     *
+     * @param list<string>|null $testFiles project-relative
+     */
+    public function withholdResults(string $branch, ?array $testFiles): void
+    {
+        if ($testFiles === null) {
+            $this->withheld[$branch] = true;
+
+            return;
+        }
+
+        $current = $this->withheld[$branch] ?? [];
+
+        if ($current === true) {
+            return;
+        }
+
+        foreach ($testFiles as $file) {
+            $current[$file] = true;
+        }
+
+        $this->withheld[$branch] = $current;
+    }
+
+    /**
+     * The layers `results($branch)` reads, highest priority first: the branch's own, then
+     * its fallbacks ({@see self::fallbackChain()}).
+     *
+     * @return list<string>
+     */
+    public function layersOf(string $branch): array
+    {
+        return [$branch, ...$this->fallbackChain($branch)];
+    }
+
+    /**
      * This branch's own results layered over its fallbacks: the nearest baseline first,
      * the default branch under it. A *complete* layer is authoritative for the test files
      * it covers, so results the layer below holds for those same files are dropped rather
      * than merged (a file whose tests were renamed must not keep reporting the old names).
+     *
+     * Serving a merged result is only sound because the pass that reads it has audited the
+     * layers first (`Select\LayerAudit`): a layer's results were recorded against the tree
+     * at ITS sha, while the pass selects tests by the diff from the sha of the baseline it
+     * resolved. Anything a layer holds that the current tree has invalidated is forgotten
+     * (the own layer) or withheld (any other) before this is read.
      *
      * @return array<string, TestResultArray>
      */
@@ -464,6 +545,16 @@ final class Graph
      * The fallback branches for `$branch`, nearest first. Empty when `$branch` is itself
      * the last stop, which is what makes the default branch read only its own results.
      *
+     * Falling back is sound only BELOW the baseline the pass diffs from: that baseline's
+     * layer is a delta its own passes wrote, so a test it lacks is one its last complete
+     * pass served from further down as valid on its tree — and the diff says the test's
+     * inputs are unchanged since. Whatever a lower layer now holds for it is therefore
+     * either a status that forces a re-run anyway, or pass-like where the test really is
+     * pass-like. A layer ABOVE that baseline (the branch's own, when a nearer one won) or
+     * below a baseline whose layer this graph does not hold (a sha the resolver found on
+     * the remote) has no such argument and is audited against its own diff instead
+     * (`Select\LayerAudit`).
+     *
      * @return list<string>
      */
     private function fallbackChain(string $branch): array
@@ -485,7 +576,20 @@ final class Graph
      */
     private function layer(array $under, string $branch): array
     {
+        $withheld = $this->withheld[$branch] ?? [];
+
+        if ($withheld === true) {
+            return $under;
+        }
+
         $results = $this->baselines[$branch]['results'] ?? [];
+
+        if ($withheld !== []) {
+            $results = array_filter(
+                $results,
+                static fn (array $entry): bool => ! isset($withheld[$entry['file'] ?? '']),
+            );
+        }
 
         if ($results === []) {
             return $under;

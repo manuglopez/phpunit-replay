@@ -45,9 +45,12 @@ use Manuglopez\Replay\Report\DryRunSummary;
 use Manuglopez\Replay\Report\JUnitMerger;
 use Manuglopez\Replay\Report\Summary;
 use Manuglopez\Replay\Report\VerifySummary;
+use Manuglopez\Replay\Select\LayerAudit;
+use Manuglopez\Replay\Select\Reason;
 use Manuglopez\Replay\Select\ReplaySet;
 use Manuglopez\Replay\Select\RunList;
 use Manuglopez\Replay\Select\RunListBuilder;
+use Manuglopez\Replay\Select\Selection;
 use Manuglopez\Replay\Select\TestPaths;
 use Manuglopez\Replay\Select\WatchPatterns;
 use Manuglopez\Replay\Support\Paths;
@@ -730,7 +733,6 @@ final class RunPipeline
         }
 
         $this->graph = $graph;
-        $oldResults = $graph->results($this->branch);
 
         // Decided here, at the one point in this method where "before this pass touched
         // anything" is literally true: before the generated `.phpunit-replay.xml` exists in
@@ -739,6 +741,11 @@ final class RunPipeline
         // content keys and results. It is also the same point in the pipeline `run` decides
         // at ({@see self::runReplay()}), which is what makes the two answers comparable.
         $replaySet = $this->replaySetBeforeVerify($root, $graph);
+
+        // Read after the layer audit inside replaySetBeforeVerify(): the cached results a
+        // divergence is measured against are the ones `run` would actually serve, not a
+        // layer result the current tree has already invalidated.
+        $oldResults = $graph->results($this->branch);
 
         $xml = (new ConfigurationWriter())->withExtensionOnly($this->configFile);
         $this->generatedXml = $xml;
@@ -1013,12 +1020,17 @@ final class RunPipeline
 
         $lastRun = LastRunTree::load($this->stateDir);
 
-        if ($lastRun !== null && $lastRun->branch === $this->branch) {
+        if ($lastRun !== null && $lastRun->appliesTo($this->branch, $graph->ownRecordedSha($this->branch), $sha)) {
             $changed = $lastRun->filterUnchanged($changed, $changedFiles);
         }
 
+        // Same audit `run` makes before serving anything, so the figure keeps describing
+        // what `run` would serve. It forgets own-layer entries this tree has invalidated —
+        // state `run` would drop too, and this pass re-executes every one of them anyway.
+        $stale = $this->auditLayers($graph, $sha, $changedFiles, $lastRun, $root);
+
         /** @var list<string> $runList */
-        $runList = $this->computeRunList($graph, $changed, $this->branch, $root)['runList'];
+        $runList = $this->computeRunList($graph, $changed, $this->branch, $root, $stale)['runList'];
 
         return ReplaySet::against($graph, $this->branch, $runList);
     }
@@ -1055,7 +1067,7 @@ final class RunPipeline
 
         $lastRun = LastRunTree::load($this->stateDir);
 
-        if ($lastRun !== null && $lastRun->branch === $this->branch) {
+        if ($lastRun !== null && $lastRun->appliesTo($this->branch, $graph->ownRecordedSha($this->branch), $sha)) {
             $changed = $lastRun->filterUnchanged($changed, $changedFiles);
         }
 
@@ -1069,7 +1081,11 @@ final class RunPipeline
             $graph->pruneResultsForMissingFiles($this->branch);
         }
 
-        $data = $this->computeRunList($graph, $changed, $this->branch, $root);
+        // `$changed` only speaks for the layer whose sha it was diffed from; every other
+        // layer the pass would serve from is checked against its own (Select\LayerAudit).
+        $stale = $this->auditLayers($graph, $sha, $changedFiles, $lastRun, $root);
+
+        $data = $this->computeRunList($graph, $changed, $this->branch, $root, $stale);
         /** @var list<string> $runList */
         $runList = $data['runList'];
 
@@ -1258,18 +1274,9 @@ final class RunPipeline
         return $exitCode;
     }
 
-    /**
-     * `affected`/`uncached`/`quarantined` here count test FILES, computed before anything
-     * has run — the only thing `--dry-run` (Report\DryRunSummary) can report. The real
-     * run's own Summary counters (docs/INTERNALS.md "Summary counters") are test counts,
-     * classified per executed result afterwards by {@see self::classifyExecuted()}.
-     *
-     * @param list<string> $changed
-     * @return array{list: RunList, runList: list<string>, affected: int, uncached: int, quarantined: int, replayed: int, replayedRemote: int, saved: float}
-     */
-    private function computeRunList(Graph $graph, array $changed, string $branch, string $root): array
+    private function runListBuilder(Graph $graph, string $root): RunListBuilder
     {
-        $builder = new RunListBuilder(
+        return new RunListBuilder(
             $graph,
             $this->testPaths,
             $this->watch,
@@ -1279,11 +1286,50 @@ final class RunPipeline
             LaravelIntegration::rulesFor($graph, $root, $this->config),
             $this->config->staticDeclarationEdges,
         );
+    }
 
-        $list = $builder->build($changed, $branch);
+    /**
+     * {@see LayerAudit}: before anything is served, every result layer `Graph::results()`
+     * would read for this branch is made valid for the current tree, by the same rule chain
+     * that selects this pass's tests. Only layers the diff from `$sha` does not already vouch
+     * for cost a diff of their own — in the common case, none.
+     *
+     * @return array<string, array{reason: Reason, ids: list<string>}>
+     */
+    private function auditLayers(Graph $graph, string $sha, ChangedFiles $changedFiles, ?LastRunTree $lastRun, string $root): array
+    {
+        // Built only if some layer does need its own diff.
+        $select = function (array $changed) use ($graph, $root): Selection {
+            /** @var list<string> $changed */
+            return $this->runListBuilder($graph, $root)->select($changed);
+        };
+        $stale = (new LayerAudit($graph, $changedFiles, $select))->apply($this->branch, $sha, $lastRun);
+
+        foreach ($stale as $file => $entry) {
+            Warnings::debug(sprintf('stale layer: %s not served from %s (%s)', $file, $entry['reason']->detail, $entry['reason']->trigger));
+        }
+
+        return $stale;
+    }
+
+    /**
+     * `affected`/`uncached`/`quarantined` here count test FILES, computed before anything
+     * has run — the only thing `--dry-run` (Report\DryRunSummary) can report. The real
+     * run's own Summary counters (docs/INTERNALS.md "Summary counters") are test counts,
+     * classified per executed result afterwards by {@see self::classifyExecuted()}.
+     *
+     * @param list<string> $changed
+     * @param array<string, array{reason: Reason, ids: list<string>}> $stale {@see self::auditLayers()}
+     * @return array{list: RunList, runList: list<string>, affected: int, uncached: int, quarantined: int, replayed: int, replayedRemote: int, saved: float}
+     */
+    private function computeRunList(Graph $graph, array $changed, string $branch, string $root, array $stale = []): array
+    {
+        $builder = $this->runListBuilder($graph, $root);
+
+        $list = $builder->build($changed, $branch, $stale);
 
         $affectedFiles = $list->selection->testFiles();
-        $uncachedSet = array_diff(array_unique(array_merge($list->unknown, $list->rerun)), $affectedFiles);
+        $uncachedSet = array_diff(array_unique(array_merge($list->unknown, $list->rerun, $list->stale)), $affectedFiles);
 
         $runList = $list->files();
 

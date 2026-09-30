@@ -127,7 +127,15 @@ final class PushCommand extends Command
         return Command::SUCCESS;
     }
 
-    /** One object per test file the graph has results for; keys are recomputed from the graph's own edges. */
+    /**
+     * One object per test file the graph has results for; keys are recomputed from the graph's
+     * own edges and the working tree. An object vouches for exactly the content its key
+     * addresses, so a result goes into it only when it was recorded under that very key
+     * (`GraphUpdater` stamps each executed result with its `key`): a cached result recorded
+     * on other content — an edit made since and never run, or a layer recorded on a tree the
+     * branch has since reverted or merged away from — would otherwise be published as a
+     * verdict on content it never ran against. A file with no such result is not pushed.
+     */
     private static function pushObjects(ObjectStore $objects, Graph $graph, string $root, string $branch): void
     {
         $contentKey = new ContentKey($root);
@@ -148,8 +156,14 @@ final class PushCommand extends Command
 
             $key = $contentKey->forTestFile($graph, $file);
 
-            if ($key !== null) {
-                $objects->putObject($key, $file, $results);
+            if ($key === null) {
+                continue;
+            }
+
+            $recordedHere = array_filter($results, static fn (array $result): bool => ($result['key'] ?? null) === $key);
+
+            if ($recordedHere !== []) {
+                $objects->putObject($key, $file, $recordedHere);
             }
         }
     }
