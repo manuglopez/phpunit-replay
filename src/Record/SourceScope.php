@@ -37,11 +37,38 @@ final class SourceScope
     /**
      * @param list<string> $includes Absolute, normalised directory paths.
      * @param list<string> $excludes Absolute, normalised directory paths.
+     * @param list<string> $configuredExcludes the `<source><exclude>` directories alone (a
+     *        subset of `$excludes`), for {@see self::excludedByConfiguration()}
      */
     public function __construct(
         private readonly array $includes,
         private readonly array $excludes,
+        private readonly array $configuredExcludes = [],
     ) {
+    }
+
+    /**
+     * Whether the project's own `<source><exclude>` keeps `$absoluteFile` out of coverage. Such
+     * a file never gets a coverage edge, whoever executes it, so the rule chain cannot tell
+     * which tests depend on it (`Select\ResiduePatterns`). Only the configured excludes: the
+     * built-in noise directories hold caches and logs, not code a test depends on.
+     */
+    public function excludedByConfiguration(string $absoluteFile): bool
+    {
+        if ($this->configuredExcludes === []) {
+            return false;
+        }
+
+        $real = @realpath($absoluteFile);
+        $candidate = self::normalise($real === false ? $absoluteFile : $real);
+
+        foreach ($this->configuredExcludes as $excluded) {
+            if ($this->startsWithDir($candidate, $excluded)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     public static function fromProjectRoot(string $projectRoot, ?Configuration $configuration = null): self
@@ -75,7 +102,13 @@ final class SourceScope
             $includes = [self::normalise($projectRoot)];
         }
 
-        return new self($includes, $excludes);
+        $configured = [];
+
+        foreach ($phpunitExcludes as $excluded) {
+            $configured[] = self::normalise(@realpath($excluded) ?: $excluded);
+        }
+
+        return new self($includes, $excludes, array_values(array_unique($configured)));
     }
 
     /**

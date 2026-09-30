@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Manuglopez\Replay\Cache;
 
+use Closure;
 use Manuglopez\Replay\Support\Json;
 use Manuglopez\Replay\Support\Paths;
 use Manuglopez\Replay\Version;
@@ -49,6 +50,9 @@ final class Graph
     private array $baselines = [];
 
     private string $defaultBranch = 'main';
+
+    /** Project-relative PHPUnit configuration the graph was recorded with; null when unknown. */
+    private ?string $configuration = null;
 
     private ?string $nearestBranch = null;
 
@@ -237,11 +241,15 @@ final class Graph
     }
 
     /**
-     * Whether some test file has an edge to `$relative`. Stricter than `fileId() !== null`
-     * in memory: a file whose last edge was pruned keeps its id until the next encode, and
-     * disappears from `files` on decode. This answer is the same before and after a round
-     * trip through `graph.json`, which is what a stamp computed now and checked on a later
-     * pass needs (`Select\NonEdgeInputs`).
+     * Whether some test file has an edge to `$relative`. The same as `fileId() !== null` for a
+     * graph just decoded, stricter in memory: `link()` never removes an id, so a file whose
+     * last edge `pruneMissingTestFiles()` dropped keeps its id until `encode()` leaves it out
+     * of `files`. This answer is the same before and after that round trip, which is what a
+     * stamp computed now and checked on a later pass needs (`Select\NonEdgeInputs`, which
+     * asks it only for the two scopes that depend on attribution at all). The rule chain
+     * itself asks `fileId()`: within one pass the two differ only for such an orphan, which
+     * `PhpEdgeRule` then consumes for no test at all, a pass-local imprecision the next pass,
+     * reading the encoded graph, does not have.
      */
     public function isDependency(string $relative): bool
     {
@@ -351,6 +359,21 @@ final class Graph
     public function fingerprint(): array
     {
         return $this->fingerprint;
+    }
+
+    /**
+     * The PHPUnit configuration (project-relative) the passes that wrote this graph read their
+     * test paths from. Encoded as `configuration`, additive: `push` reads the same one a `run`
+     * with `-c` used, so the digests it recomputes are the ones the results were stamped with.
+     */
+    public function setConfiguration(?string $relative): void
+    {
+        $this->configuration = $relative === '' ? null : $relative;
+    }
+
+    public function configuration(): ?string
+    {
+        return $this->configuration;
     }
 
     public function setDefaultBranch(string $branch): void
@@ -950,6 +973,7 @@ final class Graph
         $graph->testTables = self::decodeStringMap($data['test_tables'] ?? null);
         $graph->notCacheable = self::decodeStringList($data['not_cacheable'] ?? null);
         $graph->baselines = self::decodeBaselines($data['baselines'] ?? null);
+        $graph->configuration = is_string($data['configuration'] ?? null) && $data['configuration'] !== '' ? $data['configuration'] : null;
 
         return $graph;
     }
@@ -1145,7 +1169,14 @@ final class Graph
         return $results;
     }
 
-    public function encode(): ?string
+    /**
+     * `$keep`, when given, filters the results of `$branch`'s own layer: what a published graph
+     * may carry (`Cache\Remote\Exchange::publishGraph()`, only results whose stamp is the
+     * current tree's). Every other layer, and the local graph file, are encoded whole.
+     *
+     * @param (Closure(string, TestResultArray): bool)|null $keep
+     */
+    public function encode(?Closure $keep = null, ?string $branch = null): ?string
     {
         // A file id that no edge references any more (its only test was deleted —
         // pruneMissingTestFiles() — or its edge was dropped — pruneMissingDependencies(),
@@ -1226,7 +1257,7 @@ final class Graph
 
         $baselines = [];
 
-        foreach ($this->baselines as $branch => $baseline) {
+        foreach ($this->baselines as $layer => $baseline) {
             $entry = [
                 'sha' => $baseline['sha'] ?? null,
                 'results' => [],
@@ -1237,6 +1268,11 @@ final class Graph
             }
 
             $results = $baseline['results'];
+
+            if ($keep !== null && $layer === $branch) {
+                $results = array_filter($results, static fn (array $result, string|int $testId): bool => $keep((string) $testId, $result), ARRAY_FILTER_USE_BOTH);
+            }
+
             ksort($results);
 
             foreach ($results as $testId => $result) {
@@ -1262,7 +1298,7 @@ final class Graph
                 $entry['results'][$testId] = $short;
             }
 
-            $baselines[$branch] = $entry;
+            $baselines[$layer] = $entry;
         }
 
         ksort($baselines);
@@ -1277,6 +1313,10 @@ final class Graph
             'not_cacheable' => $notCacheable,
             'baselines' => $baselines,
         ];
+
+        if ($this->configuration !== null) {
+            $payload['configuration'] = $this->configuration;
+        }
 
         return Json::encode($payload);
     }

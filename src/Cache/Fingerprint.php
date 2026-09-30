@@ -147,6 +147,18 @@ final readonly class Fingerprint
         'replay_config' => 'phpunit-replay.php',
     ];
 
+    /**
+     * The files hashed into the structural bucket, as they are in the working tree: a graph
+     * recorded with one of them modified carries that modification in its fingerprint, and a
+     * machine without it rejects the graph structurally (`Cache\GraphPublication`).
+     *
+     * @return list<string>
+     */
+    public static function structuralPaths(): array
+    {
+        return array_values(self::STRUCTURAL_FILES);
+    }
+
     /** @var list<string> environmental keys that feed the content key ({@see self::canonicalResultEnvironment()}) */
     private const RESULT_ENVIRONMENT_KEYS = ['php', 'os'];
 

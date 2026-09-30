@@ -84,4 +84,31 @@ final class WatchRuleTest extends TestCase
         self::assertSame([], $selection->testFiles());
         self::assertSame(['README.md'], $context->remaining);
     }
+
+    public function test_a_configured_pattern_applies_to_a_file_an_earlier_rule_claimed_and_a_residue_pattern_does_not(): void
+    {
+        $graph = new Graph($this->root);
+        $graph->markKnownTestFiles(['tests/FooTest.php', 'tests/BarTest.php']);
+
+        $watch = new WatchPatterns();
+        $watch->add(['config/**' => ['tests/FooTest.php']]);
+        $watch->addFallback(['src/Claimed.php' => ['tests']]);
+
+        $selection = new Selection();
+        $context = new Context(
+            $graph,
+            $this->root,
+            new TestPaths([], [], ['Test.php']),
+            $watch,
+            ['config/app.php', 'src/Claimed.php'],
+            $selection,
+        );
+        // PhpEdgeRule (or any other) consumed both before WatchRule ran.
+        $context->consume('config/app.php');
+        $context->consume('src/Claimed.php');
+
+        (new WatchRule())->apply($context);
+
+        self::assertSame(['tests/FooTest.php'], $selection->testFiles(), 'additive for the configured pattern, fallback-only for the residue');
+    }
 }

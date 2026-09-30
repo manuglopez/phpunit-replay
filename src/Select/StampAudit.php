@@ -160,23 +160,6 @@ final readonly class StampAudit
         return $current === null || $rank[$candidate] > $rank[$current] ? $candidate : $current;
     }
 
-    /**
-     * Whether a remote object found under a test file's current content key may stand in for
-     * running it. The key proves the test file and every file it executed; the object's `n`,
-     * when it has one, proves the rest, so it must equal the file's current digest — whatever
-     * selected the file. An object published before `n` existed proves only what the key
-     * covers, and serves only a file selected for reasons the key contains
-     * (`Selection::coveredByContentKey()`).
-     */
-    public static function objectServes(?string $objectDigest, ?string $currentDigest, bool $coveredByContentKey): bool
-    {
-        if ($objectDigest === null) {
-            return $coveredByContentKey;
-        }
-
-        return $currentDigest !== null && $objectDigest === $currentDigest;
-    }
-
     private function label(string $layer): string
     {
         $sha = $this->graph->ownRecordedSha($layer);

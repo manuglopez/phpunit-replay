@@ -15,6 +15,15 @@ final class Context
     /** @var list<string> */
     public array $remaining;
 
+    /**
+     * Every changed path the chain was given, consumed or not: what an additive rule
+     * (`Rules\WatchRule` for configured patterns, `Laravel\Rules\BladeRule`) reads, because
+     * another rule having claimed a file says nothing about who else depends on it.
+     *
+     * @var list<string>
+     */
+    public readonly array $changed;
+
     /** @param list<string> $remaining project-relative changed paths not yet consumed */
     public function __construct(
         public readonly Graph $graph,
@@ -25,6 +34,7 @@ final class Context
         public readonly Selection $selection,
     ) {
         $this->remaining = $remaining;
+        $this->changed = $remaining;
     }
 
     /** Removes every occurrence of $rel from the remaining changes. */

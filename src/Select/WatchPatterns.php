@@ -24,12 +24,23 @@ final class WatchPatterns
     /** @var array<string, array{include: string, excludes: list<string>, allowDotfiles: bool}> */
     private array $parsed = [];
 
-    /** @param list<string> $testDirectories */
-    public function useDefaults(string $projectRoot, array $testDirectories): void
+    /**
+     * @var array<string, list<string>> residue patterns ({@see ResiduePatterns}): literal paths
+     *      of changed files nothing attributes, applied only to what no rule claimed
+     */
+    private array $fallback = [];
+
+    /**
+     * @param list<string> $testDirectories
+     * @param bool $laravelRules whether the Laravel rules run (`LaravelDetector::enabled()`):
+     *        they attribute Blade templates and migrations themselves, so the defaults for
+     *        those two directories are left out ({@see WatchDefaults\Laravel})
+     */
+    public function useDefaults(string $projectRoot, array $testDirectories, bool $laravelRules = false): void
     {
         $defaults = [
             new WatchDefaults\Php(),
-            new WatchDefaults\Laravel(),
+            new WatchDefaults\Laravel($laravelRules),
             new WatchDefaults\Symfony(),
         ];
 
@@ -54,10 +65,43 @@ final class WatchPatterns
         }
     }
 
+    /**
+     * Residue patterns: `Rules\WatchRule` applies them only to a changed file no rule
+     * claimed, unlike {@see self::add()}ed ones, which apply to every changed file.
+     *
+     * @param array<string, list<string>> $patterns a literal path → dirs
+     */
+    public function addFallback(array $patterns): void
+    {
+        foreach ($patterns as $pattern => $dirs) {
+            $this->fallback[$pattern] = array_values(array_unique(array_merge($this->fallback[$pattern] ?? [], $dirs)));
+        }
+    }
+
     /** @return array<string, list<string>> */
     public function patterns(): array
     {
         return $this->patterns;
+    }
+
+    /** @return array<string, list<string>> */
+    public function fallbackPatterns(): array
+    {
+        return $this->fallback;
+    }
+
+    /** @return array<string, list<string>> fallback pattern → dirs, for every one matching $changedFile */
+    public function fallbackMatches(string $changedFile): array
+    {
+        $matched = [];
+
+        foreach ($this->fallback as $pattern => $dirs) {
+            if ($this->keyMatches($pattern, $changedFile)) {
+                $matched[$pattern] = $dirs;
+            }
+        }
+
+        return $matched;
     }
 
     /** @return array<string, list<string>> pattern → dirs, for every pattern matching $changedFile */

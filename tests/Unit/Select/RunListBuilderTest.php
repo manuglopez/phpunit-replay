@@ -325,10 +325,10 @@ final class RunListBuilderTest extends TestCase
 
         // src/Unattributed.php is a PHP file no edge names: the residue fallback covers it.
         self::assertNotSame([], $builder->select(['src/Unattributed.php'])->testFiles());
-        self::assertSame([], $watch->patterns(), 'the residue fallback of an audited diff must not leak into the pass');
+        self::assertSame([], $watch->fallbackPatterns(), 'the residue fallback of an audited diff must not leak into the pass');
 
         $builder->build(['src/Unattributed.php'], 'main');
-        self::assertArrayHasKey('src/Unattributed.php', $watch->patterns(), 'control: build() itself does add it');
+        self::assertArrayHasKey('src/Unattributed.php', $watch->fallbackPatterns(), 'control: build() itself does add it');
     }
 
     public function test_status_names_cover_the_phpunit_status_ints(): void

@@ -7,16 +7,17 @@ namespace Manuglopez\Replay\Laravel\Rules;
 use Manuglopez\Replay\Laravel\TableExtractor;
 use Manuglopez\Replay\Select\Context;
 use Manuglopez\Replay\Select\Reason;
+use Manuglopez\Replay\Select\ResiduePatterns;
 use Manuglopez\Replay\Select\Rule;
 use Manuglopez\Replay\Support\Paths;
 
 /**
  * Laravel-only rule (SPEC.md §7.2.1): a changed `.php` file under `database/migrations/` is parsed
  * with `TableExtractor::fromMigrationSource()`; every test file whose recorded tables
- * (`Graph::testTables()`) intersect the migration's tables is affected. Only runs at all when
- * the graph has at least one recorded table (`si hay test_tables`) — otherwise every migration
- * path is left unconsumed for `WatchRule`. A migration that cannot be read, or one that parses
- * to zero tables, is also left unconsumed ("no parseable → cae a WatchRule").
+ * (`Graph::testTables()`) intersect the migration's tables is affected. It narrows only when
+ * the graph has at least one recorded table and the migration yields some; otherwise it
+ * selects every test (a migration that cannot be read, parses to zero tables, or a graph
+ * with no tables yet), since nothing else stands in for it (`WatchDefaults\Laravel`).
  */
 final class MigrationRule implements Rule
 {
@@ -29,10 +30,6 @@ final class MigrationRule implements Rule
     {
         $testTables = $context->graph->testTables();
 
-        if ($testTables === []) {
-            return;
-        }
-
         foreach ($context->remaining as $rel) {
             if (! self::isMigrationPath($rel)) {
                 continue;
@@ -40,7 +37,19 @@ final class MigrationRule implements Rule
 
             $tables = self::tablesForMigration($rel, $context->projectRoot);
 
-            if ($tables === []) {
+            // Nothing to narrow by: a migration with no readable table (deleted, raw
+            // statements, a data migration), or a graph with no table recorded yet. Every
+            // test runs, which is what the `database/migrations/**` watch default this rule
+            // replaces did for it (`Select\WatchDefaults\Laravel`).
+            if ($tables === [] || $testTables === []) {
+                $targets = ResiduePatterns::targetsFor($context->testPaths);
+
+                foreach ($context->watch->testsUnderDirectories($targets, $context->graph->allTestFiles()) as $testFile) {
+                    $context->selection->add($testFile, new Reason($this->name(), $rel, 'no tables to narrow by'));
+                }
+
+                $context->consume($rel);
+
                 continue;
             }
 

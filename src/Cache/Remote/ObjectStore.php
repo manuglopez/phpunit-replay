@@ -51,12 +51,18 @@ use Manuglopez\Replay\Support\Json;
  * results ran on. An object without it proves only what `k` covers.
  *
  * @phpstan-import-type TestResultArray from Graph
- * @phpstan-type RemoteObject array{k: string, file: string, n: ?string, results: array<string, TestResultArray>}
+ * @phpstan-type RemoteObject array{k: string, file: string, n: ?string, at: int, results: array<string, TestResultArray>, variants: array<string, array{at: int, results: array<string, TestResultArray>}>}
  */
 final class ObjectStore
 {
     /** @var int months before the current one an object lookup probes by name */
     private const SHARD_LOOKBACK = 5;
+
+    /** @var int digests one object keeps results for, newest first ({@see self::putObject()}) */
+    public const VARIANTS = 20;
+
+    /** @var array<string, true> keys {@see self::object()} already asked the remote for again this pass */
+    private array $refetched = [];
 
     /** @var list<string>|null memoised `keys('objects/')` for the fallback scan */
     private ?array $listing = null;
@@ -152,7 +158,7 @@ final class ObjectStore
      *
      * @return RemoteObject|null
      */
-    public function object(string $k): ?array
+    public function object(string $k, ?string $digest = null): ?array
     {
         if ($k === '') {
             return null;
@@ -160,16 +166,64 @@ final class ObjectStore
 
         $local = $this->mirrorPath($k);
         $cached = AtomicFile::read($local);
+        $mirrored = $cached !== null ? self::decodeObject($cached, $k) : null;
 
-        if ($cached !== null) {
-            $decoded = self::decodeObject($cached, $k);
-
-            if ($decoded !== null) {
+        if ($mirrored !== null) {
+            // Objects grow a variant per digest, so a mirrored copy without the one asked for
+            // may just be older than the remote's: asked again once per key and pass.
+            if ($digest === null || self::holds($mirrored, $digest) || isset($this->refetched[$k])) {
                 $this->debug('hit (local mirror) objects/*/' . $k . '.json');
 
-                return $decoded;
+                return $mirrored;
             }
+
+            $this->refetched[$k] = true;
         }
+
+        return $this->fetch($k) ?? $mirrored;
+    }
+
+    /**
+     * Whether an object holds results recorded under `$digest` (its top-level `n` or a
+     * variant).
+     *
+     * @param RemoteObject $object
+     */
+    public static function holds(array $object, string $digest): bool
+    {
+        return $object['n'] === $digest || isset($object['variants'][$digest]);
+    }
+
+    /**
+     * The results an object proves for a test file whose current non-edge digest is
+     * `$digest`: the ones recorded under that very digest, top-level or variant. An object
+     * written before digests existed proves only its content key, and serves only a file
+     * selected for reasons the key covers (`Select\Selection::coveredByContentKey()`).
+     *
+     * @param RemoteObject $object
+     * @return array<string, TestResultArray>|null
+     */
+    public static function resultsFor(array $object, ?string $digest, bool $coveredByContentKey): ?array
+    {
+        if ($object['n'] === null && $object['variants'] === []) {
+            return $coveredByContentKey ? $object['results'] : null;
+        }
+
+        if ($digest === null) {
+            return null;
+        }
+
+        if ($object['n'] === $digest) {
+            return $object['results'];
+        }
+
+        return $object['variants'][$digest]['results'] ?? null;
+    }
+
+    /** @return RemoteObject|null the remote's copy, mirrored locally when found */
+    private function fetch(string $k): ?array
+    {
+        $local = $this->mirrorPath($k);
 
         foreach ($this->shards() as $shard) {
             $body = $this->remote->get(self::objectKey($shard, $k));
@@ -213,14 +267,22 @@ final class ObjectStore
     }
 
     /**
-     * Publishes the results of one test file under its content key. A key this machine
-     * already has mirrored locally (durably confirmed, {@see self::confirmPublished()}) or
-     * already staged this very session is skipped: objects are immutable, so re-uploading one
-     * only costs bandwidth (and, on the git backend, a pointless commit).
+     * Publishes the results of one test file under its content key and non-edge digest.
+     *
+     * One object per `k`, holding a variant per digest its results were recorded under: the
+     * newest at the top level (`n`, `results`, which is all a reader that predates variants
+     * reads) and up to {@see self::VARIANTS} − 1 older ones under `variants`, merged on
+     * publish. So a digest another machine published first does not stop this one's from
+     * being served. Skipped when the object this machine knows (its local mirror, or what it
+     * staged this session) already holds the digest; the merge is with that copy, and a
+     * variant only another machine has published since, unseen here, can be overwritten: a
+     * miss for it, never a result served for another digest. A mirror truncated by `prune`
+     * is refetched before merging. An object published without a digest (by a caller that
+     * has none) is skipped whenever the key is already known, as before digests existed.
      *
      * @param array<string, TestResultArray> $results
      * @param string|null $digest the non-edge input digest every one of `$results` was
-     *        recorded under, published as `n`
+     *        recorded under
      */
     public function putObject(string $k, string $testFileRel, array $results, ?string $digest = null): bool
     {
@@ -228,19 +290,26 @@ final class ObjectStore
             return false;
         }
 
-        if (isset($this->pending[$k]) || is_file($this->mirrorPath($k))) {
+        $known = isset($this->pending[$k]) ? self::decodeObject($this->pending[$k], $k) : null;
+
+        if ($known === null && is_file($this->mirrorPath($k))) {
+            $known = self::decodeObject((string) AtomicFile::read($this->mirrorPath($k)), $k) ?? $this->fetch($k);
+
+            // A marker this pass cannot read, and nothing on the remote: published as before.
+            if ($known === null && $digest === null) {
+                $this->debug('skip (already published) objects/*/' . $k . '.json');
+
+                return false;
+            }
+        }
+
+        if ($known !== null && ($digest === null || self::holds($known, $digest))) {
             $this->debug('skip (already published) objects/*/' . $k . '.json');
 
             return false;
         }
 
-        $object = ['k' => $k, 'file' => $testFileRel];
-
-        if ($digest !== null) {
-            $object['n'] = $digest;
-        }
-
-        $body = Json::encode([...$object, 'results' => $results]);
+        $body = Json::encode(self::withVariant($known, $k, $testFileRel, $results, $digest, time()));
 
         if ($body === null) {
             return false;
@@ -477,8 +546,64 @@ final class ObjectStore
         }
 
         $n = $data['n'] ?? null;
+        $at = $data['at'] ?? null;
+        $variants = [];
 
-        return ['k' => $k, 'file' => $file, 'n' => is_string($n) && $n !== '' ? $n : null, 'results' => $results];
+        foreach (is_array($data['variants'] ?? null) ? $data['variants'] : [] as $digest => $variant) {
+            if (! is_string($digest) || $digest === '' || ! is_array($variant)) {
+                continue;
+            }
+
+            $variantResults = self::decodeResults($variant['results'] ?? null);
+
+            if ($variantResults !== []) {
+                $variants[$digest] = ['at' => is_int($variant['at'] ?? null) ? $variant['at'] : 0, 'results' => $variantResults];
+            }
+        }
+
+        return [
+            'k' => $k,
+            'file' => $file,
+            'n' => is_string($n) && $n !== '' ? $n : null,
+            'at' => is_int($at) ? $at : 0,
+            'results' => $results,
+            'variants' => $variants,
+        ];
+    }
+
+    /**
+     * `$existing` with `$results` as its newest variant, the one at the top level; the others
+     * move under `variants`, newest first, {@see self::VARIANTS} in all. A top level written
+     * without a digest (before digests existed) is not kept as a variant: it names none.
+     *
+     * @param RemoteObject|null $existing
+     * @param array<string, TestResultArray> $results
+     * @return array<string, mixed>
+     */
+    private static function withVariant(?array $existing, string $k, string $file, array $results, ?string $digest, int $now): array
+    {
+        $object = ['k' => $k, 'file' => $file];
+
+        if ($digest === null) {
+            return [...$object, 'results' => $results];
+        }
+
+        $others = $existing['variants'] ?? [];
+
+        if ($existing !== null && $existing['n'] !== null) {
+            $others[$existing['n']] = ['at' => $existing['at'], 'results' => $existing['results']];
+        }
+
+        unset($others[$digest]);
+        uasort($others, static fn (array $a, array $b): int => $b['at'] <=> $a['at']);
+
+        $object += ['n' => $digest, 'at' => $now, 'results' => $results];
+
+        if ($others !== []) {
+            $object['variants'] = array_slice($others, 0, self::VARIANTS - 1, true);
+        }
+
+        return $object;
     }
 
     /** @return array<string, TestResultArray> */

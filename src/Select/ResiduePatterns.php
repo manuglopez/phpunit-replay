@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Manuglopez\Replay\Select;
 
 use Manuglopez\Replay\Cache\Graph;
+use Manuglopez\Replay\Record\SourceScope;
+use Manuglopez\Replay\Support\Paths;
 
 /**
  * The conservative half of `static_declaration_edges` (SPEC.md §4.3.1): a watch pattern per
@@ -55,9 +57,20 @@ use Manuglopez\Replay\Cache\Graph;
  */
 final readonly class ResiduePatterns
 {
+    /**
+     * @param bool $unattributed the `static_declaration_edges` half: a `.php` file the graph has
+     *        no edge for
+     * @param SourceScope|null $scope with it, the half that holds whatever the flag: a `.php`
+     *        file `<source><exclude>` keeps out of coverage ({@see self::isUnattributable()})
+     * @param WatchPatterns|null $watch the configured patterns, which take precedence over the
+     *        second half
+     */
     public function __construct(
         private Graph $graph,
         private TestPaths $testPaths,
+        private bool $unattributed = true,
+        private ?SourceScope $scope = null,
+        private ?WatchPatterns $watch = null,
     ) {
     }
 
@@ -117,7 +130,36 @@ final readonly class ResiduePatterns
 
     public function isResidue(string $rel): bool
     {
-        return self::hasResidueShape($rel, $this->testPaths) && $this->graph->fileId($rel) === null;
+        if (! self::hasResidueShape($rel, $this->testPaths)) {
+            return false;
+        }
+
+        if ($this->unattributed && $this->graph->fileId($rel) === null) {
+            return true;
+        }
+
+        return $this->isUnattributable($rel);
+    }
+
+    /**
+     * The half of the residue that does not depend on `static_declaration_edges` (F5): a
+     * `.php` file the project's own `<source><exclude>` keeps out of coverage can never be
+     * attributed to the tests that execute it, whether they do or not. It runs everything,
+     * unless a configured watch pattern already says which tests it belongs to, which is more
+     * precise and was the project's own statement about it. A function of the path and the
+     * configuration only, never of the graph.
+     */
+    public function isUnattributable(string $rel): bool
+    {
+        if ($this->scope === null || ! self::hasResidueShape($rel, $this->testPaths)) {
+            return false;
+        }
+
+        if (! $this->scope->excludedByConfiguration(Paths::join($this->graph->projectRoot(), $rel))) {
+            return false;
+        }
+
+        return $this->watch === null || $this->watch->matches($rel) === [];
     }
 
     /**

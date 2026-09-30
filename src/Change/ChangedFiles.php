@@ -134,45 +134,43 @@ final readonly class ChangedFiles
      */
     private function workingTreeChanges(): ?array
     {
-        $output = $this->git->withTimeout(self::SCAN_TIMEOUT)->raw(['status', '--porcelain=v1', '-z', '--untracked-files=all']);
+        $entries = $this->git->withTimeout(self::SCAN_TIMEOUT)->statusEntries();
 
-        if ($output === null) {
+        if ($entries === null) {
             return null;
         }
 
-        if ($output === '') {
-            return [];
+        return array_map(static fn (array $entry): string => $entry['path'], $entries);
+    }
+
+    /**
+     * The working tree's changes as `git status` reports them, git-ignored paths dropped the
+     * way {@see self::since()} drops them (a tracked file matching an ignore pattern is not
+     * something the rule chain ever sees). Null when git failed.
+     *
+     * @return list<array{status: string, path: string}>|null
+     */
+    public function workingTreeStatus(): ?array
+    {
+        $entries = $this->git->withTimeout(self::SCAN_TIMEOUT)->statusEntries();
+
+        if ($entries === null) {
+            return null;
         }
 
-        $records = explode("\x00", rtrim($output, "\x00"));
-        $files = [];
-        $count = count($records);
+        $paths = [];
 
-        for ($i = 0; $i < $count; $i++) {
-            $record = $records[$i];
-
-            if (strlen($record) < 4) {
-                continue;
-            }
-
-            $status = substr($record, 0, 2);
-            $path = substr($record, 3);
-
-            if ($status[0] === 'R' || $status[0] === 'C') {
-                $files[] = $path;
-
-                if (isset($records[$i + 1]) && $records[$i + 1] !== '') {
-                    $files[] = $records[$i + 1];
-                    $i++;
-                }
-
-                continue;
-            }
-
-            $files[] = $path;
+        foreach ($entries as $entry) {
+            $paths[$entry['path']] = true;
         }
 
-        return $files;
+        $kept = $this->filterIgnored($paths);
+
+        if ($kept === null) {
+            return null;
+        }
+
+        return array_values(array_filter($entries, static fn (array $entry): bool => isset($kept[$entry['path']])));
     }
 
     /**

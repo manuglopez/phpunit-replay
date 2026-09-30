@@ -78,14 +78,19 @@ final class MigrationRuleTest extends TestCase
         self::assertSame([], $context->remaining);
     }
 
-    public function test_an_unparseable_migration_is_left_unconsumed_for_watch_rule(): void
+    /**
+     * With nothing to narrow by, a migration runs every test: what the
+     * `database/migrations/**` watch default this rule replaces did for it
+     * (`Select\WatchDefaults\Laravel`).
+     */
+    public function test_an_unparseable_migration_runs_every_test(): void
     {
         $this->write(
             'database/migrations/2024_01_01_000000_mystery.php',
             "<?php\nreturn new class { public function up(): void {} };\n",
         );
 
-        $graph = new Graph($this->root);
+        $graph = $this->graphWithTwoTests();
         $graph->replaceTestTables(['tests/PostsTest.php' => ['posts']]);
 
         $selection = new Selection();
@@ -93,13 +98,14 @@ final class MigrationRuleTest extends TestCase
 
         (new MigrationRule())->apply($context);
 
-        self::assertSame([], $selection->testFiles());
-        self::assertSame(['database/migrations/2024_01_01_000000_mystery.php'], $context->remaining);
+        self::assertSame(['tests/OtherTest.php', 'tests/PostsTest.php'], $selection->testFiles());
+        self::assertSame('no tables to narrow by', $selection->reasons()['tests/OtherTest.php'][0]->detail);
+        self::assertSame([], $context->remaining);
     }
 
-    public function test_a_deleted_migration_is_left_unconsumed(): void
+    public function test_a_deleted_migration_runs_every_test(): void
     {
-        $graph = new Graph($this->root);
+        $graph = $this->graphWithTwoTests();
         $graph->replaceTestTables(['tests/PostsTest.php' => ['posts']]);
 
         $selection = new Selection();
@@ -107,26 +113,34 @@ final class MigrationRuleTest extends TestCase
 
         (new MigrationRule())->apply($context);
 
-        self::assertSame([], $selection->testFiles());
-        self::assertSame(['database/migrations/2024_01_01_000000_deleted.php'], $context->remaining);
+        self::assertSame(['tests/OtherTest.php', 'tests/PostsTest.php'], $selection->testFiles());
+        self::assertSame([], $context->remaining);
     }
 
-    public function test_does_nothing_at_all_when_the_graph_has_no_test_tables(): void
+    public function test_runs_every_test_when_the_graph_has_no_test_tables(): void
     {
         $this->write(
             'database/migrations/2024_01_01_000000_create_posts_table.php',
             "<?php\nSchema::create('posts', function (\$table) {});\n",
         );
 
-        $graph = new Graph($this->root);
+        $graph = $this->graphWithTwoTests();
 
         $selection = new Selection();
         $context = $this->makeContext($graph, ['database/migrations/2024_01_01_000000_create_posts_table.php'], $selection);
 
         (new MigrationRule())->apply($context);
 
-        self::assertSame([], $selection->testFiles());
-        self::assertSame(['database/migrations/2024_01_01_000000_create_posts_table.php'], $context->remaining);
+        self::assertSame(['tests/OtherTest.php', 'tests/PostsTest.php'], $selection->testFiles());
+        self::assertSame([], $context->remaining);
+    }
+
+    private function graphWithTwoTests(): Graph
+    {
+        $graph = new Graph($this->root);
+        $graph->markKnownTestFiles(['tests/PostsTest.php', 'tests/OtherTest.php']);
+
+        return $graph;
     }
 
     public function test_ignores_a_changed_file_outside_the_migrations_directory(): void
@@ -154,7 +168,7 @@ final class MigrationRuleTest extends TestCase
         return new Context(
             $graph,
             $this->root,
-            new TestPaths([], [], ['Test.php']),
+            new TestPaths(['tests'], [], ['Test.php']),
             new WatchPatterns(),
             $remaining,
             $selection,

@@ -97,13 +97,78 @@ final class ObjectStoreTest extends TestCase
 
         $body = Json::decodeArray((string) file_get_contents($this->remoteRoot . '/' . ObjectStore::objectKey(ObjectStore::currentShard(), 'deadbeef')));
         self::assertIsArray($body);
-        self::assertSame(['k', 'file', 'n', 'results'], array_keys($body), 'the path and k are unchanged, n is additive');
+        self::assertSame(['k', 'file', 'n', 'at', 'results'], array_keys($body), 'the path and k are unchanged, n is additive');
 
         $reader = new ObjectStore($this->backend(), $this->tmp . '/state2', 'shop-abc');
         self::assertSame('n1:abc', $reader->object('deadbeef')['n'] ?? null);
         $legacy = $reader->object('cafebabe');
         self::assertNotNull($legacy);
         self::assertNull($legacy['n'], 'an object written without a digest has none');
+        self::assertSame($this->results(), ObjectStore::resultsFor($legacy, 'n1:any', true), 'it serves a key-covered file');
+        self::assertNull(ObjectStore::resultsFor($legacy, 'n1:any', false), 'and nothing else');
+    }
+
+    public function testAnObjectHoldsAVariantPerDigestAndTheFirstPublisherNoLongerSquatsTheKey(): void
+    {
+        // Machine 1 publishes k under its digest; machine 2 read it (and mirrored it), ran the
+        // same k under another digest, and must still be able to publish, and be served.
+        $b1 = $this->backend();
+        $b1->begin();
+        $m1 = new ObjectStore($b1, $this->tmp . '/m1', 'shop-abc');
+        self::assertTrue($m1->putObject('kkk', 'tests/MoneyTest.php', $this->results(), 'n1:dirty'));
+        $b1->end();
+        $m1->confirmPublished();
+
+        $b2 = $this->backend();
+        $b2->begin();
+        $m2 = new ObjectStore($b2, $this->tmp . '/m2', 'shop-abc');
+        $first = $m2->object('kkk');
+        self::assertNotNull($first);
+        self::assertNull(ObjectStore::resultsFor($first, 'n1:clean', true), 'a miss by digest');
+        self::assertTrue($m2->putObject('kkk', 'tests/MoneyTest.php', $this->results(), 'n1:clean'));
+        self::assertFalse($m2->putObject('kkk', 'tests/MoneyTest.php', $this->results(), 'n1:clean'), 'already published');
+        $b2->end();
+        $m2->confirmPublished();
+
+        $m3 = new ObjectStore($this->backend(), $this->tmp . '/m3', 'shop-abc');
+        $merged = $m3->object('kkk');
+        self::assertNotNull($merged);
+        self::assertSame('n1:clean', $merged['n'], 'the newest at the top level, which is all an older reader reads');
+        self::assertSame(['n1:dirty'], array_keys($merged['variants']));
+        self::assertSame($this->results(), ObjectStore::resultsFor($merged, 'n1:dirty', false));
+        self::assertSame($this->results(), ObjectStore::resultsFor($merged, 'n1:clean', false));
+        self::assertNull(ObjectStore::resultsFor($merged, 'n1:other', true));
+    }
+
+    public function testAnObjectKeepsTheNewestVariantsOnly(): void
+    {
+        $store = $this->store();
+
+        for ($i = 0; $i < ObjectStore::VARIANTS + 5; $i++) {
+            self::assertTrue($store->putObject('kkk', 'tests/MoneyTest.php', $this->results(), 'n1:' . $i));
+        }
+
+        $object = (new ObjectStore($this->backend(), $this->tmp . '/state2', 'shop-abc'))->object('kkk');
+        self::assertNotNull($object);
+        self::assertSame('n1:' . (ObjectStore::VARIANTS + 4), $object['n']);
+        self::assertCount(ObjectStore::VARIANTS - 1, $object['variants']);
+    }
+
+    public function testAMirroredCopyWithoutTheDigestAskedForIsFetchedAgainOnce(): void
+    {
+        $writer = $this->store();
+        $writer->putObject('kkk', 'tests/MoneyTest.php', $this->results(), 'n1:a');
+
+        $reader = new ObjectStore($this->backend(), $this->tmp . '/state2', 'shop-abc');
+        self::assertNotNull($reader->object('kkk'));
+
+        $writer2 = new ObjectStore($this->backend(), $this->tmp . '/state3', 'shop-abc');
+        $writer2->object('kkk');
+        $writer2->putObject('kkk', 'tests/MoneyTest.php', $this->results(), 'n1:b');
+
+        $again = $reader->object('kkk', 'n1:b');
+        self::assertNotNull($again);
+        self::assertTrue(ObjectStore::holds($again, 'n1:b'), 'the stale mirror was refreshed');
     }
 
     public function testAReadIsMirroredLocallyAndSurvivesTheRemoteGoingAway(): void

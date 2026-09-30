@@ -737,6 +737,35 @@ final class GraphUpdaterTest extends TestCase
         $repo->destroy();
     }
 
+    public function test_a_replayed_result_keeps_the_stamp_it_was_served_with_or_none(): void
+    {
+        $repo = GitRepo::init();
+        $repo->write('tests/FooTest.php', "<?php\n");
+        $repo->write('tests/Fixtures/data.txt', "one\n");
+        $repo->commitAll('initial');
+
+        $graph = new Graph($repo->root);
+        $graph->markKnownTestFiles(['tests/FooTest.php']);
+        // Served from a remote object written before digests: a key, no digest.
+        $served = [...$this->makeResult(file: 'tests/FooTest.php'), 'key' => 'k-from-the-object'];
+        $partial = new RunPartial(
+            edges: [],
+            results: ['Foo::test_it' => $this->makeResult(file: 'tests/FooTest.php')],
+            tables: [],
+            meta: [],
+        );
+
+        (new GraphUpdater($graph, $repo->root, new ContentKey($repo->root), null, null, null, null, $this->inputsFor($graph, $repo->root)))
+            ->apply($partial, 'main', recordsEdges: true, complete: false, replayed: ['Foo::test_it' => $served]);
+
+        $result = $graph->ownResults('main')['Foo::test_it'] ?? null;
+        self::assertNotNull($result);
+        self::assertSame('k-from-the-object', $result['key'] ?? null);
+        self::assertArrayNotHasKey('digest', $result, 'not run here, so not validated here');
+
+        $repo->destroy();
+    }
+
     public function test_a_status_change_under_the_same_key_but_other_non_edge_inputs_is_not_a_flip(): void
     {
         $repo = GitRepo::init();

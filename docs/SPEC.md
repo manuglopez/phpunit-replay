@@ -449,11 +449,11 @@ setting.
 `k` covers the test file and the files it executed. The rule chain (§7.2) also selects a test file for files it did not execute: a watched file it reads, a migration of one of its tables, a new sibling or Blade partial next to something it uses, and with §4.3.1 any `.php` file nothing has an edge to. The digest `n` covers those, per test file, and is stamped on each result next to `k`:
 
 ```
-n(T) = "n1:" . xxh128("nonedge@1\n" . join(sorted(scopeId . "=" . scopeDigest . "\n")))
-scopeDigest = xxh128(join(sorted(path . "\0" . ContentHash(path) . "\n")))   // over the scope's members
+n(T) = "n2:" . xxh128("nonedge@2\n" . join(sorted(scopeId . "=" . hex(xor) . ":" . count . "\n")))
+xor  = ⊕ xxh128(path . "\0" . ContentHash(path))   // over the scope's members for T
 ```
 
-over the non-empty scopes `T` carries: `migrations@1`, `sibling:<dir>@1`, `blade@1`, `watch:<pattern>@1`, `residue@1` (§4.3.1 only). Members are the working tree's files (`git ls-files -co --exclude-standard`, minus ignored and missing files) that the rule chain would claim for `T` if they changed, in its consumption order — a file some test has an edge to belongs to `k`, not to `n`. Defined in one place, `Select\NonEdgeInputs`; `n1` is its version token. A result is served only when its `k` and `n` both equal the ones the current tree gives its test file (docs/INTERNALS.md "Result stamps"). A result without `n` (recorded before it existed) executes once and is stamped.
+over the non-empty scopes `T` carries: `watch:<pattern>@2`, `migrations@2`, `blade@2`, `sibling:<dir>@2`, `unattributable@1` (a `.php` file `<source><exclude>` keeps out of coverage), `residue@2` (§4.3.1 only). Members are the working tree's files (`git ls-files -co --exclude-standard`, minus ignored and missing files) that the rule chain would select `T` for if they changed, **minus `T` and `T`'s own dependencies** — those are `k`'s. So another test gaining or losing an edge never moves `n(T)`; `T` gaining one moves the file from its scope into its key. Only `sibling` and `residue`, presumptions about files nothing attributes yet, depend on whether some test has an edge to a file. Defined in one place, `Select\NonEdgeInputs`; `n2` is its version token. A result is served only when its `k` and `n` both equal the ones the current tree gives its test file (docs/INTERNALS.md "Result stamps"). A result without `n` (recorded before it existed) executes once and is stamped.
 
 ### 4.4 ContentHash (normalization)
 
@@ -634,19 +634,19 @@ The change set speaks for one result layer only — the one whose sha it was dif
 
 ### 7.2 Selector::affected(changed): set<testFile>
 
-Chain of rules, each receiving the changes the previous ones didn't consume:
+Chain of rules, each receiving the changes the previous ones didn't consume — except the two additive ones, which see every changed file (`Context::$changed`): BladeRule and the configured watch patterns. Whatever else claimed a file says nothing about who else depends on it, and a file whose work coverage credits to the first test that runs it (once per process) would otherwise select only that test.
 
-1. **MigrationRule** (if `test_tables` exists): a changed `database/migrations/**/*.php` file → `TableExtractor::fromMigrationSource()` (`Schema::create|table|drop|dropIfExists|rename`, `CREATE|ALTER|DROP TABLE`, `DB::table('x')`) → tests whose tables intersect. An unparseable migration falls back to WatchRule.
+1. **MigrationRule** (Laravel): a changed `database/migrations/**/*.php` file → `TableExtractor::fromMigrationSource()` (`Schema::create|table|drop|dropIfExists|rename`, `CREATE|ALTER|DROP TABLE`, `DB::table('x')`) → tests whose tables intersect. A migration with no readable table (unparseable, deleted), or a graph with no `test_tables` yet → every test (what the `database/migrations/**` default did before this rule replaced it).
 2. **PhpEdgeRule**: a changed file with an id in `files` → every test file whose edges contain it. A **deleted** file with an id → the same (the edges still stand).
 3. **TestFileRule**: a changed file that `TestPaths::isTestFile()` recognizes (directories and suffixes from `<testsuites>`) and exists on disk → affected.
 4. **SiblingRule** (Laravel, optional): a new/unknown `.php` file under `app/Providers/, app/Listeners/, app/Events/, app/Observers/, app/Policies/, app/Console/Commands/, database/factories/, database/seeders/` → tests with edges to some file in the same directory.
-5. **BladeRule** (Laravel, optional): a changed `.blade.php` not in the graph → computes static ancestors (`@include`, `@extends`, `@component`, `view('x')`, `<x-name`) and affects tests with edges to any ancestor.
-6. **WatchRule**: whatever is left and unknown to the graph → `WatchPatterns` (globs → test directories). Defaults:
+5. **BladeRule** (Laravel, optional, additive): any changed `.blade.php`, known to the graph or not, deleted included → computes static ancestors (`@include`, `@extends`, `@component`, `view('x')`, `<x-name`) and affects tests with edges to any ancestor.
+6. **WatchRule**: configured patterns (defaults and user) apply to **every** changed file, additively; the residue patterns (§4.3.1, and a `.php` file `<source><exclude>` keeps out of coverage, whatever the flag, unless a configured pattern names it) apply only to what no rule claimed → `WatchPatterns` (globs → test directories). Defaults:
    - Generic: `.env*`, `phpunit.xml*`, `docker-compose*.y*ml`, `tests/**/Fixtures/**`, `tests/**/__snapshots__/**` → `tests`.
-   - Laravel (if `artisan` exists): `config/**`, `routes/**`, `database/migrations/**`, `resources/views/**`, `lang/**`, `resources/lang/**`, `app/** !*.php`, `bootstrap/*.php` → `tests`.
+   - Laravel (if `artisan` exists): `config/**`, `routes/**`, `lang/**`, `resources/lang/**`, `app/** !*.php`, `bootstrap/*.php` → `tests`; plus `database/migrations/**` and `resources/views/**` only when the Laravel rules are off (`laravel => 'off'`), since with them on MigrationRule and BladeRule attribute those files per test.
    - Symfony (if `config/bundles.php` exists): `config/**`, `migrations/**`, `templates/**`, `translations/**` → `tests`.
    - User: `phpunit-replay.php` → `'watch' => ['config/billing/**' => 'tests/Feature/Billing']`. Merged with the defaults.
-7. Files that match nothing (README, docs) → affect nothing. This is deliberate and must be documented: if a `.php` file under `app/` isn't in any edge, it's because no test executed it.
+7. Files that match nothing (README, docs) → affect nothing. This is deliberate and must be documented: if a `.php` file under `app/` isn't in any edge, it's because no test executed it — unless coverage could not see it (`<source><exclude>`), which makes it residue (item 6).
 
 Post-processing: if any source `.php` file changed and **no driver is available** → run the full suite (edges can't be refreshed). Test files that no longer exist on disk are dropped.
 
@@ -686,7 +686,7 @@ Keys: `graph/<project-key>/<branch>.json` (full baseline graph per branch, uploa
 
 Startup flow with no local graph: `get(graph/<key>/<branch>)` → if missing, `get(graph/<key>/<defaultBranch>)` → reconcile fingerprint and sha ancestry → use it. Per-test-file flow in replay: if a test file is affected but `objects/<k_actual>.json` exists in the remote (another machine already ran that exact content) → it's treated as **replayed-remote** and not run. An object carries `n`, the non-edge input digest its results were recorded under (§4.3.2), in its body beside `k`: it serves only when `n` equals this tree's, whatever selected the file. An object without `n` serves only when every reason the file was selected is one `k` covers (a PHP edge, or the test file itself changing); a file also selected by a watch pattern, a migration or any other rule runs, since `k` does not contain that trigger. This is what lets a PR's CI inherit work from a laptop or from another PR with the same files.
 
-Publishing: objects always, dirty tree or not (their `k` and `n` describe what actually ran; only results recorded under the current `k` and `n` go in). A branch graph only from a clean working tree — no tracked modification, no untracked file a result could depend on (a test file, a file of the graph's universe, a member of a scope) — because it is adopted as a baseline at its sha; a dirty tree skips it with a one-line notice, and `push --graph` exits 1.
+Publishing: objects always, dirty tree or not (their `k` and `n` describe what actually ran; only results recorded under the current `k` and `n` go in). An object keeps a variant per `n`, the newest at the top level (all an older reader reads) and up to 19 older ones under `variants`, merged on publish. A branch graph only from a working tree clean of what a result could depend on — no changed path, tracked or untracked, that is a test file, a file of the graph's universe or a path a scope would hold (git-ignored paths and the fingerprint's own structural files do not count) — because it is adopted as a baseline at its sha, and carrying only the branch's results stamped for that tree; a dirty tree skips it with a one-line notice, and `push --graph` exits 1.
 
 v1 implementations: `FilesystemRemoteCache` (any path: NFS, `rclone mount`, shared volume), `HttpRemoteCache` (GET/PUT/HEAD with an optional Bearer token; works against S3/MinIO with presigned URLs or an nginx with `dav_methods PUT`). Config:
 

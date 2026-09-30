@@ -7,17 +7,20 @@ namespace Manuglopez\Replay\Console\Commands;
 use Manuglopez\Replay\Cache\ContentKey;
 use Manuglopez\Replay\Cache\FileHashes;
 use Manuglopez\Replay\Cache\Graph;
-use Manuglopez\Replay\Cache\GraphPublication;
 use Manuglopez\Replay\Cache\GraphStore;
 use Manuglopez\Replay\Cache\ProjectKey;
+use Manuglopez\Replay\Cache\Remote\Exchange;
 use Manuglopez\Replay\Cache\Remote\ObjectStore;
 use Manuglopez\Replay\Cache\Remote\RemoteCacheFactory;
 use Manuglopez\Replay\Cache\StateDirectory;
+use Manuglopez\Replay\Change\ChangedFiles;
 use Manuglopez\Replay\Change\Git;
 use Manuglopez\Replay\Config;
 use Manuglopez\Replay\Console\Runner\ProjectLocator;
+use Manuglopez\Replay\Record\SourceScope;
 use Manuglopez\Replay\Select\NonEdgeInputs;
 use Manuglopez\Replay\Select\TestPaths;
+use Manuglopez\Replay\Support\Paths;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Input\InputOption;
@@ -30,9 +33,13 @@ use Symfony\Component\Console\Output\OutputInterface;
  * (`graph/<project-key>/<branch>.json`), which is what the CI baseline job runs after a
  * `record --fresh`.
  *
- * The graph goes only from a clean working tree (`Cache\GraphPublication`): with anything
- * a result could depend on modified or untracked, the objects are still pushed, the graph is
- * not, one line says why, and the command exits 1.
+ * The graph goes only from a tree clean of anything a result could depend on
+ * (`Cache\GraphPublication`: a README edit or a rewritten `phpunit.xml` does not count), and
+ * carries only the branch's results stamped for this tree (`Cache\Remote\Exchange`). With a
+ * relevant file modified or untracked, the objects are still pushed, the graph is not, one
+ * line names the files, and the command exits 1: `--graph` was asked for and not done. Digests
+ * are recomputed from the PHPUnit configuration the graph was recorded with
+ * (`Graph::configuration()`), so a baseline recorded with `-c` publishes its objects too.
  *
  * A normal pass already publishes the objects of what it executed; this command exists to
  * publish a graph recorded before the remote was configured, to seed a new remote, and to
@@ -78,36 +85,37 @@ final class PushCommand extends Command
         $branch = $git->currentBranch() ?? $config->defaultBranch ?? $git->defaultBranch() ?? 'main';
         $graph->setDefaultBranch($config->defaultBranch ?? $git->defaultBranch() ?? 'main');
 
-        $hashes = new FileHashes($root);
-        $inputs = NonEdgeInputs::forProject($graph, $root, $config, self::testPaths($root), $hashes, $git, $stateDir);
+        $hashes = FileHashes::inStateDir($root, $stateDir);
+        [$testPaths, $scope] = self::configuration($root, $graph);
+        $inputs = NonEdgeInputs::forProject($graph, $root, $config, $testPaths, $hashes, $git, $stateDir, $scope);
 
         $remote->begin();
 
         $objects = new ObjectStore($remote, $stateDir, ProjectKey::shared($root));
+        $exchange = new Exchange($objects, $graph, new ContentKey($root, $hashes), $inputs);
         $graphKey = null;
         $graphPutError = null;
         $refusal = null;
 
         try {
-            self::pushObjects($objects, $graph, new ContentKey($root, $hashes), $inputs, $branch);
+            // Only results stamped with the current key and digest, published under both.
+            $exchange->publishObjects(self::testFilesWithResults($graph, $branch), $graph->results($branch));
 
-            // Objects describe themselves; a graph is a baseline at its sha, and a dirty tree
-            // is not what that sha holds (Cache\GraphPublication).
-            $refusal = $input->getOption('graph') === true
-                ? GraphPublication::refusal($git, $inputs, 'the ' . $branch . ' baseline')
-                : null;
+            if ($input->getOption('graph') === true) {
+                // Only from a tree clean of anything a result could depend on
+                // (Cache\GraphPublication), and only the results stamped for this tree.
+                ['refusal' => $refusal, 'published' => $published] = $exchange->publishGraph($branch, new ChangedFiles($root, $git), 'the ' . $branch . ' baseline');
 
-            if ($input->getOption('graph') === true && $refusal === null) {
-                $body = $graph->encode();
-
-                if ($body === null || ! $objects->putGraph($branch, $body)) {
+                if ($refusal === null && ! $published) {
                     // Captured now, before end() can overwrite lastError() with a (possibly
                     // unrelated) push failure of its own.
                     $graphPutError = $remote->lastError() ?? 'unknown error';
-                } else {
+                } elseif ($refusal === null) {
                     $graphKey = ObjectStore::graphKey(ProjectKey::shared($root), $branch);
                 }
             }
+
+            $hashes->save();
         } finally {
             // Bug fix: this used to print "pushed N object(s)" / "pushed the X baseline"
             // BEFORE end() ran — for the git backend, put()/putGraph() returning true only
@@ -153,57 +161,43 @@ final class PushCommand extends Command
         return Command::SUCCESS;
     }
 
-    /** The configured `<testsuites>`, as a pass reads them; `tests/` when there is no configuration. */
-    private static function testPaths(string $root): TestPaths
+    /**
+     * The `<testsuites>` and `<source>` of the PHPUnit configuration the graph was recorded
+     * with (`Graph::configuration()`, a `run -c <file>` included), else the one a plain `run`
+     * resolves: the digests recomputed here must be the ones the results were stamped with.
+     *
+     * @return array{0: TestPaths, 1: ?SourceScope}
+     */
+    private static function configuration(string $root, Graph $graph): array
     {
         $locator = new ProjectLocator();
-        $configFile = $locator->resolveConfigFile($root, []);
+        $recorded = $graph->configuration();
+        $configFile = $recorded !== null && is_file(Paths::join($root, $recorded))
+            ? Paths::join($root, $recorded)
+            : $locator->resolveConfigFile($root, []);
 
-        return $configFile !== null
-            ? TestPaths::fromConfiguration($locator->buildConfiguration($configFile, [])[0], $root)
-            : new TestPaths(['tests'], [], ['Test.php']);
+        if ($configFile === null) {
+            return [new TestPaths(['tests'], [], ['Test.php']), null];
+        }
+
+        $configuration = $locator->buildConfiguration($configFile, [])[0];
+
+        return [TestPaths::fromConfiguration($configuration, $root), SourceScope::fromProjectRoot($root, $configuration)];
     }
 
-    /**
-     * One object per test file the graph has results for; keys are recomputed from the graph's
-     * own edges and the working tree. An object vouches for exactly the content its key
-     * addresses, so a result goes into it only when it was recorded under that very key
-     * (`GraphUpdater` stamps each executed result with its `key`): a cached result recorded
-     * on other content — an edit made since and never run, or a layer recorded on a tree the
-     * branch has since reverted or merged away from — would otherwise be published as a
-     * verdict on content it never ran against. A file with no such result is not pushed.
-     * Same for the non-edge input digest: a result goes out only under the digest the tree
-     * gives its file now, which the object carries as `n`.
-     */
-    private static function pushObjects(ObjectStore $objects, Graph $graph, ContentKey $contentKey, NonEdgeInputs $inputs, string $branch): void
+    /** @return list<string> */
+    private static function testFilesWithResults(Graph $graph, string $branch): array
     {
-        $byFile = [];
+        $files = [];
 
-        foreach ($graph->results($branch) as $testId => $result) {
+        foreach ($graph->results($branch) as $result) {
             $file = $result['file'] ?? null;
 
             if (is_string($file) && $file !== '') {
-                $byFile[$file][$testId] = $result;
+                $files[$file] = true;
             }
         }
 
-        foreach ($byFile as $file => $results) {
-            if ($graph->isNotCacheable($file)) {
-                continue;
-            }
-
-            $key = $contentKey->forTestFile($graph, $file);
-            $digest = $inputs->digestFor($file);
-
-            if ($key === null || $digest === null) {
-                continue;
-            }
-
-            $recordedHere = ContentKey::resultsRecordedAt($results, $file, $key, $digest);
-
-            if ($recordedHere !== []) {
-                $objects->putObject($key, $file, $recordedHere, $digest);
-            }
-        }
+        return array_map(strval(...), array_keys($files));
     }
 }

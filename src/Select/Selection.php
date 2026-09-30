@@ -51,7 +51,7 @@ final class Selection
      * file: it is selected, and EVERY reason it was selected is one `k` covers. One
      * uncovered reason is enough to make it execute, because the object cannot tell whether
      * that trigger broke the test. The rule for an object without a non-edge digest; one with
-     * a digest answers for every trigger itself ({@see StampAudit::objectServes()}).
+     * a digest answers for every trigger itself (`Cache\Remote\ObjectStore::resultsFor()`).
      */
     public function coveredByContentKey(string $testFile): bool
     {

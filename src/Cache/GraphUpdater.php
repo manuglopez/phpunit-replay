@@ -84,11 +84,14 @@ final class GraphUpdater
 
     /**
      * Applies a run partial. `$complete` means the run covered everything it was
-     * asked to and was not truncated.
+     * asked to and was not truncated. `$replayed` holds the results among the partial's that
+     * this pass served rather than executed (in-process), each as it was served: they are
+     * recorded with the stamp they carry, never re-stamped.
      *
+     * @param array<string, TestResultArray> $replayed
      * @return array{touched: list<string>, results: int, edges: int, excludedEdges: int}
      */
-    public function apply(RunPartial $partial, string $branch, bool $recordsEdges, bool $complete): array
+    public function apply(RunPartial $partial, string $branch, bool $recordsEdges, bool $complete, array $replayed = []): array
     {
         $executed = $this->executedTestFiles($partial);
         $edgesCount = 0;
@@ -173,7 +176,7 @@ final class GraphUpdater
             }
         }
 
-        [$touched, $keepIds, $resultCount] = $this->mergeResults($partial, $branch, $recordsEdges);
+        [$touched, $keepIds, $resultCount] = $this->mergeResults($partial, $branch, $recordsEdges, $replayed);
 
         $this->applyNotCacheable($partial, $executed);
 
@@ -353,9 +356,10 @@ final class GraphUpdater
     }
 
     /**
+     * @param array<string, TestResultArray> $replayed
      * @return array{0: list<string>, 1: list<string>, 2: int} touched files, kept test ids, result count
      */
-    private function mergeResults(RunPartial $partial, string $branch, bool $recordsEdges): array
+    private function mergeResults(RunPartial $partial, string $branch, bool $recordsEdges, array $replayed): array
     {
         $touched = [];
         $keepIds = [];
@@ -376,19 +380,32 @@ final class GraphUpdater
                 continue;
             }
 
+            $touched[$file] = true;
+
+            // Replayed, not executed (in-process, SPEC.md §6.3): it keeps the stamp it was
+            // served with, or none. Stamping it with this tree's would claim this pass ran it
+            // here, and a result served from a remote object without a digest would come out
+            // of it looking validated.
+            if (isset($replayed[$testId])) {
+                $this->graph->setResult($branch, $testId, $replayed[$testId]);
+                $keepIds[] = $testId;
+
+                continue;
+            }
+
             if (! array_key_exists($file, $keyByFile)) {
-                // Computed once per file, after edges have already been replaced above.
-                $keyByFile[$file] = $this->contentKey->forTestFile($this->graph, $file);
-                $digestByFile[$file] = $keyByFile[$file] !== null ? $this->inputs?->digestFor($file) : null;
-                $touched[$file] = true;
+                // Computed once per file, after edges have already been replaced above. A stamp
+                // records only what the tests provably ran on: a file that changed while they
+                // ran leaves the result unstamped (FileHashes::stable()), to run again.
+                $key = $this->contentKey->forTestFile($this->graph, $file);
+                $keyByFile[$file] = $key !== null && $this->contentKey->stable($this->graph, $file) ? $key : null;
+                $digestByFile[$file] = $keyByFile[$file] !== null ? $this->inputs?->stampFor($file) : null;
             }
 
             $key = $keyByFile[$file];
             $digest = $digestByFile[$file];
 
-            // The stamp is always this pass's: a replayed result the in-process path persists
-            // carries whatever it was stamped with before, and only what is recomputed here
-            // describes the tree it is being recorded on.
+            // The stamp is this pass's, recomputed after the edges above changed.
             $result = [
                 'status' => $result['status'],
                 'message' => $result['message'],

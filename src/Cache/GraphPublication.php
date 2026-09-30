@@ -4,11 +4,12 @@ declare(strict_types=1);
 
 namespace Manuglopez\Replay\Cache;
 
-use Manuglopez\Replay\Change\Git;
+use Manuglopez\Replay\Change\ChangedFiles;
 use Manuglopez\Replay\Select\NonEdgeInputs;
 
 /**
- * When a branch graph may go to the remote (SPEC.md §9): only from a clean working tree.
+ * When a branch graph may go to the remote (SPEC.md §9): only from a working tree that is
+ * clean of anything a result could depend on.
  *
  * Objects are always publishable: an object is addressed by the content key of what actually
  * ran and carries its non-edge input digest, so it describes itself whatever the tree was. A
@@ -18,11 +19,15 @@ use Manuglopez\Replay\Select\NonEdgeInputs;
  * would still be the baseline every machine starts from and re-executes against, so it is
  * not published at all.
  *
- * Clean means: no tracked file modified, staged, added, deleted or renamed, and no untracked
- * file that anything a result depends on could include — a test file, a file of the graph's
- * universe, or a member of a non-edge scope ({@see NonEdgeInputs::covers()}). An untracked
- * note nobody reads leaves the tree clean. Fails closed: when git cannot say, the tree is
- * treated as dirty.
+ * Dirty means: a changed path — tracked (modified, staged, added, deleted, renamed) or
+ * untracked — that a result could depend on ({@see NonEdgeInputs::covers()}: a test file, a
+ * file of the graph's universe, a path a non-edge scope would hold). Not dirty: a path git
+ * ignores (`ChangedFiles::workingTreeStatus()`, as for every diff), a path nothing reads (a
+ * README, a lock file of another toolchain), and the structural files
+ * (`Fingerprint::structuralPaths()`), which the graph's own fingerprint records as they are on
+ * disk, so a machine without the same edit rejects the graph rather than trusting it. A CI
+ * step that rewrites `phpunit.xml` therefore publishes. Fails closed: when git cannot say, the
+ * tree is treated as dirty.
  */
 final class GraphPublication
 {
@@ -30,27 +35,26 @@ final class GraphPublication
      * @return list<string>|null the paths that make the tree dirty, `[]` when it is clean, null
      *   when git could not tell
      */
-    public static function dirtyPaths(Git $git, NonEdgeInputs $inputs): ?array
+    public static function dirtyPaths(ChangedFiles $changedFiles, NonEdgeInputs $inputs): ?array
     {
-        $entries = $git->statusEntries();
+        $entries = $changedFiles->workingTreeStatus();
 
         if ($entries === null) {
             return null;
         }
 
+        $structural = array_fill_keys(Fingerprint::structuralPaths(), true);
         $dirty = [];
 
         foreach ($entries as $entry) {
-            if ($entry['status'] === '!!') {
-                continue;
-            }
+            $path = $entry['path'];
 
-            if ($entry['status'] !== '??' || $inputs->covers($entry['path'])) {
-                $dirty[$entry['path']] = true;
+            if (! isset($structural[$path]) && $inputs->covers($path)) {
+                $dirty[$path] = true;
             }
         }
 
-        $paths = array_keys($dirty);
+        $paths = array_map(strval(...), array_keys($dirty));
         sort($paths);
 
         return $paths;
@@ -60,9 +64,9 @@ final class GraphPublication
      * The one line said instead of publishing, or null when the graph may go: `$what` names
      * it (`the main baseline`, `the branch graph`).
      */
-    public static function refusal(Git $git, NonEdgeInputs $inputs, string $what): ?string
+    public static function refusal(ChangedFiles $changedFiles, NonEdgeInputs $inputs, string $what): ?string
     {
-        $dirty = self::dirtyPaths($git, $inputs);
+        $dirty = self::dirtyPaths($changedFiles, $inputs);
 
         if ($dirty === []) {
             return null;

@@ -845,8 +845,8 @@ skipped object even by forgetting the check. `RunPipeline::closeRemote()`,
 ### Pipeline changes
 
 - Startup without local graph: `ObjectStore::graph(branch) ?? graph(defaultBranch)` (the project key is fixed on the `ObjectStore` instance, not passed to `graph()`/`graphOf()` — see above) → fingerprint reconcile (structural must match; environmental drift clears results) → sha must be an ancestor of HEAD, else use it only as a source of `objects` by key (edges still useful) — record fresh but replay-remote by `k` still applies.
-- Replay: for every test file in the run list that is `affected` (not unknown/rerun/quarantined/not-cacheable): compute `k_now`, `ObjectStore::object(k_now)`, then `Select\StampAudit::objectServes()`. An object carrying `n` (the non-edge input digest, written beside `k` since stamps exist; path and `k` unchanged) serves only when `n` equals the file's current digest — whatever selected it: `k` proves the test file and what it executed, `n` every other input the rule chain sees. An object without `n` proves only `k`, and serves only a file **whose every selection reason is one `k` covers** — `Select\Selection::coveredByContentKey()`, a whitelist of `PhpEdge` and `TestFile`; a file also selected by `Watch` (the `ResiduePatterns` fallback included), `Migration`, `Blade`, `Sibling` or any rule added later executes. Same check in `RunPipeline::replayFromRemote()` and `ReplayState::replayAffectedFromRemote()`. A hit → mark file **replayed-remote**, drop from the run list, merge its results with `key = k_now` and `digest = n` (none for an object without `n`, so the next pass re-runs it once: `StaleResult unstamped`) (Summary: `M replayed (R from remote)`).
-- After the run: `put objects/<shard>/<k>.json` for each executed test file (results of that file recorded under both its current `k` and digest, with `k` and `n`) — objects are always publishable, dirty tree or not, because they describe what actually ran. `put graph/<key>/<branch>.json` when `remote_push === 'all'` and the pass was complete **and the working tree is clean** (`Cache\GraphPublication`: no tracked modification of any kind, no untracked file that is a test file, in the graph's universe or in a non-edge scope; git failing counts as dirty) — a graph is a baseline at its sha, and results recorded on a dirty tree are not what that sha holds. A dirty tree skips it with one warning line naming the paths. `push --graph` applies the same rule, still pushes the objects, and exits 1. `CI=true`: objects only unless `--allow-ci-baseline`. The per-object local publish marker is confirmed later, not here — see "publish markers vs. the read-through cache" above.
+- Replay (`Cache\Remote\Exchange::served()`): for every test file in the run list that is `affected` or `stale` (not unknown/rerun/quarantined/not-cacheable): compute `k_now` and the file's digest, `ObjectStore::object(k_now, digest)` (a mirrored copy without that digest is fetched again once per pass), then `ObjectStore::resultsFor()`. An object carrying `n` (the non-edge input digest, beside `k`, the newest of up to 20 digest variants; path and `k` unchanged) serves the results it holds under the file's current digest — whatever selected it: `k` proves the test file and what it executed, `n` every other input the rule chain sees. An object without `n` proves only `k`, and serves only a file **whose every selection reason is one `k` covers** — `Select\Selection::coveredByContentKey()`, a whitelist of `PhpEdge` and `TestFile`; a file also selected by `Watch` (the `ResiduePatterns` fallback included), `Migration`, `Blade`, `Sibling` or any rule added later executes. Same check in `RunPipeline::replayFromRemote()` and `ReplayState::replayAffectedFromRemote()`. A hit → mark file **replayed-remote**, drop from the run list, merge its results with `key = k_now` and the digest the object answered by (none for an object without `n`, so the next pass re-runs it once: `StaleResult unstamped`; in-process too, since a replayed result keeps the stamp it was served with) (Summary: `M replayed (R from remote)`).
+- After the run: `put objects/<shard>/<k>.json` for each executed test file (results of that file recorded under both its current `k` and digest, merged as a variant into the copy of the object this machine knows) — objects are always publishable, dirty tree or not, because they describe what actually ran. `put graph/<key>/<branch>.json` when `remote_push === 'all'` and the pass was complete **and the working tree is clean of what results depend on** (`Cache\GraphPublication`: no changed path, tracked or untracked, that is a test file, in the graph's universe or a path a non-edge scope would hold; git-ignored paths and the fingerprint's structural files do not count; git failing counts as dirty), carrying only the branch's results stamped for that tree — a graph is a baseline at its sha, and results recorded on a dirty tree are not what that sha holds. A dirty tree skips it with one warning line naming the paths. `push --graph` applies the same rule, still pushes the objects, and exits 1; it recomputes digests from the PHPUnit configuration the graph records (`Graph::configuration()`). `CI=true`: objects only unless `--allow-ci-baseline`. The per-object local publish marker is confirmed later, not here — see "publish markers vs. the read-through cache" above.
 - Commands: `push [--graph]` (force a push of the current graph and all objects derivable from it), `pull` (fetch graph for the current branch/default and store locally as baseline), `prune --remote`.
 - `--no-remote` disables all of the above for one run; `remote => null` disables permanently.
 - Deviation: `verify` and `results-only` (a partial CLI selection: `--filter`/`--group`/`--testsuite`/an explicit path) never publish — they persist the local graph the same way a full pass does, but never reach the `putObject`/`putGraph` step above. Only `record` and a full/replay `run` (`RunPipeline::pushAfterRun()`) publish; `verify`'s whole point is comparing against what is already cached, and a partial selection has nothing complete enough to be worth sharing.
@@ -1006,7 +1006,13 @@ Every result is stamped when `GraphUpdater::mergeResults()` records it with two 
 tree it ran on: `key`, its test file's content key (`Cache\ContentKey`, unchanged), and `digest`, its
 test file's **non-edge input digest** (`Select\NonEdgeInputs`, encoded `n`). The key covers the test file
 and every file it executed; the digest covers every file a non-edge rule (Watch and its residue
-fallback, Migration, Blade, Sibling) would select it for. `Select\StampAudit` runs right after
+fallback, Migration, Blade, Sibling) would select it for, **minus the test file's own dependencies**
+(the key's). A stamp is written only for what the tests provably ran on: the pass's `Cache\FileHashes`
+reads each file once (before the tests, for everything the audit looked at, and for every file changed
+in the two seconds before they start), and `FileHashes::stable()` refuses a file changed since it was
+read, or first read after the tests started and changed around then; such a result gets no stamp and
+runs again. A result the in-process extension replayed is recorded with the stamp it was served with
+(`GraphUpdater::apply()`'s `$replayed`), never this pass's. `Select\StampAudit` runs right after
 `LayerAudit` and before `RunListBuilder::build()`, in both paths (`RunPipeline::auditLayers()`,
 `ReplayState::prepareReplay()`, and so also `verify`'s would-replay figure): for every result any layer
 would still serve, both values are recomputed on the current tree and must be equal. A result without a
@@ -1020,22 +1026,35 @@ would still serve, both values are recomputed on the current tree and must be eq
   pass, renamed method) fails the audit again on every later pass until a complete pass replaces or
   prunes it — deleting it would leave a file with results for only some of its tests. `LayerAudit`'s
   reason wins for a file both audits drop.
-- **Digest definition** (`NonEdgeInputs`, version token `n1`): scopes over the working tree
+- **Digest definition** (`NonEdgeInputs`, version token `n2`): scopes over the working tree
   (`git ls-files -co --exclude-standard`, minus git-ignored, minus missing, minus the generated
-  `.phpunit-replay.xml` and an in-project state dir), in the rule chain's consumption order —
-  `migrations@1` (migrations whose tables intersect the test file's, before the universe, like
-  `MigrationRule`), the universe (files some test has an edge to: `Graph::isDependency()`, the key's
-  business), `sibling:<dir>@1` (unknown sibling candidates where the directory has dependents),
-  `blade@1` (unknown templates with an ancestor in the universe, per dependent of that ancestor:
-  `BladeReferences::ancestorsOfMany()`), then `watch:<pattern>@1` and, with `static_declaration_edges`,
-  `residue@1` for what is left. `digest = "n1:" . xxh128("nonedge@1\n" . Σ sorted "<scope>=<scope
-  digest>\n")` over the non-empty scopes the test file carries; a scope digest hashes its sorted
-  `(path, ContentHash)` members. Null when git cannot list the tree: nothing is stamped with it and
-  nothing validates against it. The universe step is one predicate (`consumedByTheUniverse()`); letting
-  watch patterns see files with edges changes it and must bump the token.
-- **Cost**: each file is hashed once per pass (`Cache\FileHashes`, shared by keys, digests, stamps and
-  pushes); the tree is listed once; the scopes are recomputed after `apply()` changes edges or tables
-  (`NonEdgeInputs::refresh()`), from the same hashes.
+  `.phpunit-replay.xml` and an in-project state dir). For test file T: `watch:<pattern>@2` (every file
+  the configured pattern matches, T under its targets — watch is additive), `migrations@2` (migrations
+  whose tables intersect T's; with no table to narrow by, every migration), `blade@2` (templates the
+  templates T depends on reference, transitively: `BladeReferences::referenceMap()`), `sibling:<dir>@2`
+  (sibling candidates no test has an edge to, T depending on the directory), `unattributable@1` (`.php`
+  files `<source><exclude>` keeps out of coverage that no configured pattern names), and with
+  `static_declaration_edges` `residue@2`. Every member set minus T's own dependencies and T itself.
+  `digest = "n2:" . xxh128("nonedge@2\n" . Σ sorted "<scope>=<xor>:<count>\n")` over the non-empty
+  scopes T carries, where `<xor>` is the XOR of `xxh128(path . "\0" . ContentHash(path))` over the
+  members: a scope shared by hundreds of test files is hashed once and each one's dependencies are
+  taken out of it per dependency. Null when git cannot list the tree: nothing is stamped with it and
+  nothing validates against it. Only `sibling` and `residue` look at the graph's universe (they are
+  presumptions about unattributed files, `NonEdgeInputs::inUniverse()`), so another test gaining or
+  losing an edge moves no digest but, at most, those two scopes' when a file in them gains its first.
+- **Cost**: each file is hashed once per pass, and across passes only when its `stat()` moved
+  (`<stateDir>/content-hashes.json`: size, mtime, ctime, inode, device; an entry is written only for a
+  file whose ctime is at least two seconds older than the read, so any later change — which sets ctime
+  in a later second, even one that forges mtime — misses it). Template references persist in
+  `<stateDir>/blade-references.json`, keyed by each template's raw content hash and the hash of the
+  template path list. Measured on a real project (726 test files, 6,446 tree files): 0.30–0.37 s per
+  pass warm, 0.84 s cold.
+- **Remote** (`Cache\Remote\Exchange`, shared by the wrapper, the in-process path and `push`): an object
+  serves a file only with the results it holds under the file's current key and digest
+  (`ObjectStore::resultsFor()`; an object without any digest keeps the key-covered rule), for a file
+  selected or stale; objects hold up to 20 digest variants, newest at the top level; only results
+  stamped with the current key and digest are published; a published graph carries only the branch's
+  results stamped for the tree, and only from a tree `Cache\GraphPublication` finds clean.
 - **Quarantine**: a flip is a status change under an unchanged key AND digest (`GraphUpdater::detectFlip()`):
   a test flipping because a watched file it reads changed is its input changing, not flakiness.
 - **Legacy**: no sound way was found to validate a result without a digest from its key alone — the

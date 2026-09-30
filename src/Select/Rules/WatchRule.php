@@ -9,8 +9,19 @@ use Manuglopez\Replay\Select\Reason;
 use Manuglopez\Replay\Select\Rule;
 
 /**
- * Whatever is left and unknown to the graph is matched against the watch patterns
- * (SPEC.md §7.2.6). Files matching nothing affect nothing (SPEC.md §7.2.7).
+ * The watch patterns (SPEC.md §7.2.6). Files matching nothing affect nothing (§7.2.7).
+ *
+ * A configured pattern (a default or the project's `watch`) is **additive**: it applies to
+ * every changed file, whatever an earlier rule already did with it. A pattern says "these
+ * tests depend on these files"; a file some test has an edge to is not less of a dependency
+ * of the others because of it. Coverage attributes a file's once-per-process work (a
+ * migration run per worker, a config file loaded at boot) to whichever test got there first,
+ * so letting `PhpEdgeRule` consume such a file silently dropped every other test the pattern
+ * named.
+ *
+ * The residue patterns (`Select\ResiduePatterns`, registered with
+ * `WatchPatterns::addFallback()`) are the opposite: "nothing attributes this file", so they
+ * apply only to a file no rule claimed.
  */
 final class WatchRule implements Rule
 {
@@ -22,9 +33,14 @@ final class WatchRule implements Rule
     public function apply(Context $context): void
     {
         $allTestFiles = $context->graph->allTestFiles();
+        $remaining = array_fill_keys($context->remaining, true);
 
-        foreach ($context->remaining as $rel) {
+        foreach ($context->changed as $rel) {
             $matches = $context->watch->matches($rel);
+
+            if (isset($remaining[$rel])) {
+                $matches += $context->watch->fallbackMatches($rel);
+            }
 
             if ($matches === []) {
                 continue;
@@ -43,7 +59,9 @@ final class WatchRule implements Rule
                 }
             }
 
-            $context->consume($rel);
+            if (isset($remaining[$rel])) {
+                $context->consume($rel);
+            }
         }
     }
 }

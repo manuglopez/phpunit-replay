@@ -153,6 +153,19 @@ final class RunList
      */
     public function withoutFromSelection(array $files): self
     {
+        return $this->withoutServed($files, false);
+    }
+
+    /**
+     * A copy without these files in the selection or the stale bucket: the files a remote
+     * object stands in for (`PHPUnit\ReplayState`, `Cache\Remote\Exchange::served()`), which
+     * then decide from the results merged in for them. Their stale reason is kept, so `--explain`
+     * still says why the local result was not used.
+     *
+     * @param list<string> $files
+     */
+    public function withoutServed(array $files, bool $fromStale = true): self
+    {
         if ($files === []) {
             return $this;
         }
@@ -180,7 +193,7 @@ final class RunList
             $this->notCacheable,
             $this->notCacheableReasons,
             $this->noResult,
-            $this->stale,
+            $fromStale ? array_values(array_diff($this->stale, $files)) : $this->stale,
             $this->staleReasons,
         );
     }

@@ -75,6 +75,27 @@ final readonly class ContentKey
     }
 
     /**
+     * Whether the key {@see self::forTestFile()} gives is one the tests actually ran on, so a
+     * stamp may carry it: the test file and every dependency unchanged since the pass read
+     * them ({@see FileHashes::stable()}). Always true without the pass's memo, which is the
+     * only thing that knows when a file was read.
+     */
+    public function stable(Graph $graph, string $testFileRel): bool
+    {
+        if ($this->hashes === null) {
+            return true;
+        }
+
+        foreach ([$testFileRel, ...$graph->dependenciesOf($testFileRel)] as $path) {
+            if (! $this->hashes->stable($path)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
      * What a remote object under `$key` may hold for `$testFile`: only the results recorded
      * under that very key (`GraphUpdater` stamps each executed result with the key it ran
      * at). An object vouches for exactly the content its key addresses, so a cached result

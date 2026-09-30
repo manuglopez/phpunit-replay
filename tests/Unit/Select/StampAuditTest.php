@@ -132,15 +132,6 @@ final class StampAuditTest extends TestCase
         self::assertSame(['tests/ATest.php'], array_keys($this->audit($graph)->apply('main')));
     }
 
-    public function test_a_remote_object_serves_by_its_digest_or_by_the_key_alone_when_it_has_none(): void
-    {
-        self::assertTrue(StampAudit::objectServes('n1:a', 'n1:a', false), 'a matching digest vouches for a rule-selected file');
-        self::assertFalse(StampAudit::objectServes('n1:a', 'n1:b', true), 'a digest that differs refuses even a key-covered file');
-        self::assertFalse(StampAudit::objectServes('n1:a', null, true));
-        self::assertTrue(StampAudit::objectServes(null, 'n1:a', true), 'an object from before digests: the #35 rule');
-        self::assertFalse(StampAudit::objectServes(null, 'n1:a', false));
-    }
-
     private function audit(Graph $graph): StampAudit
     {
         return new StampAudit(

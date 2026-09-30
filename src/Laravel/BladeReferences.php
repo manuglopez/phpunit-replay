@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Manuglopez\Replay\Laravel;
 
 use FilesystemIterator;
+use Manuglopez\Replay\Support\AtomicFile;
 use RecursiveDirectoryIterator;
 use RecursiveIteratorIterator;
 use SplFileInfo;
@@ -20,6 +21,36 @@ use SplFileInfo;
  */
 final class BladeReferences
 {
+    /** Bumped whenever {@see self::sourceReferences()} changes what it recognises. */
+    private const CACHE_VERSION = 'blade-references@1';
+
+    /**
+     * The templates `$roots` reference, directly or transitively, over a
+     * {@see self::referenceMap()}: the inverse of {@see self::ancestorsOf()}.
+     *
+     * @param array<string, list<string>> $map
+     * @param list<string> $roots
+     * @return array<string, true>
+     */
+    public static function descendantsOf(array $map, array $roots): array
+    {
+        $seen = [];
+        $queue = $roots;
+
+        while ($queue !== []) {
+            $current = array_pop($queue);
+
+            foreach ($map[$current] ?? [] as $child) {
+                if (! isset($seen[$child])) {
+                    $seen[$child] = true;
+                    $queue[] = $child;
+                }
+            }
+        }
+
+        return $seen;
+    }
+
     /** @return list<string> Project-relative Blade files that statically depend on $bladeRel, directly or transitively. */
     public static function ancestorsOf(string $bladeRel, string $projectRoot): array
     {
@@ -168,6 +199,13 @@ final class BladeReferences
     {
         $view = self::viewNameForBlade($targetBlade);
 
+        // Every pattern below contains the view name literally, or `x-` and a component name
+        // case-insensitively: a source holding neither cannot match any of them. Exact, and it
+        // is what keeps a whole-tree walk from compiling a regex per pair of templates.
+        if (($view === null || ! str_contains($source, $view)) && ! self::mayNameComponent($source, $targetBlade)) {
+            return false;
+        }
+
         if ($view !== null) {
             $quoted = preg_quote($view, '#');
 
@@ -189,6 +227,91 @@ final class BladeReferences
         }
 
         return false;
+    }
+
+    private static function mayNameComponent(string $source, string $targetBlade): bool
+    {
+        foreach (self::componentNamesForBlade($targetBlade) as $component) {
+            if (stripos($source, 'x-' . $component) !== false) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Every template under `resources/views` and the templates it references directly (the
+     * relation {@see self::ancestorsOf()} closes over), read from `$cacheFile` where it can be.
+     *
+     * The references of a template are a function of its own bytes and of the set of template
+     * paths (view and component names come from paths), so a cached entry is reused only when
+     * the raw content hash of the template and the hash of the whole path list both match —
+     * any edit, addition, removal or rename recomputes what it could have changed. Nothing
+     * else is trusted from the file.
+     *
+     * @return array<string, list<string>> template => templates it references
+     */
+    public static function referenceMap(string $projectRoot, ?string $cacheFile = null): array
+    {
+        $templates = self::allBladeFiles($projectRoot);
+
+        if ($templates === []) {
+            return [];
+        }
+
+        $pathsKey = hash('xxh128', self::CACHE_VERSION . "\n" . implode("\n", $templates));
+        $cached = [];
+
+        if ($cacheFile !== null) {
+            $data = json_decode((string) @file_get_contents($cacheFile), true);
+
+            if (is_array($data) && ($data['paths'] ?? null) === $pathsKey && is_array($data['entries'] ?? null)) {
+                $cached = $data['entries'];
+            }
+        }
+
+        $map = [];
+        $entries = [];
+        $dirty = false;
+
+        foreach ($templates as $template) {
+            $source = @file_get_contents(rtrim($projectRoot, '/') . '/' . $template);
+
+            if ($source === false) {
+                continue;
+            }
+
+            $hash = hash('xxh128', $source);
+            $entry = $cached[$template] ?? null;
+
+            if (is_array($entry) && ($entry['h'] ?? null) === $hash && is_array($entry['r'] ?? null)) {
+                $refs = array_values(array_filter($entry['r'], 'is_string'));
+            } else {
+                $refs = [];
+
+                foreach ($templates as $target) {
+                    if ($target !== $template && self::sourceReferences($source, $target)) {
+                        $refs[] = $target;
+                    }
+                }
+
+                $dirty = true;
+            }
+
+            $map[$template] = $refs;
+            $entries[$template] = ['h' => $hash, 'r' => $refs];
+        }
+
+        if ($cacheFile !== null && ($dirty || count($entries) !== count($cached))) {
+            $json = json_encode(['paths' => $pathsKey, 'entries' => $entries], JSON_UNESCAPED_SLASHES);
+
+            if ($json !== false) {
+                AtomicFile::write($cacheFile, $json);
+            }
+        }
+
+        return $map;
     }
 
     private static function viewNameForBlade(string $rel): ?string
