@@ -248,4 +248,17 @@ final class ContentKeyTest extends TestCase
         self::assertNotNull($a);
         self::assertSame($a, $b);
     }
+
+    public function test_an_object_holds_only_the_results_recorded_under_its_own_key_for_its_own_file(): void
+    {
+        $results = [
+            'FooTest::now' => ['status' => 0, 'message' => '', 'time' => 0.1, 'assertions' => 1, 'file' => 'tests/FooTest.php', 'key' => 'k1'],
+            'FooTest::renamedAway' => ['status' => 0, 'message' => '', 'time' => 0.1, 'assertions' => 1, 'file' => 'tests/FooTest.php', 'key' => 'k0'],
+            'FooTest::unstamped' => ['status' => 0, 'message' => '', 'time' => 0.1, 'assertions' => 1, 'file' => 'tests/FooTest.php'],
+            'BarTest::other' => ['status' => 0, 'message' => '', 'time' => 0.1, 'assertions' => 1, 'file' => 'tests/BarTest.php', 'key' => 'k1'],
+        ];
+
+        self::assertSame(['FooTest::now'], array_keys(ContentKey::resultsRecordedAt($results, 'tests/FooTest.php', 'k1')));
+        self::assertSame([], ContentKey::resultsRecordedAt($results, 'tests/FooTest.php', 'k2'));
+    }
 }

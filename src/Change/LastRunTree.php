@@ -113,7 +113,19 @@ final readonly class LastRunTree
      */
     public function appliesTo(string $branch, ?string $ownSha, string $diffBase): bool
     {
-        return $this->branch === $branch && $ownSha !== null && $ownSha === $diffBase;
+        return $this->describes($branch, $ownSha) && $ownSha === $diffBase;
+    }
+
+    /**
+     * Whether this snapshot is of the tree `$branch`'s layer was last recorded on at
+     * `$layerSha`. Same branch is not enough: a pass saves a snapshot even when it did not
+     * move the layer's sha (a CI pass without `--allow-ci-baseline`, a pass that executed
+     * nothing and had nothing to finalize), and a snapshot taken at another head says
+     * nothing about the tree the layer's sha stands for.
+     */
+    public function describes(string $branch, ?string $layerSha): bool
+    {
+        return $this->branch === $branch && $layerSha !== null && $this->sha === $layerSha;
     }
 
     /**

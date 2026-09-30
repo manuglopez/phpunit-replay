@@ -375,7 +375,7 @@ final class GraphTest extends TestCase
         $graph->setResult('feature', 'T3', $this->makeResult(file: 'tests/BarTest.php'));
         $graph->setResult('main', 'T1', $this->makeResult(file: 'tests/FooTest.php'));
 
-        self::assertSame(['T1', 'T2'], $graph->forgetResults('feature', ['tests/FooTest.php']));
+        $graph->forgetResults('feature', ['tests/FooTest.php']);
         self::assertSame(['T3'], array_keys($graph->ownResults('feature')));
         self::assertSame(['T1'], array_keys($graph->ownResults('main')));
         self::assertSame(['feature', 'main'], $graph->layersOf('feature'));

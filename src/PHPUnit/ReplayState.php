@@ -607,13 +607,9 @@ final class ReplayState
                 continue;
             }
 
-            $results = [];
-
-            foreach ($own as $testId => $result) {
-                if (($result['file'] ?? null) === $file) {
-                    $results[$testId] = $result;
-                }
-            }
+            // Only what ran under this key: after an incomplete pass pruneStaleResults()
+            // has not dropped an id this file no longer holds.
+            $results = ContentKey::resultsRecordedAt($own, $file, $key);
 
             if ($results !== []) {
                 $objects->putObject($key, $file, $results);
@@ -794,7 +790,9 @@ final class ReplayState
         $changedFiles = new ChangedFiles($root, $git);
         $changed = $sha !== null ? $changedFiles->since($sha) : null;
 
-        if ($changed === null) {
+        // `$sha === null` already implies `$changed === null`; spelled out so `$sha` is a
+        // string from here on.
+        if ($sha === null || $changed === null) {
             // The baseline cannot be reached from HEAD: nothing may be replayed. With a
             // driver the whole suite is re-recorded; without one it can only contribute
             // results to the graph it already has.
@@ -815,7 +813,7 @@ final class ReplayState
 
         $lastRun = LastRunTree::load($stateDir);
 
-        if ($lastRun !== null && $sha !== null && $lastRun->appliesTo($branch, $graph->ownRecordedSha($branch), $sha)) {
+        if ($lastRun !== null && $lastRun->appliesTo($branch, $graph->ownRecordedSha($branch), $sha)) {
             $changed = $lastRun->filterUnchanged($changed, $changedFiles);
         }
 
@@ -852,7 +850,7 @@ final class ReplayState
         // branch's own, or the default branch's when the branch has none yet): any other
         // layer `decideFresh()` would read a cached result from is checked against its own
         // (Select\LayerAudit) — here, own results recorded with no sha to check them by.
-        $stale = $sha === null ? [] : (new LayerAudit($graph, $changedFiles, $builder->select(...)))->apply($branch, $sha, $lastRun);
+        $stale = (new LayerAudit($graph, $changedFiles, $builder->select(...)))->apply($branch, $sha, $lastRun);
         $runList = $builder->build($changed, $branch, $stale);
         self::$runList = self::replayAffectedFromRemote($graph, $runList, $branch, $root);
 

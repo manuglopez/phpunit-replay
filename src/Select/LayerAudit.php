@@ -24,10 +24,17 @@ use Manuglopez\Replay\Change\LastRunTree;
  *
  * Walking the layers highest priority first:
  *
- * - the layer whose sha is the diff base is valid by construction;
- * - a layer BELOW it needs no check (`Graph::fallbackChain()` argues why: the base layer
- *   is a delta its own passes wrote, so anything it lacks was served from below as valid on
- *   its tree, and the diff says nothing the test depends on moved since);
+ * - the layer whose sha is the diff base is TRUSTED as its sha's tree: the pass's own diff
+ *   is exactly this rule applied to it, provided its results really were recorded on that
+ *   tree. That premise is not audited here and has known exceptions — results written into
+ *   a layer without its sha moving (a CI pass without `--allow-ci-baseline`, an incomplete
+ *   pass) and results recorded on a dirty working tree (then read on another branch, or
+ *   published with `remote_push: all` and adopted elsewhere). Those are tracked separately,
+ *   to be closed by stamping each result with the inputs it ran against;
+ * - a layer BELOW it needs no check of its own (`Graph::fallbackChain()` argues why, on the
+ *   same premise: the base layer is a delta its own passes wrote, so anything it lacks was
+ *   served from below as valid on its tree, and the diff says nothing the test depends on
+ *   moved since);
  * - any other layer — above the base (the branch's own, when a nearer baseline won, or
  *   when its sha is not an ancestor any more), or below a base this graph holds no layer
  *   for (a sha the resolver read off the remote) — gets its own change set, and whatever
@@ -42,8 +49,10 @@ use Manuglopez\Replay\Change\LastRunTree;
  * baseline is the one that won.
  *
  * The own layer's change set honours the last-run snapshot (`Change\LastRunTree`) the same
- * way a pass diffing from the own baseline does: that snapshot is what the own layer's
- * results were recorded against when the working tree was dirty.
+ * way a pass diffing from the own baseline does, when that snapshot describes the own
+ * layer's sha: it is what the own layer's results were recorded against when the working
+ * tree was dirty. The same trust-the-sha premise applies to an audited layer: its own diff
+ * is taken from its sha, so it inherits the exceptions above.
  *
  * @phpstan-type Stale array<string, array{reason: Reason, ids: list<string>}>
  */
@@ -89,7 +98,7 @@ final readonly class LayerAudit
                 continue;
             }
 
-            [$invalid, $whole] = $this->invalidFiles($layer, $sha, array_keys($idsByFile), $layer === $branch ? $lastRun : null, $branch);
+            [$invalid, $whole] = $this->invalidFiles($layer, $sha, array_keys($idsByFile), $lastRun);
 
             if ($invalid === []) {
                 continue;
@@ -117,7 +126,7 @@ final readonly class LayerAudit
      * @return array{0: array<string, Reason>, 1: bool} the ones it may not serve on the
      *   current tree, and whether that is the whole layer (it could not be checked at all)
      */
-    private function invalidFiles(string $layer, ?string $sha, array $files, ?LastRunTree $lastRun, string $branch): array
+    private function invalidFiles(string $layer, ?string $sha, array $files, ?LastRunTree $lastRun): array
     {
         if ($sha === null || $sha === '') {
             return [self::all($files, new Reason('StaleLayer', $layer, 'no recorded sha')), true];
@@ -130,7 +139,9 @@ final readonly class LayerAudit
             return [self::all($files, new Reason('StaleLayer', $label, 'sha not available')), true];
         }
 
-        if ($lastRun !== null && $lastRun->branch === $branch) {
+        // Only the snapshot of THIS layer at THIS sha says what its results were recorded on
+        // (in practice the own layer: the snapshot is always the branch's that last ran).
+        if ($lastRun !== null && $lastRun->describes($layer, $sha)) {
             $changed = $lastRun->filterUnchanged($changed, $this->changedFiles);
         }
 

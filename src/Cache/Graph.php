@@ -451,23 +451,18 @@ final class Graph
      * current tree has invalidated must not survive into the baseline this pass records.
      *
      * @param list<string> $testFiles project-relative
-     * @return list<string> the test ids dropped
      */
-    public function forgetResults(string $branch, array $testFiles): array
+    public function forgetResults(string $branch, array $testFiles): void
     {
         $drop = array_fill_keys($testFiles, true);
-        $dropped = [];
 
         foreach ($this->baselines[$branch]['results'] ?? [] as $testId => $result) {
             $file = $result['file'] ?? null;
 
             if (is_string($file) && isset($drop[$file])) {
                 unset($this->baselines[$branch]['results'][$testId]);
-                $dropped[] = $testId;
             }
         }
-
-        return $dropped;
     }
 
     /**
@@ -516,11 +511,12 @@ final class Graph
      * it covers, so results the layer below holds for those same files are dropped rather
      * than merged (a file whose tests were renamed must not keep reporting the old names).
      *
-     * Serving a merged result is only sound because the pass that reads it has audited the
-     * layers first (`Select\LayerAudit`): a layer's results were recorded against the tree
-     * at ITS sha, while the pass selects tests by the diff from the sha of the baseline it
-     * resolved. Anything a layer holds that the current tree has invalidated is forgotten
-     * (the own layer) or withheld (any other) before this is read.
+     * Serving a merged result relies on the pass that reads it having audited the layers
+     * first (`Select\LayerAudit`): a layer's results are trusted as recorded against the
+     * tree at ITS sha (with known, separately tracked exceptions: see
+     * {@see self::fallbackChain()}), while the pass selects tests by the diff from the sha
+     * of the baseline it resolved. Anything a layer holds that the current tree has
+     * invalidated is forgotten (the own layer) or withheld (any other) before this is read.
      *
      * @return array<string, TestResultArray>
      */
@@ -545,15 +541,19 @@ final class Graph
      * The fallback branches for `$branch`, nearest first. Empty when `$branch` is itself
      * the last stop, which is what makes the default branch read only its own results.
      *
-     * Falling back is sound only BELOW the baseline the pass diffs from: that baseline's
-     * layer is a delta its own passes wrote, so a test it lacks is one its last complete
-     * pass served from further down as valid on its tree — and the diff says the test's
-     * inputs are unchanged since. Whatever a lower layer now holds for it is therefore
-     * either a status that forces a re-run anyway, or pass-like where the test really is
-     * pass-like. A layer ABOVE that baseline (the branch's own, when a nearer one won) or
-     * below a baseline whose layer this graph does not hold (a sha the resolver found on
-     * the remote) has no such argument and is audited against its own diff instead
-     * (`Select\LayerAudit`).
+     * Falling back needs no check of its own only BELOW the baseline the pass diffs from,
+     * and only on the premise the pass already makes about that baseline: that its layer
+     * holds what its passes recorded on its sha's tree. Given that, the layer is a delta its
+     * own passes wrote, so a test it lacks is one its last complete pass served from
+     * further down as valid on its tree — and the diff says the test's inputs are unchanged
+     * since. Whatever a lower layer now holds for it is therefore either a status that
+     * forces a re-run anyway, or pass-like where the test really is pass-like. The premise
+     * has known exceptions, tracked separately (results written into a layer without its
+     * sha moving; results recorded on a dirty tree), and wherever it fails for the base
+     * layer this argument fails with it. A layer ABOVE that baseline (the branch's own, when
+     * a nearer one won) or below a baseline whose layer this graph does not hold (a sha the
+     * resolver found on the remote) has no such argument at all and is audited against its
+     * own diff instead (`Select\LayerAudit`).
      *
      * @return list<string>
      */

@@ -70,14 +70,18 @@ final class StaleLayerIsNotServedTest extends TestCase
         $phpunit = $this->fixture->phpunit();
         self::assertSame(1, $phpunit['exitCode'], 'control: PHPUnit itself fails on this tree');
 
+        // The plan is taken before the run changes anything, but asserted after it: the exit
+        // code is the false green itself, and must be what fails first without the fix.
         $dryRun = $this->fixture->replay(['run', '--dry-run'], $this->env());
+
+        $run = $this->fixture->replay([], $this->env());
+        self::assertSame(1, $run['exitCode'], $run['stdout'] . $run['stderr']);
+        self::assertGreaterThan(0, ReplayAssert::executedCount($run['stdout']), ReplayAssert::lastLine($run['stdout']));
+
         self::assertStringContainsString('baseline develop@', $dryRun['stdout']);
         self::assertDoesNotMatchRegularExpression('/\b0 test files would run/', $dryRun['stdout'], $dryRun['stdout']);
         // The plan says why: the feature layer's result was recorded before the revert.
         self::assertMatchesRegularExpression('#tests/MoneyTest\.php\s+← StaleLayer src/Money\.php \(feature@[0-9a-f]{7}\)#u', $dryRun['stdout'], $dryRun['stdout']);
-        $run = $this->fixture->replay([], $this->env());
-        self::assertSame(1, $run['exitCode'], $run['stdout'] . $run['stderr']);
-        self::assertGreaterThan(0, ReplayAssert::executedCount($run['stdout']), ReplayAssert::lastLine($run['stdout']));
 
         // And the next pass, now that the branch's own baseline sits on this very tree and
         // wins again: the stale passes must not come back from the own layer either.
@@ -205,11 +209,13 @@ final class StaleLayerIsNotServedTest extends TestCase
 
         $repo->git('revert', '--no-edit', 'HEAD');
 
+        // Plan taken first, asserted last: the exit code is what must fail without the fix.
         $dryRun = $this->fixture->replay(['run', '--dry-run'], ['CI' => 'true']);
-        self::assertMatchesRegularExpression('#tests/MoneyTest\.php\s+← StaleLayer feature \(no recorded sha\)#u', $dryRun['stdout'], $dryRun['stdout']);
 
         $again = $this->fixture->replay([], ['CI' => 'true']);
         self::assertSame(1, $again['exitCode'], $again['stdout'] . $again['stderr']);
+
+        self::assertMatchesRegularExpression('#tests/MoneyTest\.php\s+← StaleLayer feature \(no recorded sha\)#u', $dryRun['stdout'], $dryRun['stdout']);
     }
 
     public function test_a_default_layer_that_moved_on_below_a_present_nearest_baseline_is_not_audited(): void

@@ -180,6 +180,18 @@ final class LayerAuditTest extends TestCase
         $this->audit($graph)->apply('feature', $this->second, new LastRunTree('other', $this->first, $snapshot, time()));
 
         self::assertSame([['src/A.txt', 'src/B.txt']], $this->asked);
+
+        // Nor does one of this branch taken at another head (a pass that saved a snapshot
+        // without moving the layer's sha).
+        $graph = $this->graph();
+        $graph->setNearestBranch('develop');
+        $graph->setRecordedSha('develop', $this->second);
+        $graph->setRecordedSha('feature', $this->first);
+        $this->asked = [];
+
+        $this->audit($graph)->apply('feature', $this->second, new LastRunTree('feature', $this->second, $snapshot, time()));
+
+        self::assertSame([['src/A.txt', 'src/B.txt']], $this->asked);
     }
 
     private function audit(Graph $graph): LayerAudit

@@ -974,11 +974,19 @@ final class RunPipeline
      *    plumbing: `RunListBuilder` never consults the selection; only `Mode` does.
      *
      * `run` prunes test files missing from disk before building its list and this does not,
-     * deliberately: pruning deletes graph state, which a measurement must not do. It cannot
-     * change the answer — a pruned file's results are dropped, and an unpruned file's results
-     * are excluded anyway (nothing depending on it can put a deleted file anywhere but the
-     * selection, i.e. the run list), and either way its tests cannot be in `$partial->results`
-     * because they did not run.
+     * deliberately: pruning deletes graph state that is still VALID, which a measurement
+     * should not do. It cannot change the answer — a pruned file's results are dropped, and
+     * an unpruned file's results are excluded anyway (nothing depending on it can put a
+     * deleted file anywhere but the selection, i.e. the run list), and either way its tests
+     * cannot be in `$partial->results` because they did not run.
+     *
+     * The layer audit is the one mutation this makes, and on purpose: it forgets own-layer
+     * entries the current tree has already invalidated ({@see self::auditLayers()}), exactly
+     * as `run` would, because the figure has to describe what `run` would serve. Nothing
+     * valid is lost: a full pass re-executes every one of those tests and writes them back,
+     * and a pass narrowed by a CLI selection returns before the graph is saved. Withholding
+     * instead of forgetting would not work here — a mask on the own layer would also hide the
+     * fresh results this very pass is about to write into it.
      *
      * Known, deliberate under-report: the remote object store is not consulted. `run` can serve
      * an *affected* test file from the remote when another machine already ran exactly that
@@ -1306,7 +1314,9 @@ final class RunPipeline
         $stale = (new LayerAudit($graph, $changedFiles, $select))->apply($this->branch, $sha, $lastRun);
 
         foreach ($stale as $file => $entry) {
-            Warnings::debug(sprintf('stale layer: %s not served from %s (%s)', $file, $entry['reason']->detail, $entry['reason']->trigger));
+            // The same rendering as --explain: a reason reads `<changed file> (<layer>@<sha7>)`
+            // or, for a layer that could not be checked at all, `<layer> (<why>)`.
+            Warnings::debug('not served: ' . ExplainFormatter::line($file, $entry['reason']));
         }
 
         return $stale;
@@ -1497,13 +1507,9 @@ final class RunPipeline
                 continue;
             }
 
-            $results = [];
-
-            foreach ($own as $testId => $result) {
-                if (($result['file'] ?? null) === $file) {
-                    $results[$testId] = $result;
-                }
-            }
+            // Only what ran under this key: after an incomplete pass pruneStaleResults()
+            // has not dropped an id this file no longer holds.
+            $results = ContentKey::resultsRecordedAt($own, $file, $key);
 
             if ($results !== []) {
                 $objects->putObject($key, $file, $results);

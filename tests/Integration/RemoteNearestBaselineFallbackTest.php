@@ -81,13 +81,16 @@ final class RemoteNearestBaselineFallbackTest extends TestCase
         $phpunit = $machine2->phpunit();
         self::assertSame(1, $phpunit['exitCode'], 'control: PHPUnit itself fails on this tree');
 
+        // The plan is taken before the run changes anything, but asserted after it: the exit
+        // code is the false green itself, and must be what fails first without the fix.
         $dryRun = $machine2->replay(['run', '--dry-run'], $env);
-        self::assertStringContainsString('baseline develop@', $dryRun['stdout'], $dryRun['stdout']);
-        self::assertMatchesRegularExpression('#tests/MoneyTest\.php\s+← StaleLayer src/Money\.php \(main@[0-9a-f]{7}\)#u', $dryRun['stdout'], $dryRun['stdout']);
 
         $run = $machine2->replay([], $env);
         self::assertSame(1, $run['exitCode'], $run['stdout'] . $run['stderr']);
         self::assertGreaterThan(0, ReplayAssert::executedCount($run['stdout']), ReplayAssert::lastLine($run['stdout']));
+
+        self::assertStringContainsString('baseline develop@', $dryRun['stdout'], $dryRun['stdout']);
+        self::assertMatchesRegularExpression('#tests/MoneyTest\.php\s+← StaleLayer src/Money\.php \(main@[0-9a-f]{7}\)#u', $dryRun['stdout'], $dryRun['stdout']);
     }
 
     private function tempDir(string $prefix): string

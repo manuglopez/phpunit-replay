@@ -160,7 +160,7 @@ final class PushCommand extends Command
                 continue;
             }
 
-            $recordedHere = array_filter($results, static fn (array $result): bool => ($result['key'] ?? null) === $key);
+            $recordedHere = ContentKey::resultsRecordedAt($results, $file, $key);
 
             if ($recordedHere !== []) {
                 $objects->putObject($key, $file, $recordedHere);

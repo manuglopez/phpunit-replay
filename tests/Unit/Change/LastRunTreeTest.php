@@ -196,5 +196,10 @@ final class LastRunTreeTest extends TestCase
         self::assertFalse($lastRun->appliesTo('feature', 'abc', 'def'));
         self::assertFalse($lastRun->appliesTo('feature', null, 'def'));
         self::assertFalse($lastRun->appliesTo('other', 'abc', 'abc'));
+        // A snapshot saved at another head (a CI pass saves one without moving the sha)
+        // says nothing about the tree the own baseline's sha stands for.
+        self::assertFalse($lastRun->appliesTo('feature', 'def', 'def'));
+        self::assertTrue($lastRun->describes('feature', 'abc'));
+        self::assertFalse($lastRun->describes('feature', 'def'));
     }
 }
