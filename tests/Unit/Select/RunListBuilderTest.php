@@ -265,6 +265,36 @@ final class RunListBuilderTest extends TestCase
         self::assertEquals(new Reason('StaleLayer', 'src/Foo.php', 'feature@abc1234'), $list->reasonsFor('tests/FooTest.php')[0]);
     }
 
+    public function test_a_file_whose_only_results_were_withheld_executes_once_as_stale_not_also_as_no_result(): void
+    {
+        // FooTest's only results sit in main's layer, which Select\LayerAudit withheld for
+        // this pass. The builder then reads no id for it at all: the no-result invariant
+        // and the stale bucket both describe it, and it must execute exactly once, with the
+        // one reason that says why (StaleLayer), not also "Uncached (no cached result)".
+        $graph = $this->graph(['FooTest::a' => 0, 'FooTest::b' => 0]);
+        $graph->withholdResults('main', ['tests/FooTest.php']);
+        $reason = new Reason('StaleLayer', 'src/Foo.php', 'main@abc1234');
+        $stale = ['tests/FooTest.php' => ['reason' => $reason, 'ids' => ['FooTest::a', 'FooTest::b']]];
+
+        $list = $this->builder($graph)->build([], 'feature', $stale);
+
+        self::assertSame(['tests/FooTest.php'], $list->files());
+        self::assertSame(['tests/FooTest.php'], $list->stale);
+        self::assertNotContains('tests/FooTest.php', $list->unknown);
+        self::assertEquals([$reason], $list->reasonsFor('tests/FooTest.php'));
+        self::assertSame('uncached', $list->primaryReasonFor('tests/FooTest.php'));
+
+        // Control: the same absence with no audit behind it is the no-result invariant's.
+        $graph = $this->graph(['FooTest::a' => 0]);
+        $graph->withholdResults('main', ['tests/FooTest.php']);
+
+        $list = $this->builder($graph)->build([], 'feature');
+
+        self::assertSame(['tests/FooTest.php'], $list->files());
+        self::assertSame([], $list->stale);
+        self::assertEquals([new Reason('Uncached', 'no cached result')], $list->reasonsFor('tests/FooTest.php'));
+    }
+
     public function test_a_stale_file_rerun_for_the_failure_underneath_leads_with_the_stale_reason(): void
     {
         // The own layer's pass was invalid; what is left is main's failure, which re-runs.
