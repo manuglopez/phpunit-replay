@@ -56,6 +56,16 @@ final class RunListBuilderTest extends TestCase
         $graph->link($this->root . '/tests/FooTest.php', $this->root . '/src/Foo.php');
         $graph->markKnownTestFiles(['tests/BarTest.php']);
 
+        foreach (['tests/FooTest.php', 'tests/BarTest.php'] as $known) {
+            $graph->setResult('main', $known . '::testRecorded', [
+                'status' => 0,
+                'message' => '',
+                'time' => 0.5,
+                'assertions' => 1,
+                'file' => $known,
+            ]);
+        }
+
         foreach ($statuses as $testId => $status) {
             $graph->setResult('main', $testId, [
                 'status' => $status,
@@ -103,6 +113,28 @@ final class RunListBuilderTest extends TestCase
         self::assertNotSame([], $reasons);
         self::assertSame('PhpEdge', $reasons[0]->rule);
         self::assertSame('src/Foo.php', $reasons[0]->trigger);
+    }
+
+    public function test_a_known_test_file_holding_no_result_is_uncached_even_when_nothing_changed(): void
+    {
+        $graph = new Graph($this->root);
+        $graph->link($this->root . '/tests/FooTest.php', $this->root . '/src/Foo.php');
+        $graph->markKnownTestFiles(['tests/BarTest.php']);
+        $graph->setResult('main', 'tests/BarTest.php::testRecorded', [
+            'status' => 0,
+            'message' => '',
+            'time' => 0.5,
+            'assertions' => 1,
+            'file' => 'tests/BarTest.php',
+        ]);
+
+        $list = $this->builder($graph)->build([], 'main');
+
+        self::assertSame(['tests/FooTest.php'], $list->unknown);
+        self::assertSame(['tests/FooTest.php'], $list->files());
+        self::assertSame('Uncached', $list->reasonsFor('tests/FooTest.php')[0]->rule);
+        self::assertSame('no cached result', $list->reasonsFor('tests/FooTest.php')[0]->trigger);
+        self::assertSame('uncached', $list->primaryReasonFor('tests/FooTest.php'));
     }
 
     public function test_a_test_file_the_graph_does_not_know_is_uncached(): void

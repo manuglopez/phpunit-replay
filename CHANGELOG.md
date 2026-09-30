@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.2] — 2026-09-30
+
+### Fixed
+
+- **Fix: after an environment change, a run executed nothing, replayed nothing and exited 0 on a suite plain PHPUnit fails.** A fingerprint drift in the `environmental` bucket (PHP minor, coverage driver, OS, coverage format) clears the cached results and keeps the graph's edges. With no file changed on disk the run list was then empty and the replay set empty too, so the pass printed `environment change (driver): cached results cleared` followed by `0 executed · 0 replayed` and a green exit. The drifted graph was never rewritten, so nothing healed it; only `run --fresh` did.
+
+  The rule is now general rather than a special case of drift: **a test file the graph knows is never neither executed nor replayed.** `Select\RunListBuilder::build()` puts every known test file that holds no result in the layers the pass serves from into the uncached bucket, so it executes and is listed in `--explain` as `Uncached (no cached result)`. Both the wrapper and the in-process extension build their run list there, so both get it, and so does every other way results go missing (an interrupted or truncated record, a cleared layer). The environment stamped on the graph is also refreshed when the results are cleared, so the warning stops after the pass that re-recorded them. Content keys, fingerprint composition, the remote layout and the graph format are untouched.
+
 ## [0.10.1] — 2026-09-30
 
 ### Fixed

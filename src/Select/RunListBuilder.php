@@ -92,6 +92,23 @@ final class RunListBuilder
             }
         }
 
+        // A test file the graph knows must never be neither executed nor replayed. Replay
+        // serves a test from `$results`, so a known file with no result at all in the layers
+        // this pass serves from (cleared by an environmental drift, an interrupted or
+        // truncated record, a layer that never held it) has nothing to replay and no rule
+        // selecting it: it would silently run nothing. It joins the uncached bucket and
+        // executes, which also records the results the next pass replays.
+        $noResult = [];
+
+        foreach ($allTestFiles as $rel) {
+            if ($this->graph->knowsTest($rel) && ! isset($idsByFile[$rel])) {
+                $noResult[] = $rel;
+            }
+        }
+
+        $unknown = array_values(array_unique([...$unknown, ...$noResult]));
+        sort($unknown);
+
         // Split every non-cacheable file (docs/INTERNALS.md "Hermeticity") into two run-list
         // buckets by its most relevant Reason: automatic quarantine (a flip,
         // Hermeticity\Quarantine) versus an explicit `#[NotCacheable]`/`never_cache` — the
@@ -122,6 +139,7 @@ final class RunListBuilder
             $quarantineReasons,
             $notCacheable,
             $notCacheableReasons,
+            $noResult,
         );
     }
 
