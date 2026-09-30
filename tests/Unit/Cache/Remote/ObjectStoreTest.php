@@ -88,6 +88,24 @@ final class ObjectStoreTest extends TestCase
         self::assertSame($this->results(), $object['results']);
     }
 
+    public function testAnObjectCarriesItsNonEdgeDigestBesideKAndOneWithoutItStillReads(): void
+    {
+        $store = $this->store();
+
+        self::assertTrue($store->putObject('deadbeef', 'tests/MoneyTest.php', $this->results(), 'n1:abc'));
+        self::assertTrue($store->putObject('cafebabe', 'tests/MoneyTest.php', $this->results()));
+
+        $body = Json::decodeArray((string) file_get_contents($this->remoteRoot . '/' . ObjectStore::objectKey(ObjectStore::currentShard(), 'deadbeef')));
+        self::assertIsArray($body);
+        self::assertSame(['k', 'file', 'n', 'results'], array_keys($body), 'the path and k are unchanged, n is additive');
+
+        $reader = new ObjectStore($this->backend(), $this->tmp . '/state2', 'shop-abc');
+        self::assertSame('n1:abc', $reader->object('deadbeef')['n'] ?? null);
+        $legacy = $reader->object('cafebabe');
+        self::assertNotNull($legacy);
+        self::assertNull($legacy['n'], 'an object written without a digest has none');
+    }
+
     public function testAReadIsMirroredLocallyAndSurvivesTheRemoteGoingAway(): void
     {
         $this->store()->putObject('deadbeef', 'tests/MoneyTest.php', $this->results());

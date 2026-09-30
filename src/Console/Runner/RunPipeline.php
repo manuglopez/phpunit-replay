@@ -10,8 +10,10 @@ use Manuglopez\Replay\Analysis\StaticEdges;
 use Manuglopez\Replay\Cache\BaselineWriter;
 use Manuglopez\Replay\Cache\ContentHash;
 use Manuglopez\Replay\Cache\ContentKey;
+use Manuglopez\Replay\Cache\FileHashes;
 use Manuglopez\Replay\Cache\Fingerprint;
 use Manuglopez\Replay\Cache\Graph;
+use Manuglopez\Replay\Cache\GraphPublication;
 use Manuglopez\Replay\Cache\GraphStore;
 use Manuglopez\Replay\Cache\GraphUpdater;
 use Manuglopez\Replay\Cache\OnceProcessClassifier;
@@ -46,11 +48,13 @@ use Manuglopez\Replay\Report\JUnitMerger;
 use Manuglopez\Replay\Report\Summary;
 use Manuglopez\Replay\Report\VerifySummary;
 use Manuglopez\Replay\Select\LayerAudit;
+use Manuglopez\Replay\Select\NonEdgeInputs;
 use Manuglopez\Replay\Select\Reason;
 use Manuglopez\Replay\Select\ReplaySet;
 use Manuglopez\Replay\Select\RunList;
 use Manuglopez\Replay\Select\RunListBuilder;
 use Manuglopez\Replay\Select\Selection;
+use Manuglopez\Replay\Select\StampAudit;
 use Manuglopez\Replay\Select\TestPaths;
 use Manuglopez\Replay\Select\WatchPatterns;
 use Manuglopez\Replay\Support\Paths;
@@ -162,6 +166,14 @@ final class RunPipeline
 
     private ?string $runDir = null;
 
+    /** Every file this pass hashes, hashed once: keys, digests, stamps and pushes share it. */
+    private ?FileHashes $hashes = null;
+
+    /** The {@see NonEdgeInputs} of {@see self::$inputsGraph}, built on first use. */
+    private ?NonEdgeInputs $inputs = null;
+
+    private ?Graph $inputsGraph = null;
+
     public function run(RunRequest $request): int
     {
         $this->request = $request;
@@ -243,6 +255,7 @@ final class RunPipeline
 
         $this->root = $root;
         $this->git = new Git($root);
+        $this->hashes = new FileHashes($root);
 
         $phpunitBin = $locator->resolvePhpunitBin($root);
 
@@ -689,7 +702,7 @@ final class RunPipeline
 
         $complete = ! (bool) ($partial->meta['truncated'] ?? false) && in_array($exitCode, [0, 1], true);
 
-        $updater = new GraphUpdater($graph, $root, new ContentKey($root), $this->quarantine, $this->staticEdges, $this->git, $this->onceProcessPaths);
+        $updater = $this->updater($graph, $this->quarantine);
         $applied = $updater->apply($partial, $this->branch, recordsEdges: true, complete: $complete);
         $this->quarantine->save($this->stateDir);
 
@@ -826,7 +839,7 @@ final class RunPipeline
 
         // No quarantine passed here: divergences are detected explicitly below (reason
         // 'divergence', not the generic 'flip' GraphUpdater's own detection would use).
-        $updater = new GraphUpdater($graph, $root, new ContentKey($root), null, $this->staticEdges, $this->git, $this->onceProcessPaths);
+        $updater = $this->updater($graph, null);
         $updater->apply($partial, $this->branch, recordsEdges: true, complete: $complete);
 
         if ($this->fingerprintDrifted($partial)) {
@@ -1135,7 +1148,7 @@ final class RunPipeline
         if ($runList === []) {
             if ($changed !== []) {
                 if ($this->persist && (! $this->ciMode || $request->allowCiBaseline)) {
-                    (new GraphUpdater($graph, $root, new ContentKey($root), $this->quarantine, $this->staticEdges, $this->git, $this->onceProcessPaths))
+                    $this->updater($graph, $this->quarantine)
                         ->finalizeBaseline($this->branch, $this->head, $this->git->branchNames());
                 }
 
@@ -1218,7 +1231,7 @@ final class RunPipeline
 
         $complete = ! (bool) ($partial->meta['truncated'] ?? false) && in_array($exitCode, [0, 1], true);
 
-        $updater = new GraphUpdater($graph, $root, new ContentKey($root), $this->quarantine, $this->staticEdges, $this->git, $this->onceProcessPaths);
+        $updater = $this->updater($graph, $this->quarantine);
         $applied = $updater->apply($partial, $this->branch, recordsEdges: $recordsEdges, complete: $complete);
         $this->quarantine->save($this->stateDir);
 
@@ -1282,6 +1295,42 @@ final class RunPipeline
         return $exitCode;
     }
 
+    /** The pass's content keys, over its shared {@see FileHashes}. */
+    private function contentKey(): ContentKey
+    {
+        $root = $this->root ?? $this->request->cwd;
+        $this->hashes ??= new FileHashes($root);
+
+        return new ContentKey($root, $this->hashes);
+    }
+
+    /** The non-edge inputs of `$graph`, one instance per graph this pass works on. */
+    private function nonEdgeInputs(Graph $graph): NonEdgeInputs
+    {
+        if ($this->inputs === null || $this->inputsGraph !== $graph) {
+            $root = $this->root ?? $this->request->cwd;
+            $this->hashes ??= new FileHashes($root);
+            $this->inputs = NonEdgeInputs::forProject($graph, $root, $this->config, $this->testPaths, $this->hashes, $this->git, $this->stateDir);
+            $this->inputsGraph = $graph;
+        }
+
+        return $this->inputs;
+    }
+
+    private function updater(Graph $graph, ?Quarantine $quarantine): GraphUpdater
+    {
+        return new GraphUpdater(
+            $graph,
+            $this->root ?? $this->request->cwd,
+            $this->contentKey(),
+            $quarantine,
+            $this->staticEdges,
+            $this->git,
+            $this->onceProcessPaths,
+            $this->nonEdgeInputs($graph),
+        );
+    }
+
     private function runListBuilder(Graph $graph, string $root): RunListBuilder
     {
         return new RunListBuilder(
@@ -1300,7 +1349,9 @@ final class RunPipeline
      * {@see LayerAudit}: before anything is served, every result layer `Graph::results()`
      * would read for this branch is made valid for the current tree, by the same rule chain
      * that selects this pass's tests. Only layers the diff from `$sha` does not already vouch
-     * for cost a diff of their own — in the common case, none.
+     * for cost a diff of their own — in the common case, none. Then {@see StampAudit}: every
+     * result left is served only if its content key and non-edge input digest are the ones
+     * the current tree gives its test file.
      *
      * @return array<string, array{reason: Reason, ids: list<string>}>
      */
@@ -1312,6 +1363,16 @@ final class RunPipeline
             return $this->runListBuilder($graph, $root)->select($changed);
         };
         $stale = (new LayerAudit($graph, $changedFiles, $select))->apply($this->branch, $sha, $lastRun);
+
+        // Then every result still served must carry the stamp of the tree it is served on
+        // (Select\StampAudit): the layer audit trusts a layer's results as recorded at its sha.
+        $contentKey = $this->contentKey();
+        $inputs = $this->nonEdgeInputs($graph);
+        $stale = (new StampAudit(
+            $graph,
+            static fn (string $file): ?string => $contentKey->forTestFile($graph, $file),
+            $inputs->digestFor(...),
+        ))->apply($this->branch, $stale);
 
         foreach ($stale as $file => $entry) {
             // The same rendering as --explain: a reason reads `<changed file> (<layer>@<sha7>)`
@@ -1398,11 +1459,14 @@ final class RunPipeline
      * from anywhere. An object holding a result that would itself force a re-run is skipped
      * for the same reason.
      *
-     * The object is proof only of what `k` contains — the test file and the files it
-     * executed — so a file is served only when every reason it was selected is one of those
-     * ({@see \Manuglopez\Replay\Select\Selection::coveredByContentKey()}). One selected by a
-     * watch pattern, a migration, a Blade or sibling rule has a trigger outside `k`: `k` did
-     * not move, the object still hits, and it would replay a pass the change may have broken.
+     * `k` proves the test file and the files it executed. An object that also carries `n`,
+     * its non-edge input digest, proves every other input the rule chain sees when `n` equals
+     * this tree's ({@see StampAudit::objectServes()}), whatever selected the file; one with
+     * another `n` never serves. An object without `n` is proof only of what `k` contains, so
+     * it serves a file only when every reason it was selected is one of those
+     * ({@see \Manuglopez\Replay\Select\Selection::coveredByContentKey()}): one selected by a
+     * watch pattern, a migration, a Blade or sibling rule has a trigger outside `k`, `k` did
+     * not move, and the object would replay a pass the change may have broken.
      *
      * @param list<string> $runList
      * @return array{list<string>, list<string>} the run list without the files served from
@@ -1416,13 +1480,14 @@ final class RunPipeline
             return [$runList, []];
         }
 
-        $contentKey = new ContentKey($this->root ?? '');
+        $contentKey = $this->contentKey();
+        $inputs = $this->nonEdgeInputs($graph);
         $skip = array_fill_keys([...$list->unknown, ...$list->rerun, ...$list->quarantined], true);
         $kept = [];
         $served = [];
 
         foreach ($runList as $file) {
-            if (isset($skip[$file]) || ! $list->selection->coveredByContentKey($file) || $graph->isNotCacheable($file)) {
+            if (isset($skip[$file]) || ! $list->selection->has($file) || $graph->isNotCacheable($file)) {
                 $kept[] = $file;
 
                 continue;
@@ -1430,16 +1495,30 @@ final class RunPipeline
 
             $key = $contentKey->forTestFile($graph, $file);
             $object = $key === null ? null : $objects->object($key);
+            $digest = $inputs->digestFor($file);
 
-            if ($key === null || $object === null || $this->holdsARerun($object['results'])) {
+            if (
+                $key === null
+                || $object === null
+                || ! StampAudit::objectServes($object['n'], $digest, $list->selection->coveredByContentKey($file))
+                || $this->holdsARerun($object['results'])
+            ) {
                 $kept[] = $file;
 
                 continue;
             }
 
             foreach ($object['results'] as $testId => $result) {
+                // Stamped with what the object proves: its key, and its digest when it has one
+                // (a result without one is re-run by the next pass's Select\StampAudit).
+                unset($result['digest']);
                 $result['file'] = $file;
                 $result['key'] = $key;
+
+                if ($object['n'] !== null) {
+                    $result['digest'] = $object['n'];
+                }
+
                 $graph->setResult($this->branch, $testId, $result);
                 $this->remoteTestIds[$testId] = true;
             }
@@ -1493,7 +1572,8 @@ final class RunPipeline
             return;
         }
 
-        $contentKey = new ContentKey($this->root ?? '');
+        $contentKey = $this->contentKey();
+        $inputs = $this->nonEdgeInputs($graph);
         $own = $graph->ownResults($this->branch);
 
         foreach ($executedTestFiles as $file) {
@@ -1502,17 +1582,18 @@ final class RunPipeline
             }
 
             $key = $contentKey->forTestFile($graph, $file);
+            $digest = $inputs->digestFor($file);
 
-            if ($key === null) {
+            if ($key === null || $digest === null) {
                 continue;
             }
 
-            // Only what ran under this key: after an incomplete pass pruneStaleResults()
-            // has not dropped an id this file no longer holds.
-            $results = ContentKey::resultsRecordedAt($own, $file, $key);
+            // Only what ran under this key and digest: after an incomplete pass
+            // pruneStaleResults() has not dropped an id this file no longer holds.
+            $results = ContentKey::resultsRecordedAt($own, $file, $key, $digest);
 
             if ($results !== []) {
-                $objects->putObject($key, $file, $results);
+                $objects->putObject($key, $file, $results, $digest);
             }
         }
 
@@ -1522,6 +1603,16 @@ final class RunPipeline
 
         if ($this->ciMode && ! $this->request->allowCiBaseline) {
             Warnings::debug('remote: CI detected, the branch graph was not published (pass --allow-ci-baseline to override)');
+
+            return;
+        }
+
+        // Objects describe themselves; a graph is a baseline at its sha, and results recorded
+        // on a dirty tree are not what that sha holds (Cache\GraphPublication).
+        $refusal = GraphPublication::refusal($this->git, $inputs, 'remote: the ' . $this->branch . ' graph');
+
+        if ($refusal !== null) {
+            Warnings::warn($refusal);
 
             return;
         }

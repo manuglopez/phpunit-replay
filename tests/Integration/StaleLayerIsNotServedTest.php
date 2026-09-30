@@ -250,7 +250,9 @@ final class StaleLayerIsNotServedTest extends TestCase
         $dryRun = $this->fixture->replay(['run', '--dry-run'], $this->env());
         self::assertStringContainsString('baseline develop@', $dryRun['stdout'], $dryRun['stdout']);
         self::assertStringNotContainsString('StaleLayer', $dryRun['stdout'], $dryRun['stdout']);
-        self::assertStringContainsString('← Rerun', $dryRun['stdout'], $dryRun['stdout']);
+        // Those failures were recorded on main's newer Money.php, which their stamp says, so
+        // they are not served either (Select\StampAudit): the files execute, and pass.
+        self::assertMatchesRegularExpression('#tests/MoneyTest\.php\s+← StaleResult content key changed \(main@[0-9a-f]{7}\)#u', $dryRun['stdout'], $dryRun['stdout']);
 
         $run = $this->fixture->replay([], $this->env());
         self::assertSame(0, $run['exitCode'], $run['stdout'] . $run['stderr']);

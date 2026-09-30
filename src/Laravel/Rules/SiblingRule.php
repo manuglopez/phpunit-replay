@@ -43,7 +43,7 @@ final class SiblingRule implements Rule
                 continue;
             }
 
-            if (! $this->isSiblingCandidate($rel)) {
+            if (! self::isSiblingCandidate($rel)) {
                 continue;
             }
 
@@ -79,7 +79,8 @@ final class SiblingRule implements Rule
         }
     }
 
-    private function isSiblingCandidate(string $rel): bool
+    /** Shared with `Select\NonEdgeInputs`, whose `sibling:<dir>@1` scopes are this rule's claim. */
+    public static function isSiblingCandidate(string $rel): bool
     {
         if (! str_ends_with($rel, '.php')) {
             return false;

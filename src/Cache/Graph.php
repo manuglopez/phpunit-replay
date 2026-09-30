@@ -14,7 +14,13 @@ use Manuglopez\Replay\Version;
  * In-memory dependency graph (test file → source files) plus per-branch baselines, with a
  * defensive JSON codec. SPEC.md §4.2.
  *
- * @phpstan-type TestResultArray array{status:int, message:string, time:float, assertions:int, file?:string, key?:string}
+ * A result's `key` and `digest` are its stamp: the content key (`ContentKey`) and the
+ * non-edge input digest (`Select\NonEdgeInputs`) of its test file on the tree it ran on.
+ * `Select\StampAudit` serves a result only while both still match the current tree. Encoded
+ * as `k` and `n`; a graph written before `n` existed decodes with no digest, and a reader
+ * that predates it ignores the field.
+ *
+ * @phpstan-type TestResultArray array{status:int, message:string, time:float, assertions:int, file?:string, key?:string, digest?:string}
  * @phpstan-type Baseline array{sha:?string, complete?:bool, results:array<string, TestResultArray>}
  */
 final class Graph
@@ -60,6 +66,18 @@ final class Graph
      * @var array<string, true|array<string, true>>
      */
     private array $withheld = [];
+
+    /**
+     * This pass only, never encoded: per layer, the test ids whose result must not be served
+     * on the current tree because its stamp does not match it (`Select\StampAudit`). Unlike
+     * {@see self::$withheld} this masks the branch's own layer too, and by id rather than by
+     * file: the invalid result stays in the layer (a later pass re-checks it and re-runs its
+     * file until it is replaced) and a fresh result written over it
+     * ({@see self::setResult()}) is served again at once.
+     *
+     * @var array<string, array<string, true>>
+     */
+    private array $withheldIds = [];
 
     public function __construct(string $projectRoot)
     {
@@ -216,6 +234,18 @@ final class Graph
     public function testFilesDependingOn(string $relative): array
     {
         return $this->buildReverseIndex()[$relative] ?? [];
+    }
+
+    /**
+     * Whether some test file has an edge to `$relative`. Stricter than `fileId() !== null`
+     * in memory: a file whose last edge was pruned keeps its id until the next encode, and
+     * disappears from `files` on decode. This answer is the same before and after a round
+     * trip through `graph.json`, which is what a stamp computed now and checked on a later
+     * pass needs (`Select\NonEdgeInputs`).
+     */
+    public function isDependency(string $relative): bool
+    {
+        return isset($this->buildReverseIndex()[$relative]);
     }
 
     /** @return array<string, list<string>> */
@@ -411,6 +441,7 @@ final class Graph
     {
         $this->ensureBaseline($branch);
         $this->baselines[$branch]['results'][$testId] = $result;
+        unset($this->withheldIds[$branch][$testId]);
     }
 
     /** @return TestResultArray|null */
@@ -429,6 +460,48 @@ final class Graph
     public function ownResults(string $branch): array
     {
         return $this->baselines[$branch]['results'] ?? [];
+    }
+
+    /**
+     * What `$branch`'s own layer may still serve this pass: {@see self::ownResults()} minus
+     * whatever {@see self::withholdResults()} and {@see self::withholdTestIds()} masked — the
+     * exact subset {@see self::results()} reads from that layer.
+     *
+     * @return array<string, TestResultArray>
+     */
+    public function servableResults(string $branch): array
+    {
+        $withheld = $this->withheld[$branch] ?? [];
+
+        if ($withheld === true) {
+            return [];
+        }
+
+        $results = $this->baselines[$branch]['results'] ?? [];
+
+        if ($withheld !== []) {
+            $results = array_filter(
+                $results,
+                static fn (array $entry): bool => ! isset($withheld[$entry['file'] ?? '']),
+            );
+        }
+
+        $ids = $this->withheldIds[$branch] ?? [];
+
+        return $ids === [] ? $results : array_diff_key($results, $ids);
+    }
+
+    /**
+     * For this pass only (never encoded): `$branch`'s layer stops serving these test ids,
+     * until a fresh result is written for one of them (`Select\StampAudit`).
+     *
+     * @param list<string> $testIds
+     */
+    public function withholdTestIds(string $branch, array $testIds): void
+    {
+        foreach ($testIds as $testId) {
+            $this->withheldIds[$branch][$testId] = true;
+        }
     }
 
     public function clearResults(?string $branch = null): void
@@ -513,10 +586,11 @@ final class Graph
      *
      * Serving a merged result relies on the pass that reads it having audited the layers
      * first (`Select\LayerAudit`): a layer's results are trusted as recorded against the
-     * tree at ITS sha (with known, separately tracked exceptions: see
-     * {@see self::fallbackChain()}), while the pass selects tests by the diff from the sha
-     * of the baseline it resolved. Anything a layer holds that the current tree has
-     * invalidated is forgotten (the own layer) or withheld (any other) before this is read.
+     * tree at ITS sha, while the pass selects tests by the diff from the sha of the baseline
+     * it resolved. Anything a layer holds that the current tree has invalidated is forgotten
+     * (the own layer) or withheld (any other) before this is read. Then `Select\StampAudit`
+     * masks, by test id and in every layer, each result whose stamp (`key`, `digest`) is not
+     * the current tree's: that is what checks the premise itself.
      *
      * @return array<string, TestResultArray>
      */
@@ -548,9 +622,10 @@ final class Graph
      * further down as valid on its tree — and the diff says the test's inputs are unchanged
      * since. Whatever a lower layer now holds for it is therefore either a status that
      * forces a re-run anyway, or pass-like where the test really is pass-like. The premise
-     * has known exceptions, tracked separately (results written into a layer without its
-     * sha moving; results recorded on a dirty tree), and wherever it fails for the base
-     * layer this argument fails with it. A layer ABOVE that baseline (the branch's own, when
+     * fails for results written into a layer without its sha moving and for results recorded
+     * on a dirty tree, and wherever it fails for the base layer this argument fails with it:
+     * those results are caught by their stamps instead (`Select\StampAudit`), whichever layer
+     * holds them. A layer ABOVE that baseline (the branch's own, when
      * a nearer one won) or below a baseline whose layer this graph does not hold (a sha the
      * resolver found on the remote) has no such argument at all and is audited against its
      * own diff instead (`Select\LayerAudit`).
@@ -576,20 +651,7 @@ final class Graph
      */
     private function layer(array $under, string $branch): array
     {
-        $withheld = $this->withheld[$branch] ?? [];
-
-        if ($withheld === true) {
-            return $under;
-        }
-
-        $results = $this->baselines[$branch]['results'] ?? [];
-
-        if ($withheld !== []) {
-            $results = array_filter(
-                $results,
-                static fn (array $entry): bool => ! isset($withheld[$entry['file'] ?? '']),
-            );
-        }
+        $results = $this->servableResults($branch);
 
         if ($results === []) {
             return $under;
@@ -1073,6 +1135,10 @@ final class Graph
                 $result['key'] = $entry['k'];
             }
 
+            if (is_string($entry['n'] ?? null) && $entry['n'] !== '') {
+                $result['digest'] = $entry['n'];
+            }
+
             $results[$testId] = $result;
         }
 
@@ -1187,6 +1253,10 @@ final class Graph
 
                 if (isset($result['key'])) {
                     $short['k'] = $result['key'];
+                }
+
+                if (isset($result['digest'])) {
+                    $short['n'] = $result['digest'];
                 }
 
                 $entry['results'][$testId] = $short;

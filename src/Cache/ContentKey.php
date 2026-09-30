@@ -32,7 +32,11 @@ namespace Manuglopez\Replay\Cache;
  */
 final readonly class ContentKey
 {
-    public function __construct(private string $projectRoot)
+    /**
+     * `$hashes` is the pass's shared memo ({@see FileHashes}); without one every call reads
+     * the files again. Either way the key is the same function of the same bytes.
+     */
+    public function __construct(private string $projectRoot, private ?FileHashes $hashes = null)
     {
     }
 
@@ -42,7 +46,7 @@ final readonly class ContentKey
      */
     public function compute(array $fingerprint, string $testFileRel, array $dependencies): ?string
     {
-        $testHash = ContentHash::of($this->absolute($testFileRel));
+        $testHash = $this->hash($testFileRel);
 
         if ($testHash === null) {
             return null;
@@ -51,7 +55,7 @@ final readonly class ContentKey
         $parts = [];
 
         foreach ($dependencies as $dependency) {
-            $hash = ContentHash::of($this->absolute($dependency)) ?? '';
+            $hash = $this->hash($dependency) ?? '';
             $parts[] = $dependency . ':' . $hash;
         }
 
@@ -79,15 +83,20 @@ final readonly class ContentKey
      * never got to drop) — must not be published as a verdict on content it never ran
      * against. Shared by every publisher: `push`, and both post-run push loops.
      *
+     * The same holds for the other half of a result's stamp, the non-edge input digest
+     * (`Select\NonEdgeInputs`): an object carries one, and only results recorded under it go
+     * in. A result without one — recorded before stamps existed, or when the digest could not
+     * be computed — is published by nobody: nothing could validate it on the other side.
+     *
      * @param  array<string, TestResultArray>  $results
      * @return array<string, TestResultArray>
      */
-    public static function resultsRecordedAt(array $results, string $testFile, string $key): array
+    public static function resultsRecordedAt(array $results, string $testFile, string $key, string $digest): array
     {
         $recorded = [];
 
         foreach ($results as $testId => $result) {
-            if (($result['file'] ?? null) === $testFile && ($result['key'] ?? null) === $key) {
+            if (($result['file'] ?? null) === $testFile && ($result['key'] ?? null) === $key && ($result['digest'] ?? null) === $digest) {
                 $recorded[$testId] = $result;
             }
         }
@@ -95,8 +104,10 @@ final readonly class ContentKey
         return $recorded;
     }
 
-    private function absolute(string $relative): string
+    private function hash(string $relative): ?string
     {
-        return rtrim($this->projectRoot, '/') . '/' . $relative;
+        return $this->hashes !== null
+            ? $this->hashes->of($relative)
+            : ContentHash::of(rtrim($this->projectRoot, '/') . '/' . $relative);
     }
 }

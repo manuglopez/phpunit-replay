@@ -62,6 +62,64 @@ final class BladeReferences
         return array_keys($ancestors);
     }
 
+    /**
+     * {@see self::ancestorsOf()} for several templates at once, reading every template once
+     * instead of once per target and per round (`Select\NonEdgeInputs` asks it of every
+     * template the graph does not know, on every pass). Same fixpoint, same references, so
+     * the same answer per template.
+     *
+     * @param list<string> $bladeRels project-relative
+     * @return array<string, list<string>> template => its ancestors
+     */
+    public static function ancestorsOfMany(array $bladeRels, string $projectRoot): array
+    {
+        if ($bladeRels === []) {
+            return [];
+        }
+
+        $sources = [];
+
+        foreach (self::allBladeFiles($projectRoot) as $candidate) {
+            $source = @file_get_contents(rtrim($projectRoot, '/') . '/' . $candidate);
+
+            if ($source !== false) {
+                $sources[$candidate] = $source;
+            }
+        }
+
+        $out = [];
+
+        foreach ($bladeRels as $bladeRel) {
+            $targets = [$bladeRel => true];
+            $ancestors = [];
+            $changed = $sources !== [];
+
+            while ($changed) {
+                $changed = false;
+
+                foreach ($sources as $candidate => $source) {
+                    if (isset($targets[$candidate]) || isset($ancestors[$candidate])) {
+                        continue;
+                    }
+
+                    foreach (array_keys($targets) as $target) {
+                        if (self::sourceReferences($source, (string) $target)) {
+                            $ancestors[$candidate] = true;
+                            $targets[$candidate] = true;
+                            $changed = true;
+
+                            break;
+                        }
+                    }
+                }
+            }
+
+            $out[$bladeRel] = array_map(strval(...), array_keys($ancestors));
+        }
+
+        return $out;
+    }
+
     public static function isBladePath(string $rel): bool
     {
         return str_starts_with($rel, 'resources/views/') && str_ends_with($rel, '.blade.php');

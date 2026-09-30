@@ -9,6 +9,7 @@ use Manuglopez\Replay\Change\Git;
 use Manuglopez\Replay\Console\Runner\Warnings;
 use Manuglopez\Replay\Hermeticity\Quarantine;
 use Manuglopez\Replay\Record\RunPartial;
+use Manuglopez\Replay\Select\NonEdgeInputs;
 
 /**
  * Merges a `RunPartial` (written by the extension) into a `Graph`. Shared by the
@@ -50,6 +51,11 @@ final class GraphUpdater
      * "inject or construct" convention as `Change\ChangedFiles`. A caller that already has
      * one (`Console\Runner\RunPipeline`, `PHPUnit\ReplayState`) passes it through instead of
      * paying for a second one.
+     *
+     * `$inputs` is the pass's {@see NonEdgeInputs} for `$graph`: every result merged is stamped
+     * with its file's content key and, through it, its non-edge input digest. Without one a
+     * result gets no digest, and `Select\StampAudit` will not serve it: every production
+     * caller passes it.
      */
     public function __construct(
         private readonly Graph $graph,
@@ -59,6 +65,7 @@ final class GraphUpdater
         private readonly ?StaticEdges $staticEdges = null,
         ?Git $git = null,
         private readonly ?OnceProcessClassifier $onceProcessPaths = null,
+        private readonly ?NonEdgeInputs $inputs = null,
     ) {
         $this->git = $git ?? new Git($projectRoot);
     }
@@ -353,6 +360,10 @@ final class GraphUpdater
         $touched = [];
         $keepIds = [];
         $keyByFile = [];
+        $digestByFile = [];
+
+        // The edges and tables were just updated above: the scopes are recomputed from them.
+        $this->inputs?->refresh();
 
         foreach ($partial->results as $testId => $result) {
             $file = $result['file'] ?? null;
@@ -368,16 +379,33 @@ final class GraphUpdater
             if (! array_key_exists($file, $keyByFile)) {
                 // Computed once per file, after edges have already been replaced above.
                 $keyByFile[$file] = $this->contentKey->forTestFile($this->graph, $file);
+                $digestByFile[$file] = $keyByFile[$file] !== null ? $this->inputs?->digestFor($file) : null;
                 $touched[$file] = true;
             }
 
             $key = $keyByFile[$file];
+            $digest = $digestByFile[$file];
+
+            // The stamp is always this pass's: a replayed result the in-process path persists
+            // carries whatever it was stamped with before, and only what is recomputed here
+            // describes the tree it is being recorded on.
+            $result = [
+                'status' => $result['status'],
+                'message' => $result['message'],
+                'time' => $result['time'],
+                'assertions' => $result['assertions'],
+                'file' => $file,
+            ];
 
             if ($key !== null) {
                 $result['key'] = $key;
             }
 
-            $this->detectFlip($branch, $testId, $key, $result);
+            if ($digest !== null) {
+                $result['digest'] = $digest;
+            }
+
+            $this->detectFlip($branch, $testId, $key, $digest, $result);
 
             $this->graph->setResult($branch, $testId, $result);
             $keepIds[] = $testId;
@@ -399,9 +427,13 @@ final class GraphUpdater
      * its own, but "old class fail" is exactly the one transition guaranteed reproducible
      * under any configuration.
      *
+     * "Unchanged" means the whole stamp: the content key AND the non-edge input digest. A
+     * test that reads a watched data file flips when that file changes, under the same key,
+     * and that is the input changing, not the test being flaky.
+     *
      * @param TestResultArray $result
      */
-    private function detectFlip(string $branch, string $testId, ?string $key, array $result): void
+    private function detectFlip(string $branch, string $testId, ?string $key, ?string $digest, array $result): void
     {
         if ($this->quarantine === null || $key === null) {
             return;
@@ -410,6 +442,10 @@ final class GraphUpdater
         $old = $this->graph->result($branch, $testId);
 
         if ($old === null || ($old['key'] ?? null) !== $key) {
+            return;
+        }
+
+        if ($this->inputs !== null && ($digest === null || ($old['digest'] ?? null) !== $digest)) {
             return;
         }
 

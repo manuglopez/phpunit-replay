@@ -34,11 +34,11 @@ final class MigrationRule implements Rule
         }
 
         foreach ($context->remaining as $rel) {
-            if (! $this->isMigrationPath($rel)) {
+            if (! self::isMigrationPath($rel)) {
                 continue;
             }
 
-            $tables = $this->tablesForMigration($rel, $context->projectRoot);
+            $tables = self::tablesForMigration($rel, $context->projectRoot);
 
             if ($tables === []) {
                 continue;
@@ -60,13 +60,14 @@ final class MigrationRule implements Rule
         }
     }
 
-    private function isMigrationPath(string $rel): bool
+    /** Shared with `Select\NonEdgeInputs`, whose `migrations@1` scope is this rule's claim. */
+    public static function isMigrationPath(string $rel): bool
     {
         return str_starts_with($rel, 'database/migrations/') && str_ends_with($rel, '.php');
     }
 
     /** @return list<string> */
-    private function tablesForMigration(string $rel, string $projectRoot): array
+    public static function tablesForMigration(string $rel, string $projectRoot): array
     {
         $absolute = Paths::join($projectRoot, $rel);
 

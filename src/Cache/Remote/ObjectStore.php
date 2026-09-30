@@ -44,8 +44,14 @@ use Manuglopez\Replay\Support\Json;
  * precisely so it never has to touch the marker invariant above — see
  * {@see self::collectMirror()}'s own docblock.
  *
+ * An object written from this release on also carries `n`, the non-edge input digest its
+ * results were recorded under (`Select\NonEdgeInputs`), beside `k` in the body: its path and
+ * `k` are unchanged, and a reader that predates it ignores the field. A consumer whose own
+ * digest for the test file equals `n` knows every input the rule chain can see is the one the
+ * results ran on. An object without it proves only what `k` covers.
+ *
  * @phpstan-import-type TestResultArray from Graph
- * @phpstan-type RemoteObject array{k: string, file: string, results: array<string, TestResultArray>}
+ * @phpstan-type RemoteObject array{k: string, file: string, n: ?string, results: array<string, TestResultArray>}
  */
 final class ObjectStore
 {
@@ -213,8 +219,10 @@ final class ObjectStore
      * only costs bandwidth (and, on the git backend, a pointless commit).
      *
      * @param array<string, TestResultArray> $results
+     * @param string|null $digest the non-edge input digest every one of `$results` was
+     *        recorded under, published as `n`
      */
-    public function putObject(string $k, string $testFileRel, array $results): bool
+    public function putObject(string $k, string $testFileRel, array $results, ?string $digest = null): bool
     {
         if ($k === '' || $results === []) {
             return false;
@@ -226,7 +234,13 @@ final class ObjectStore
             return false;
         }
 
-        $body = Json::encode(['k' => $k, 'file' => $testFileRel, 'results' => $results]);
+        $object = ['k' => $k, 'file' => $testFileRel];
+
+        if ($digest !== null) {
+            $object['n'] = $digest;
+        }
+
+        $body = Json::encode([...$object, 'results' => $results]);
 
         if ($body === null) {
             return false;
@@ -462,7 +476,9 @@ final class ObjectStore
             return null;
         }
 
-        return ['k' => $k, 'file' => $file, 'results' => $results];
+        $n = $data['n'] ?? null;
+
+        return ['k' => $k, 'file' => $file, 'n' => is_string($n) && $n !== '' ? $n : null, 'results' => $results];
     }
 
     /** @return array<string, TestResultArray> */
@@ -497,6 +513,10 @@ final class ObjectStore
 
             if (is_string($entry['key'] ?? null) && $entry['key'] !== '') {
                 $result['key'] = $entry['key'];
+            }
+
+            if (is_string($entry['digest'] ?? null) && $entry['digest'] !== '') {
+                $result['digest'] = $entry['digest'];
             }
 
             $out[$id] = $result;

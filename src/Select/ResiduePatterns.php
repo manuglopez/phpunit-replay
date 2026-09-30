@@ -76,9 +76,19 @@ final readonly class ResiduePatterns
      */
     private function targets(): array
     {
+        return self::targetsFor($this->testPaths);
+    }
+
+    /**
+     * {@see self::targets()}, for {@see NonEdgeInputs}' `residue@1` scope.
+     *
+     * @return list<string>
+     */
+    public static function targetsFor(TestPaths $testPaths): array
+    {
         return array_values(array_unique([
-            ...$this->testPaths->directories(),
-            ...$this->testPaths->files(),
+            ...$testPaths->directories(),
+            ...$testPaths->files(),
         ]));
     }
 
@@ -107,12 +117,22 @@ final readonly class ResiduePatterns
 
     public function isResidue(string $rel): bool
     {
+        return self::hasResidueShape($rel, $this->testPaths) && $this->graph->fileId($rel) === null;
+    }
+
+    /**
+     * The half of {@see self::isResidue()} that does not ask the graph: a `.php` file that is
+     * neither a Blade template nor a test file. Shared with {@see NonEdgeInputs}, whose
+     * `residue@1` scope is this fallback's claim.
+     */
+    public static function hasResidueShape(string $rel, TestPaths $testPaths): bool
+    {
         $lower = strtolower($rel);
 
         if (! str_ends_with($lower, '.php') || str_ends_with($lower, '.blade.php')) {
             return false;
         }
 
-        return ! $this->testPaths->isTestFile($rel) && $this->graph->fileId($rel) === null;
+        return ! $testPaths->isTestFile($rel);
     }
 }

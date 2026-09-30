@@ -101,6 +101,28 @@ final class BladeReferencesTest extends TestCase
         self::assertFalse(BladeReferences::isBladePath('app/View/welcome.blade.php'));
     }
 
+    public function test_the_batch_answers_exactly_what_one_call_per_template_does(): void
+    {
+        $this->write('resources/views/partials/x.blade.php', '<div>x</div>');
+        $this->write('resources/views/partials/y.blade.php', '<div>y</div>');
+        $this->write('resources/views/components/card.blade.php', '<div>card</div>');
+        $this->write('resources/views/layout.blade.php', "@include('partials.x')");
+        $this->write('resources/views/page.blade.php', "@extends('layout') <x-card />");
+        $this->write('resources/views/other.blade.php', "{{ view('partials.y') }}");
+
+        $templates = [
+            'resources/views/partials/x.blade.php',
+            'resources/views/partials/y.blade.php',
+            'resources/views/components/card.blade.php',
+            'resources/views/page.blade.php',
+        ];
+        $batch = BladeReferences::ancestorsOfMany($templates, $this->root);
+
+        foreach ($templates as $template) {
+            self::assertSame(BladeReferences::ancestorsOf($template, $this->root), $batch[$template] ?? null, $template);
+        }
+    }
+
     private function write(string $relative, string $content): void
     {
         TempDir::write($this->root . '/' . $relative, $content);

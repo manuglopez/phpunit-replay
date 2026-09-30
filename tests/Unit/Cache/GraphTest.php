@@ -828,6 +828,59 @@ final class GraphTest extends TestCase
         );
     }
 
+    public function test_a_result_s_digest_round_trips_as_n_and_a_graph_without_it_still_decodes(): void
+    {
+        $graph = new Graph($this->root);
+        $graph->setResult('main', 'A::a', ['status' => 0, 'message' => '', 'time' => 0.0, 'assertions' => 1, 'file' => 'tests/ATest.php', 'key' => 'k', 'digest' => 'n1:d']);
+        $graph->setResult('main', 'B::b', ['status' => 0, 'message' => '', 'time' => 0.0, 'assertions' => 1, 'file' => 'tests/BTest.php', 'key' => 'k']);
+
+        $json = $graph->encode();
+        self::assertNotNull($json);
+        $data = json_decode($json, true);
+        self::assertIsArray($data);
+        self::assertSame('n1:d', $data['baselines']['main']['results']['A::a']['n'] ?? null);
+        self::assertArrayNotHasKey('n', $data['baselines']['main']['results']['B::b']);
+
+        $decoded = Graph::decode($json, $this->root);
+        self::assertNotNull($decoded);
+        self::assertSame('n1:d', $decoded->ownResults('main')['A::a']['digest'] ?? null);
+        self::assertArrayNotHasKey('digest', $decoded->ownResults('main')['B::b']);
+    }
+
+    public function test_servable_results_leave_out_what_is_withheld(): void
+    {
+        $graph = new Graph($this->root);
+        $graph->setResult('develop', 'A::a', ['status' => 0, 'message' => '', 'time' => 0.0, 'assertions' => 1, 'file' => 'tests/ATest.php']);
+        $graph->setResult('develop', 'B::b', ['status' => 0, 'message' => '', 'time' => 0.0, 'assertions' => 1, 'file' => 'tests/BTest.php']);
+
+        $graph->withholdResults('develop', ['tests/ATest.php']);
+        self::assertSame(['B::b'], array_keys($graph->servableResults('develop')));
+        self::assertCount(2, $graph->ownResults('develop'));
+
+        $graph->withholdResults('develop', null);
+        self::assertSame([], $graph->servableResults('develop'));
+    }
+
+    public function test_is_dependency_answers_the_same_before_and_after_a_round_trip(): void
+    {
+        TempDir::write($this->root . '/tests/ATest.php', "<?php\n");
+        TempDir::write($this->root . '/src/A.php', "<?php\n");
+        TempDir::write($this->root . '/src/B.php', "<?php\n");
+        $graph = new Graph($this->root);
+        $graph->unionEdges(['tests/ATest.php' => ['src/A.php'], 'tests/GoneTest.php' => ['src/B.php']]);
+        $graph->pruneMissingTestFiles();
+
+        // B keeps its id in memory (orphaned), but no test depends on it any more.
+        self::assertNotNull($graph->fileId('src/B.php'));
+        self::assertFalse($graph->isDependency('src/B.php'));
+        self::assertTrue($graph->isDependency('src/A.php'));
+
+        $decoded = Graph::decode((string) $graph->encode(), $this->root);
+        self::assertNotNull($decoded);
+        self::assertFalse($decoded->isDependency('src/B.php'));
+        self::assertTrue($decoded->isDependency('src/A.php'));
+    }
+
     public function test_decode_returns_null_for_invalid_json(): void
     {
         self::assertNull(Graph::decode('{not valid json', $this->root));

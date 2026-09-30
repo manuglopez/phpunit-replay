@@ -277,7 +277,7 @@ Rules:
 
 - `files` is a file table with integer ids; `edges` is **test file → ids** (the only direction stored; the reverse is built in memory on load).
 - A test file present in `edges` with an empty list is "known with no dependencies" (different from unknown). `knowsTest(rel)`.
-- `s` = `PHPUnit\Framework\TestStatus\TestStatus::asInt()`: 0 success, 1 skipped, 2 incomplete, 3 notice, 4 deprecation, 5 risky, 6 warning, 7 failure, 8 error. `a` assertions, `t` seconds, `m` message, `f` relative file, `k` **content key** (§4.3).
+- `s` = `PHPUnit\Framework\TestStatus\TestStatus::asInt()`: 0 success, 1 skipped, 2 incomplete, 3 notice, 4 deprecation, 5 risky, 6 warning, 7 failure, 8 error. `a` assertions, `t` seconds, `m` message, `f` relative file, `k` **content key** (§4.3), `n` **non-edge input digest** (§4.3.2; additive, absent from graphs written before it, ignored by readers that predate it). `k` and `n` are the result's stamp: it is served only while both are what the current tree gives its test file.
 - Per-branch baselines. Reading on branch `X`: `array_replace(results[default], results[X])` unless `X.complete === true`, in which case the default's results are only used for files not covered by `X`.
 - Defensive `decode()`: a mismatched `schema` → the graph is discarded with a warning; malformed sections → those entries are ignored.
 - Atomic write: `tmp` + `rename`.
@@ -443,6 +443,17 @@ removes, one level up. A project with an unconventional migration layout
 reason, and keeps today's behaviour. No configuration governs any of this, deliberately, matching
 §7.3's own precedent: extending or narrowing the convention list is a code change, not a project
 setting.
+
+#### 4.3.2 Non-edge input digest
+
+`k` covers the test file and the files it executed. The rule chain (§7.2) also selects a test file for files it did not execute: a watched file it reads, a migration of one of its tables, a new sibling or Blade partial next to something it uses, and with §4.3.1 any `.php` file nothing has an edge to. The digest `n` covers those, per test file, and is stamped on each result next to `k`:
+
+```
+n(T) = "n1:" . xxh128("nonedge@1\n" . join(sorted(scopeId . "=" . scopeDigest . "\n")))
+scopeDigest = xxh128(join(sorted(path . "\0" . ContentHash(path) . "\n")))   // over the scope's members
+```
+
+over the non-empty scopes `T` carries: `migrations@1`, `sibling:<dir>@1`, `blade@1`, `watch:<pattern>@1`, `residue@1` (§4.3.1 only). Members are the working tree's files (`git ls-files -co --exclude-standard`, minus ignored and missing files) that the rule chain would claim for `T` if they changed, in its consumption order — a file some test has an edge to belongs to `k`, not to `n`. Defined in one place, `Select\NonEdgeInputs`; `n1` is its version token. A result is served only when its `k` and `n` both equal the ones the current tree gives its test file (docs/INTERNALS.md "Result stamps"). A result without `n` (recorded before it existed) executes once and is stamped.
 
 ### 4.4 ContentHash (normalization)
 
@@ -619,7 +630,7 @@ Documented limitation: `#[Depends]` on a replayed test receives `null`. The defa
 5. Content filter: for each candidate, `ContentHash::of(workingTree) === ContentHash::ofContent(git show <sha>:<path>)` → dropped. Deletions and new files remain.
 6. `LastRunTree`: candidates ∪ keys from `last-run.tree`; kept only if the current hash differs from the snapshot (or the file disappeared). A dirty file already tested isn't tested again; a reverted one is re-run. Only when the snapshot is of this branch, was taken at the sha the branch's own baseline is recorded at, AND the pass diffs from that baseline: the snapshot describes the own result layer, and a pass diffing from another branch's baseline does not serve from it.
 
-The change set speaks for one result layer only — the one whose sha it was diffed from. A result recorded in any other layer at sha s may be served for a test file only if the rule chain would not select that file for the change set between s and the current tree; layers below the diff base need no check, any other one is checked against its own diff before anything is served, and one whose sha is missing or unknown to git serves nothing (docs/INTERNALS.md "Result layers"). All of this trusts a layer's results as recorded on the tree at its sha; results written without the sha moving, or recorded on a dirty tree, break that premise and are known, separately tracked exceptions.
+The change set speaks for one result layer only — the one whose sha it was diffed from. A result recorded in any other layer at sha s may be served for a test file only if the rule chain would not select that file for the change set between s and the current tree; layers below the diff base need no check, any other one is checked against its own diff before anything is served, and one whose sha is missing or unknown to git serves nothing (docs/INTERNALS.md "Result layers"). All of this trusts a layer's results as recorded on the tree at its sha; results written without the sha moving (a CI pass without `--allow-ci-baseline`, an incomplete pass), or recorded on a dirty tree (the last-run snapshot covers only the branch that ran, until another branch's pass overwrites it), break that premise. So every result is also checked against its own stamp (§4.2 `k` and `n`, §4.3.2) before it is served, from every layer: a result whose key or non-edge digest differs from the current tree's, or that carries no digest, is not served, and its file executes (`StaleResult` in `--explain`). The last-run snapshot therefore only ever narrows what executes on the branch that took it; it is no longer what keeps a dirty-tree result from being served elsewhere.
 
 ### 7.2 Selector::affected(changed): set<testFile>
 
@@ -673,7 +684,9 @@ interface RemoteCache {
 
 Keys: `graph/<project-key>/<branch>.json` (full baseline graph per branch, uploaded after full runs) and `objects/<k>.json` (results of a test file by content key).
 
-Startup flow with no local graph: `get(graph/<key>/<branch>)` → if missing, `get(graph/<key>/<defaultBranch>)` → reconcile fingerprint and sha ancestry → use it. Per-test-file flow in replay: if a test file is affected but `objects/<k_actual>.json` exists in the remote (another machine already ran that exact content) → it's treated as **replayed-remote** and not run — but only when every reason it was selected is one `k` covers (a PHP edge, or the test file itself changing). A file also selected by a watch pattern, a migration or any other rule always runs: `k` does not contain that trigger, so the object cannot vouch for it. This is what lets a PR's CI inherit work from a laptop or from another PR with the same files.
+Startup flow with no local graph: `get(graph/<key>/<branch>)` → if missing, `get(graph/<key>/<defaultBranch>)` → reconcile fingerprint and sha ancestry → use it. Per-test-file flow in replay: if a test file is affected but `objects/<k_actual>.json` exists in the remote (another machine already ran that exact content) → it's treated as **replayed-remote** and not run. An object carries `n`, the non-edge input digest its results were recorded under (§4.3.2), in its body beside `k`: it serves only when `n` equals this tree's, whatever selected the file. An object without `n` serves only when every reason the file was selected is one `k` covers (a PHP edge, or the test file itself changing); a file also selected by a watch pattern, a migration or any other rule runs, since `k` does not contain that trigger. This is what lets a PR's CI inherit work from a laptop or from another PR with the same files.
+
+Publishing: objects always, dirty tree or not (their `k` and `n` describe what actually ran; only results recorded under the current `k` and `n` go in). A branch graph only from a clean working tree — no tracked modification, no untracked file a result could depend on (a test file, a file of the graph's universe, a member of a scope) — because it is adopted as a baseline at its sha; a dirty tree skips it with a one-line notice, and `push --graph` exits 1.
 
 v1 implementations: `FilesystemRemoteCache` (any path: NFS, `rclone mount`, shared volume), `HttpRemoteCache` (GET/PUT/HEAD with an optional Bearer token; works against S3/MinIO with presigned URLs or an nginx with `dav_methods PUT`). Config:
 

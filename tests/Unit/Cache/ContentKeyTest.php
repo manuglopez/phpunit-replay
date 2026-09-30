@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Manuglopez\Replay\Tests\Unit\Cache;
 
 use Manuglopez\Replay\Cache\ContentKey;
+use Manuglopez\Replay\Cache\FileHashes;
 use Manuglopez\Replay\Cache\Graph;
 use Manuglopez\Replay\Tests\Support\TempDir;
 use PHPUnit\Framework\TestCase;
@@ -252,13 +253,33 @@ final class ContentKeyTest extends TestCase
     public function test_an_object_holds_only_the_results_recorded_under_its_own_key_for_its_own_file(): void
     {
         $results = [
-            'FooTest::now' => ['status' => 0, 'message' => '', 'time' => 0.1, 'assertions' => 1, 'file' => 'tests/FooTest.php', 'key' => 'k1'],
-            'FooTest::renamedAway' => ['status' => 0, 'message' => '', 'time' => 0.1, 'assertions' => 1, 'file' => 'tests/FooTest.php', 'key' => 'k0'],
+            'FooTest::now' => ['status' => 0, 'message' => '', 'time' => 0.1, 'assertions' => 1, 'file' => 'tests/FooTest.php', 'key' => 'k1', 'digest' => 'n1:d'],
+            'FooTest::renamedAway' => ['status' => 0, 'message' => '', 'time' => 0.1, 'assertions' => 1, 'file' => 'tests/FooTest.php', 'key' => 'k0', 'digest' => 'n1:d'],
             'FooTest::unstamped' => ['status' => 0, 'message' => '', 'time' => 0.1, 'assertions' => 1, 'file' => 'tests/FooTest.php'],
-            'BarTest::other' => ['status' => 0, 'message' => '', 'time' => 0.1, 'assertions' => 1, 'file' => 'tests/BarTest.php', 'key' => 'k1'],
+            'FooTest::keyOnly' => ['status' => 0, 'message' => '', 'time' => 0.1, 'assertions' => 1, 'file' => 'tests/FooTest.php', 'key' => 'k1'],
+            'FooTest::otherInputs' => ['status' => 0, 'message' => '', 'time' => 0.1, 'assertions' => 1, 'file' => 'tests/FooTest.php', 'key' => 'k1', 'digest' => 'n1:e'],
+            'BarTest::other' => ['status' => 0, 'message' => '', 'time' => 0.1, 'assertions' => 1, 'file' => 'tests/BarTest.php', 'key' => 'k1', 'digest' => 'n1:d'],
         ];
 
-        self::assertSame(['FooTest::now'], array_keys(ContentKey::resultsRecordedAt($results, 'tests/FooTest.php', 'k1')));
-        self::assertSame([], ContentKey::resultsRecordedAt($results, 'tests/FooTest.php', 'k2'));
+        self::assertSame(['FooTest::now'], array_keys(ContentKey::resultsRecordedAt($results, 'tests/FooTest.php', 'k1', 'n1:d')));
+        self::assertSame([], ContentKey::resultsRecordedAt($results, 'tests/FooTest.php', 'k2', 'n1:d'));
+    }
+
+    public function test_a_shared_hash_memo_reads_each_file_once_and_gives_the_same_key(): void
+    {
+        TempDir::write($this->root . '/tests/FooTest.php', "<?php\nclass FooTest {}\n");
+        TempDir::write($this->root . '/app/A.php', "<?php\nclass A {}\n");
+
+        $hashes = new FileHashes($this->root);
+        $memoised = new ContentKey($this->root, $hashes);
+        $plain = new ContentKey($this->root);
+
+        $first = $memoised->compute($this->fingerprint(), 'tests/FooTest.php', ['app/A.php']);
+        self::assertSame($plain->compute($this->fingerprint(), 'tests/FooTest.php', ['app/A.php']), $first);
+
+        // Within one pass a file is read once: the stamp describes one moment of the tree.
+        TempDir::write($this->root . '/app/A.php', "<?php\nclass A { public int \$x = 1; }\n");
+        self::assertSame($first, $memoised->compute($this->fingerprint(), 'tests/FooTest.php', ['app/A.php']));
+        self::assertNotSame($first, $plain->compute($this->fingerprint(), 'tests/FooTest.php', ['app/A.php']));
     }
 }
