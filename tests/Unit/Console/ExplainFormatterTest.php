@@ -53,6 +53,21 @@ final class ExplainFormatterTest extends TestCase
         );
     }
 
+    public function test_a_file_served_from_the_remote_keeps_its_line_and_is_marked(): void
+    {
+        $selection = new Selection();
+        $selection->add('tests/FooTest.php', new Reason('PhpEdge', 'src/Foo.php'));
+        $selection->add('tests/BarTest.php', new Reason('Watch', 'data/x.txt', 'data/**'));
+
+        self::assertSame(
+            [
+                sprintf('%-40s ← %-8s %s', 'tests/BarTest.php', 'Watch', 'data/x.txt (data/**)'),
+                sprintf('%-40s ← %-8s %s', 'tests/FooTest.php', 'PhpEdge', 'src/Foo.php') . ' [served from remote]',
+            ],
+            (new ExplainFormatter())->lines(new RunList($selection, [], []), null, ['tests/FooTest.php']),
+        );
+    }
+
     public function test_an_explicit_file_list_overrides_the_run_list(): void
     {
         $list = new RunList(new Selection(), [], [], []);

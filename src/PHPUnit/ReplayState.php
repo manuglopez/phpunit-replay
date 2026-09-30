@@ -855,7 +855,9 @@ final class ReplayState
      * SPEC.md §9 / docs/INTERNALS.md "Pipeline changes", mirrored from
      * `Console\Runner\RunPipeline::replayFromRemote()`: every test file the run list holds
      * *only* because the rule chain selected it (never unknown/rerun/quarantined/
-     * not-cacheable, which must always execute regardless of the cache) gets its content
+     * not-cacheable, which must always execute regardless of the cache) and only for
+     * reasons the content key covers ({@see \Manuglopez\Replay\Select\Selection::coveredByContentKey()}:
+     * a file a watch pattern or a migration selected executes, whatever the remote holds) gets its content
      * key recomputed from the graph's existing edges and looked up on the remote. A hit
      * merges the file's results into the graph under the current branch and drops the file
      * from the returned list's selection, so `self::decide()`'s normal cached-result path
@@ -878,7 +880,9 @@ final class ReplayState
         $hit = [];
 
         foreach ($runList->selection->testFiles() as $file) {
-            if (isset($skip[$file]) || $graph->isNotCacheable($file)) {
+            // Selected for a reason the content key does not contain (a watched file, a
+            // migration, a sibling...): the object under `k` cannot vouch for that trigger.
+            if (isset($skip[$file]) || $graph->isNotCacheable($file) || ! $runList->selection->coveredByContentKey($file)) {
                 continue;
             }
 

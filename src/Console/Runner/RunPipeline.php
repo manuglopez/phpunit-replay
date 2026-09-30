@@ -1071,7 +1071,8 @@ final class RunPipeline
 
         // SPEC.md §9: an affected test file whose exact content another machine has
         // already run is replayed from the remote instead of executed here.
-        $runList = $this->replayFromRemote($graph, $data['list'], $runList);
+        $selected = $runList;
+        [$runList, $servedFromRemote] = $this->replayFromRemote($graph, $data['list'], $runList);
         $data['runList'] = $runList;
         [$data['replayed'], $data['saved'], $data['replayedRemote']] = $this->replayedAgainst($graph, $this->branch, $runList);
 
@@ -1082,7 +1083,9 @@ final class RunPipeline
                 fwrite(STDOUT, $baselineLine . PHP_EOL);
             }
 
-            foreach ((new ExplainFormatter())->lines($data['list'], $runList) as $line) {
+            // The plan as the rules made it, not the post-remote leftovers: a file served
+            // from the remote is still part of the selection (and says why), marked as such.
+            foreach ((new ExplainFormatter())->lines($data['list'], $selected, $servedFromRemote) as $line) {
                 fwrite(STDOUT, $line . PHP_EOL);
             }
         }
@@ -1335,24 +1338,31 @@ final class RunPipeline
      * from anywhere. An object holding a result that would itself force a re-run is skipped
      * for the same reason.
      *
+     * The object is proof only of what `k` contains — the test file and the files it
+     * executed — so a file is served only when every reason it was selected is one of those
+     * ({@see \Manuglopez\Replay\Select\Selection::coveredByContentKey()}). One selected by a
+     * watch pattern, a migration, a Blade or sibling rule has a trigger outside `k`: `k` did
+     * not move, the object still hits, and it would replay a pass the change may have broken.
+     *
      * @param list<string> $runList
-     * @return list<string> the run list without the files served from the remote
+     * @return array{list<string>, list<string>} the run list without the files served from
+     *   the remote, and those files
      */
     private function replayFromRemote(Graph $graph, RunList $list, array $runList): array
     {
         $objects = $this->objects;
 
         if ($objects === null || $runList === []) {
-            return $runList;
+            return [$runList, []];
         }
 
         $contentKey = new ContentKey($this->root ?? '');
         $skip = array_fill_keys([...$list->unknown, ...$list->rerun, ...$list->quarantined], true);
         $kept = [];
-        $files = 0;
+        $served = [];
 
         foreach ($runList as $file) {
-            if (isset($skip[$file]) || ! $list->selection->has($file) || $graph->isNotCacheable($file)) {
+            if (isset($skip[$file]) || ! $list->selection->coveredByContentKey($file) || $graph->isNotCacheable($file)) {
                 $kept[] = $file;
 
                 continue;
@@ -1374,15 +1384,15 @@ final class RunPipeline
                 $this->remoteTestIds[$testId] = true;
             }
 
-            $files++;
+            $served[] = $file;
             Warnings::debug('remote: replayed ' . $file . ' from objects/*/' . $key . '.json');
         }
 
-        if ($files > 0) {
-            Warnings::debug('remote: ' . $files . ' test file(s) replayed from the remote');
+        if ($served !== []) {
+            Warnings::debug('remote: ' . count($served) . ' test file(s) replayed from the remote');
         }
 
-        return $kept;
+        return [$kept, $served];
     }
 
     /**

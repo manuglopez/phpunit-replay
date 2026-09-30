@@ -21,18 +21,23 @@ final class ExplainFormatter
      * file is shown — it is the one the rule chain resolved first.
      *
      * @param list<string>|null $files defaults to the whole run list
+     * @param list<string> $servedFromRemote files of `$files` that a remote object stands in
+     *   for instead of running them: they stay in the plan with the reason they were selected
+     *   for, marked, rather than disappearing from it
      * @return list<string>
      */
-    public function lines(RunList $runList, ?array $files = null): array
+    public function lines(RunList $runList, ?array $files = null, array $servedFromRemote = []): array
     {
         $files ??= $runList->files();
         sort($files);
+        $served = array_fill_keys($servedFromRemote, true);
 
         $lines = [];
 
         foreach ($files as $file) {
             $reasons = $runList->reasonsFor($file);
-            $lines[] = self::line($file, $reasons[0] ?? null);
+            $line = self::line($file, $reasons[0] ?? null);
+            $lines[] = isset($served[$file]) ? $line . ' [served from remote]' : $line;
         }
 
         return $lines;
