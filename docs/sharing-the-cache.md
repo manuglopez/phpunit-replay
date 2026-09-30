@@ -214,6 +214,11 @@ constantly with real commits.
    `(35 from remote)` means all 35 results came from the shared cache rather than a local
    recording — a brand-new checkout on a machine that has never run the suite still gets a
    near-instant first pass.
+
+   A result is only borrowed for a change the content key can see: a PHP file the test executed, or
+   the test file itself. A test selected because a `watch` pattern matched (a data file, a config
+   file), a migration changed, or by any other rule always runs here, whatever the cache holds —
+   `--explain` marks the files served from the cache with `[served from remote]` and lists the rest.
 7. **Maintenance** runs on a schedule via `.github/workflows/examples/tia-gc.yml`
    (`phpunit-replay prune --remote --keep-months=3 --squash`), monthly by default.
 8. **Rebase / force-push behaviour.** `objects/**` entries are append-only and content-addressed —

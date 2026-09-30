@@ -671,7 +671,7 @@ interface RemoteCache {
 
 Keys: `graph/<project-key>/<branch>.json` (full baseline graph per branch, uploaded after full runs) and `objects/<k>.json` (results of a test file by content key).
 
-Startup flow with no local graph: `get(graph/<key>/<branch>)` → if missing, `get(graph/<key>/<defaultBranch>)` → reconcile fingerprint and sha ancestry → use it. Per-test-file flow in replay: if a test file is affected but `objects/<k_actual>.json` exists in the remote (another machine already ran that exact content) → it's treated as **replayed-remote** and not run. This is what lets a PR's CI inherit work from a laptop or from another PR with the same files.
+Startup flow with no local graph: `get(graph/<key>/<branch>)` → if missing, `get(graph/<key>/<defaultBranch>)` → reconcile fingerprint and sha ancestry → use it. Per-test-file flow in replay: if a test file is affected but `objects/<k_actual>.json` exists in the remote (another machine already ran that exact content) → it's treated as **replayed-remote** and not run — but only when every reason it was selected is one `k` covers (a PHP edge, or the test file itself changing). A file also selected by a watch pattern, a migration or any other rule always runs: `k` does not contain that trigger, so the object cannot vouch for it. This is what lets a PR's CI inherit work from a laptop or from another PR with the same files.
 
 v1 implementations: `FilesystemRemoteCache` (any path: NFS, `rclone mount`, shared volume), `HttpRemoteCache` (GET/PUT/HEAD with an optional Bearer token; works against S3/MinIO with presigned URLs or an nginx with `dav_methods PUT`). Config:
 

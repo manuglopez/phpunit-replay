@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- **Fix: a shared cache replayed a test as passed when the change that selected it was not part of its content key.** A test file is served from a remote object when the object under its content key `k` exists, and `k` is the fingerprint, the test file's own hash and the hashes of the files it executed. A test file selected by a `watch` pattern (the residue fallback included), by the Laravel `Migration`, `Blade` or `Sibling` rules is selected for a trigger that is none of those: a watched data file the test reads was not something it executed, so changing it left `k` untouched, the object still hit, and the run printed `0 executed · N replayed (M from remote)` on a suite plain PHPUnit fails. Without a remote the same change executed and failed correctly, so the hole existed only for teams sharing a cache.
+
+  A test file is now served from the remote only when **every** reason it was selected is one `k` covers — `PhpEdge` and `TestFile` — checked in `Select\Selection::coveredByContentKey()` by both `RunPipeline::replayFromRemote()` and `ReplayState::replayAffectedFromRemote()`. It is a whitelist, so a rule added later executes by default until someone decides `k` covers it. Content keys, fingerprints and the remote layout are untouched: no cache is invalidated, and objects already published keep serving the PHP-edge selections they always could.
+
+  `--explain` / `--dry-run` also stopped hiding this: they listed only what was left to execute after the remote had taken its share, so a file served from the remote vanished from the plan and the rule that selected it looked like it had never fired. They now list the whole selection with each file's reason, and mark the ones a remote object stands in for with `[served from remote]`.
+
 ## [0.10.0] — 2026-09-11
 
 - **New: `phpunit-replay remote:init` — sharing the cache stops being a document you read.** Every remote shape worked and every one of them needed a manual setup a user had to find, read and translate, which is where adoption dies. The command reads the project's `origin`, proposes a **private** cache repository beside it named `<project>-replay-cache` (from origin's repository name, never the working directory's), creates it through `gh` when `gh` is authenticated, publishes a probe object and reads it back **from a separate clone** to prove the round trip works, and writes `phpunit-replay.php`. `--dry-run` prints every action and takes none.

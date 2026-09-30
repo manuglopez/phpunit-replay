@@ -11,6 +11,19 @@ namespace Manuglopez\Replay\Select;
  */
 final class Selection
 {
+    /**
+     * The rules whose trigger a content key `k` already contains (SPEC.md §9,
+     * `Cache\ContentKey`): `k` hashes the test file itself and every file it executed, so a
+     * change to either is exactly what `PhpEdge` and `TestFile` report, and an object stored
+     * under the new `k` is proof about that very change. Any other rule (`Watch`, which also
+     * carries the residue fallback, `Migration`, `Blade`, `Sibling`, whatever is added next)
+     * selects for something `k` does not see: the trigger is not among the file's recorded
+     * dependencies, so `k` is unchanged and an object stored under it says nothing about it.
+     * A whitelist rather than a list of the rules known to be unsafe, so a new rule is safe
+     * by default and has to be added here deliberately.
+     */
+    private const KEY_COVERED_RULES = ['PhpEdge', 'TestFile'];
+
     /** @var array<string, list<Reason>> */
     private array $reasons = [];
 
@@ -31,6 +44,29 @@ final class Selection
         }
 
         $this->reasons[$testFile][] = $reason;
+    }
+
+    /**
+     * Whether a remote object addressed by the content key may stand in for running this
+     * file: it is selected, and EVERY reason it was selected is one `k` covers. One
+     * uncovered reason is enough to make it execute, because the object cannot tell whether
+     * that trigger broke the test.
+     */
+    public function coveredByContentKey(string $testFile): bool
+    {
+        $reasons = $this->reasons[$testFile] ?? [];
+
+        if ($reasons === []) {
+            return false;
+        }
+
+        foreach ($reasons as $reason) {
+            if (! in_array($reason->rule, self::KEY_COVERED_RULES, true)) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     public function has(string $testFile): bool
