@@ -398,6 +398,10 @@ final class RunPipeline
         if ($environmentalDrift !== []) {
             Warnings::warn(sprintf('environment change (%s): cached results cleared', implode(', ', $environmentalDrift)));
             $graph->clearResults();
+            // The results that carried the old environment are gone; stamping the current one
+            // is what stops the warning repeating on every later pass. The known test files
+            // that now hold no result run (Select\RunListBuilder) and record the next ones.
+            $graph->setFingerprint($this->fingerprint);
         }
 
         return true;

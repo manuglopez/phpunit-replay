@@ -186,6 +186,16 @@ final class RunListBuilderResidueTest extends TestCase
         $graph->link($this->root . '/tests/FooTest.php', $this->root . '/src/Foo.php');
         $graph->markKnownTestFiles([$this->root . '/tests/BarTest.php']);
 
+        foreach (['tests/FooTest.php', 'tests/BarTest.php'] as $known) {
+            $graph->setResult('main', $known . '::testRecorded', [
+                'status' => 0,
+                'message' => '',
+                'time' => 0.5,
+                'assertions' => 1,
+                'file' => $known,
+            ]);
+        }
+
         return new RunListBuilder(
             $graph,
             $testPaths ?? new TestPaths(['tests'], [], ['Test.php']),

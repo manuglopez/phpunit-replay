@@ -993,6 +993,9 @@ final class ReplayState
         if ($environmentalDrift !== []) {
             self::warn(sprintf('environment change (%s): cached results cleared', implode(', ', $environmentalDrift)));
             $graph->clearResults();
+            // Same as Console\Runner\RunPipeline::reconcile(): stamp the current environment
+            // so the warning does not repeat once the missing results have been re-recorded.
+            $graph->setFingerprint($fingerprint);
         }
 
         $graph->setDefaultBranch($defaultBranch);

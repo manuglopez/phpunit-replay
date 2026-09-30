@@ -45,6 +45,8 @@ final class RunList
      *   by a `#[NotCacheable]` attribute or a `never_cache` glob — distinct from automatic
      *   quarantine (docs/INTERNALS.md "Hermeticity", SPEC.md §8)
      * @param array<string, Reason> $notCacheableReasons test file => why it is not cacheable
+     * @param list<string> $noResult the subset of {@see self::$unknown} the graph knows but holds no
+     *   result for (only the reason text differs from a brand-new test file)
      */
     public function __construct(
         public readonly Selection $selection,
@@ -55,6 +57,7 @@ final class RunList
         private readonly array $quarantineReasons = [],
         public readonly array $notCacheable = [],
         private readonly array $notCacheableReasons = [],
+        private readonly array $noResult = [],
     ) {
     }
 
@@ -96,7 +99,7 @@ final class RunList
         $reasons = $this->selection->reasons()[$testFileRel] ?? [];
 
         if (in_array($testFileRel, $this->unknown, true)) {
-            $reasons[] = new Reason('Uncached', 'new test file');
+            $reasons[] = new Reason('Uncached', in_array($testFileRel, $this->noResult, true) ? 'no cached result' : 'new test file');
         }
 
         if (in_array($testFileRel, $this->rerun, true)) {
@@ -159,6 +162,7 @@ final class RunList
             $this->quarantineReasons,
             $this->notCacheable,
             $this->notCacheableReasons,
+            $this->noResult,
         );
     }
 
