@@ -54,6 +54,20 @@ final class LaravelLiteFallbacksTest extends TestCase
         self::assertSame(0, ReplayAssert::executedCount($again['stdout']), 'stamped with the new template: ' . ReplayAssert::lastLine($again['stdout']));
     }
 
+    public function test_a_user_pattern_spelled_like_the_views_fallback_adds_to_it_and_never_shadows_it(): void
+    {
+        // The same key in the project's `watch` used to replace the fallback's every-test list.
+        $this->fixture->write('phpunit-replay.php', "<?php\n\nreturn ['watch' => ['resources/views/**' => 'tests/Feature/UserModelTest.php']];\n");
+        $this->fixture->repo->commitAll('views belong to UserModelTest, says the project');
+        $recorded = $this->fixture->replay(['record']);
+        self::assertSame(0, $recorded['exitCode'], $recorded['stdout'] . $recorded['stderr']);
+
+        $this->fixture->write('resources/views/errors/404.blade.php', "<h1>Not here</h1>\n");
+
+        $dryRun = $this->fixture->replay(['run', '--dry-run']);
+        $this->assertEveryTestFileSelectedBy('Watch', 'resources/views/errors/404.blade.php', $dryRun['stdout']);
+    }
+
     public function test_a_non_php_file_under_migrations_runs_every_test(): void
     {
         // A `.sql` file a migration reads: MigrationRule consumes `.php` migrations only.

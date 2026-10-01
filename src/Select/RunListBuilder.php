@@ -49,7 +49,7 @@ final class RunListBuilder
 
     private function residue(): ResiduePatterns
     {
-        return new ResiduePatterns($this->graph, $this->testPaths, $this->staticDeclarationEdges, $this->scope, $this->watch);
+        return new ResiduePatterns($this->graph, $this->testPaths, $this->staticDeclarationEdges, $this->scope);
     }
 
     /**

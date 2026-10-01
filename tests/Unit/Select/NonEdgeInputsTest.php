@@ -152,11 +152,14 @@ final class NonEdgeInputsTest extends TestCase
 
         self::assertNotSame($before, $this->inputs(scope: $scope)->digestFor('tests/BTest.php'));
 
-        // A configured watch pattern naming the file says more precisely who depends on it.
-        $watched = ['app/Providers/**' => ['tests/ATest.php']];
+        // A configured watch pattern naming the file only adds: it stays every test's input,
+        // and the pattern's targets carry it twice over (selection runs every test for it).
+        $watched = ['app/**' => ['tests/ATest.php']];
+        $a = $this->inputs(watch: $watched, scope: $scope)->digestFor('tests/ATest.php');
         $b = $this->inputs(watch: $watched, scope: $scope)->digestFor('tests/BTest.php');
         $this->repo->write('app/Providers/AppServiceProvider.php', "<?php\nfinal class AppServiceProvider { public int \$x = 2; }\n");
-        self::assertSame($b, $this->inputs(watch: $watched, scope: $scope)->digestFor('tests/BTest.php'));
+        self::assertNotSame($a, $this->inputs(watch: $watched, scope: $scope)->digestFor('tests/ATest.php'));
+        self::assertNotSame($b, $this->inputs(watch: $watched, scope: $scope)->digestFor('tests/BTest.php'), 'the pattern never narrows it');
     }
 
     public function test_a_migration_is_an_input_of_the_tests_using_its_tables_only(): void

@@ -62,15 +62,12 @@ final readonly class ResiduePatterns
      *        no edge for
      * @param SourceScope|null $scope with it, the half that holds whatever the flag: a `.php`
      *        file `<source><exclude>` keeps out of coverage ({@see self::isUnattributable()})
-     * @param WatchPatterns|null $watch the configured patterns, which take precedence over the
-     *        second half
      */
     public function __construct(
         private Graph $graph,
         private TestPaths $testPaths,
         private bool $unattributed = true,
         private ?SourceScope $scope = null,
-        private ?WatchPatterns $watch = null,
     ) {
     }
 
@@ -93,7 +90,7 @@ final readonly class ResiduePatterns
     }
 
     /**
-     * {@see self::targets()}, for {@see NonEdgeInputs}' `residue@3` and `unattributable@2` scopes.
+     * {@see self::targets()}, for {@see NonEdgeInputs}' `residue@3` and `unattributable@3` scopes.
      *
      * @return list<string>
      */
@@ -161,12 +158,15 @@ final readonly class ResiduePatterns
     /**
      * The half of the residue that does not depend on `static_declaration_edges` (F5): a
      * `.php` file the project's own `<source><exclude>` keeps out of coverage can never be
-     * attributed to the tests that execute it, whether they do or not. It runs everything,
-     * unless a configured watch pattern already says which tests it belongs to, which is more
-     * precise and was the project's own statement about it. A function of the path and the
-     * configuration only, never of the graph: an edge such a file has anyway (a name another
-     * file mentions) does not say which tests execute it, so the rule applies whatever edges it
-     * has ({@see Rules\WatchRule}), and `NonEdgeInputs`' `unattributable@2` scope, not relative to
+     * attributed to the tests that execute it, whether they do or not. It ALWAYS runs
+     * everything: a configured watch pattern naming it adds its targets to that and never
+     * narrows it (watch patterns only ever add), since a project's `'app/**' => [three tests]`
+     * says those three depend on `app/`, not that nothing else boots its providers. A project
+     * that wants narrower selection for such a file takes it out of `<source><exclude>`, so that
+     * coverage records who executes it. A function of the path and the configuration only,
+     * never of the graph: an edge such a file has anyway (a name another file mentions) does not
+     * say which tests execute it, so the rule applies whatever edges it has
+     * ({@see Rules\WatchRule}), and `NonEdgeInputs`' `unattributable@3` scope, not relative to
      * the universe either, is its claim.
      */
     public function isUnattributable(string $rel): bool
@@ -175,11 +175,7 @@ final readonly class ResiduePatterns
             return false;
         }
 
-        if (! $this->scope->excludedByConfiguration(Paths::join($this->graph->projectRoot(), $rel))) {
-            return false;
-        }
-
-        return $this->watch === null || $this->watch->matches($rel) === [];
+        return $this->scope->excludedByConfiguration(Paths::join($this->graph->projectRoot(), $rel));
     }
 
     /**

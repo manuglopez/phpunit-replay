@@ -88,6 +88,15 @@ final class WatchPatternsTest extends TestCase
         self::assertSame([], $watch->matches('README.md'));
     }
 
+    public function test_a_user_key_equal_to_a_default_unions_its_targets_with_the_default_s(): void
+    {
+        $watch = new WatchPatterns();
+        $watch->useDefaults($this->root, ['tests'], false);
+        $watch->add(['phpunit.xml*' => ['tests/Feature', 'tests']]);
+
+        self::assertSame(['tests', 'tests/Feature'], $watch->patterns()['phpunit.xml*'], 'joined, deduplicated, the default kept');
+    }
+
     public function test_a_numeric_literal_pattern_matches_its_file(): void
     {
         $watch = new WatchPatterns();

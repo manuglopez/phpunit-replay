@@ -1030,8 +1030,8 @@ would still serve, both values are recomputed on the current tree and must be eq
   scopes over the working tree (`git ls-files -co --exclude-standard`, minus git-ignored, minus missing,
   minus the generated `.phpunit-replay.xml` and an in-project state dir). For test file T:
   `watch:<pattern>@3` (every file the configured pattern matches, T under its targets — watch is
-  additive), `unattributable@2` (`.php` files `<source><exclude>` keeps out of coverage that no
-  configured pattern names; additive, whoever has an edge to them), `blade@3` (templates the templates
+  additive), `unattributable@3` (`.php` files `<source><exclude>` keeps out of coverage, whatever watch
+  pattern also names them; additive, whoever has an edge to them), `blade@3` (templates the templates
   T depends on reference, transitively: `BladeReferences::referenceMap()`), `migrations@3` (migrations
   whose tables intersect T's), `migrations:untouched@1` (migrations for tables no test records, when T
   records any), `migrations:unnarrowed@1` (no table to narrow by, or a graph with none),

@@ -90,6 +90,27 @@ final class WatchPatterns
         }
     }
 
+    /**
+     * Pattern maps joined key by key, each key's target lists unioned and deduplicated: never
+     * PHP's `+`, under which the left map's list for a shared key silently replaced the right
+     * one's (a configured `resources/views/**` replacing the fallback's every-test list).
+     *
+     * @param array<string, list<string>> ...$maps
+     * @return array<string, list<string>>
+     */
+    public static function union(array ...$maps): array
+    {
+        $union = [];
+
+        foreach ($maps as $map) {
+            foreach ($map as $pattern => $dirs) {
+                $union[(string) $pattern] = array_values(array_unique([...$union[(string) $pattern] ?? [], ...$dirs]));
+            }
+        }
+
+        return $union;
+    }
+
     /** @return array<string, list<string>> */
     public function patterns(): array
     {

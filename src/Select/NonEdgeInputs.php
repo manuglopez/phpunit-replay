@@ -38,7 +38,7 @@ use Manuglopez\Replay\Support\Paths;
  * | scope | the rule it stands for | members, for test file T | carried by T when |
  * |---|---|---|---|
  * | `watch:<pattern>@3` | `Rules\WatchRule`, configured patterns (additive) | files matching the pattern | T is under one of its targets |
- * | `unattributable@2` | `ResiduePatterns::isUnattributable()` (additive) | `.php` files `<source><exclude>` keeps out of coverage that no configured pattern names | T is under the residue targets |
+ * | `unattributable@3` | `ResiduePatterns::isUnattributable()` (additive) | `.php` files `<source><exclude>` keeps out of coverage, whatever watch pattern also names them | T is under the residue targets |
  * | `blade@3` | `Laravel\Rules\BladeRule` (additive) | templates the templates T depends on reference, transitively | always |
  * | `migrations@3` | `Laravel\Rules\MigrationRule` | migrations whose tables intersect T's | always |
  * | `migrations:untouched@1` | `Laravel\Rules\MigrationRule` | migrations whose tables no test records | T records any table |
@@ -142,7 +142,7 @@ final class NonEdgeInputs
      *        pass runs (their presence is all that is read), as for {@see RunListBuilder}
      * @param WatchPatterns $watch the configured patterns only — never an instance
      *        {@see RunListBuilder::build()} has added the residue of a change set to
-     * @param SourceScope|null $scope the coverage scope, for the `unattributable@2` scope
+     * @param SourceScope|null $scope the coverage scope, for the `unattributable@3` scope
      */
     public function __construct(
         private readonly Graph $graph,
@@ -158,7 +158,7 @@ final class NonEdgeInputs
     ) {
         $this->residueTargets = ResiduePatterns::targetsFor($testPaths);
         $this->stateDirRel = $stateDir !== null ? Paths::relative($projectRoot, $stateDir) : null;
-        $this->residue = new ResiduePatterns($graph, $testPaths, false, $scope, $watch);
+        $this->residue = new ResiduePatterns($graph, $testPaths, false, $scope);
     }
 
     /** The configured watch patterns and Laravel rules of this project, as a pass builds them. */
@@ -396,7 +396,7 @@ final class NonEdgeInputs
             return $recordsTables;
         }
 
-        // residue@3, unattributable@2, migrations:unnarrowed@1: the residue targets.
+        // residue@3, unattributable@3, migrations:unnarrowed@1: the residue targets.
         return $underResidueTargets;
     }
 
@@ -466,7 +466,7 @@ final class NonEdgeInputs
 
             // A file coverage cannot see: additive, whatever else claims it or has an edge to it.
             if ($this->residue->isUnattributable($rel)) {
-                $sets['unattributable@2'][] = $rel;
+                $sets['unattributable@3'][] = $rel;
             }
 
             // Laravel\Rules\MigrationRule runs first and consumes every `.php` migration.

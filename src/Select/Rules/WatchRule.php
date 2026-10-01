@@ -7,6 +7,7 @@ namespace Manuglopez\Replay\Select\Rules;
 use Manuglopez\Replay\Select\Context;
 use Manuglopez\Replay\Select\Reason;
 use Manuglopez\Replay\Select\Rule;
+use Manuglopez\Replay\Select\WatchPatterns;
 
 /**
  * The watch patterns (SPEC.md §7.2.6). Files matching nothing affect nothing (§7.2.7).
@@ -25,6 +26,10 @@ use Manuglopez\Replay\Select\Rule;
  * Laravel rules run. A `.php` file coverage cannot see at all (`<source><exclude>`,
  * `WatchPatterns::addUnattributable()`) is additive like a configured pattern: any edge it has
  * is a name reference, which does not say who executes it.
+ *
+ * **Watch patterns only ever add.** The three are unioned per pattern, target lists joined, so
+ * a configured key spelled exactly like a fallback (`resources/views/**` => one test) or a
+ * pattern naming an unattributable file never narrows what that fallback or that file selects.
  */
 final class WatchRule implements Rule
 {
@@ -39,11 +44,14 @@ final class WatchRule implements Rule
         $remaining = array_fill_keys($context->remaining, true);
 
         foreach ($context->changed as $rel) {
-            $matches = $context->watch->matches($rel) + $context->watch->unattributableMatches($rel);
-
-            if (isset($remaining[$rel])) {
-                $matches += $context->watch->fallbackMatches($rel);
-            }
+            // Unioned per key, never `+`: a user pattern spelled like a fallback default
+            // (`resources/views/**` => one test) must add to the fallback's targets, not
+            // replace them. Watch patterns only ever add.
+            $matches = WatchPatterns::union(
+                $context->watch->matches($rel),
+                $context->watch->unattributableMatches($rel),
+                isset($remaining[$rel]) ? $context->watch->fallbackMatches($rel) : [],
+            );
 
             if ($matches === []) {
                 continue;

@@ -93,6 +93,34 @@ final class StampsAndPublishingTest extends TestCase
         self::assertMatchesRegularExpression('#tests/RateTest\.php\s+← Watch\s+src/Excluded/Rate\.php#u', $dryRun['stdout'], $dryRun['stdout']);
     }
 
+    public function test_a_broad_watch_pattern_naming_an_excluded_file_adds_to_every_test_and_never_narrows_it(): void
+    {
+        // `'src/**' => one test`, meant to ADD that test for anything under src/, used to make
+        // the excluded file "attributed" and select that one test only.
+        $fixture = $this->plain();
+        $fixture->write('phpunit.xml', str_replace(
+            "        </include>\n    </source>",
+            "        </include>\n        <exclude>\n            <directory>src/Excluded</directory>\n        </exclude>\n    </source>",
+            $fixture->read('phpunit.xml'),
+        ));
+        $fixture->write('phpunit-replay.php', "<?php\n\nreturn ['watch' => ['src/**' => 'tests/GreeterTest.php']];\n");
+        $fixture->write('src/Excluded/Rate.php', "<?php\n\ndeclare(strict_types=1);\n\nnamespace App\\Excluded;\n\nfinal class Rate\n{\n    public const VALUE = 21;\n}\n");
+        $fixture->write('tests/RateTest.php', "<?php\n\ndeclare(strict_types=1);\n\nnamespace App\\Tests;\n\nuse App\\Excluded\\Rate;\nuse PHPUnit\\Framework\\TestCase;\n\nfinal class RateTest extends TestCase\n{\n    public function testTheRate(): void\n    {\n        self::assertSame(21, Rate::VALUE);\n    }\n}\n");
+        $fixture->repo->commitAll('a class outside coverage, and a broad watch pattern');
+        self::assertSame(0, $fixture->replay(['record'], self::env())['exitCode']);
+
+        $fixture->write('src/Excluded/Rate.php', str_replace('VALUE = 21', 'VALUE = 22', $fixture->read('src/Excluded/Rate.php')));
+        $fixture->repo->commitAll('the rate changes');
+        self::assertSame(1, $fixture->phpunit()['exitCode'], 'control: PHPUnit itself fails');
+
+        $dryRun = $fixture->replay(['run', '--dry-run'], self::env());
+        $run = $fixture->replay([], self::env());
+        self::assertSame(1, $run['exitCode'], 'false green: ' . $run['stdout'] . $run['stderr']);
+        self::assertSame(0, ReplayAssert::replayedCount($run['stdout']), 'every test runs: ' . ReplayAssert::lastLine($run['stdout']));
+        self::assertMatchesRegularExpression('#tests/RateTest\.php\s+← Watch\s+src/Excluded/Rate\.php#u', $dryRun['stdout'], $dryRun['stdout']);
+        self::assertMatchesRegularExpression('#tests/GreeterTest\.php\s+← Watch\s+src/Excluded/Rate\.php#u', $dryRun['stdout'], $dryRun['stdout']);
+    }
+
     public function test_a_watch_pattern_selects_its_targets_for_a_file_that_has_edges(): void
     {
         // F6: the PHP-edge rule used to consume a file with edges before any watch pattern
