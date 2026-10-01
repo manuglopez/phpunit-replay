@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Manuglopez\Replay\Tests\Integration;
 
+use Manuglopez\Replay\Config;
 use Manuglopez\Replay\Coverage\CoverageFormat;
 use Manuglopez\Replay\Laravel\LaravelIntegration;
 use Manuglopez\Replay\PHPUnit\ConfigurationWriter;
@@ -148,7 +149,7 @@ final class LaravelLiteFixtureTest extends TestCase
         $partial = RunPartial::load($stateDir . '/runs/t1');
         self::assertNotNull($partial);
 
-        $augmented = LaravelIntegration::augment($partial, $root);
+        $augmented = LaravelIntegration::augment($partial, $root, Config::defaults()->with(['migrations' => 'conservative']));
 
         foreach ($partial->usesDatabase as $testFile) {
             self::assertContains('comments', $augmented->tables[$testFile], $testFile . ' should be widened to include every migration table');

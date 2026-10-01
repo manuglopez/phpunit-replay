@@ -68,9 +68,25 @@ final class TableExtractor
     /** @return list<string> Table names referenced by `Schema::` calls, raw SQL, or `DB::table()`. */
     public static function fromMigrationSource(string $php): array
     {
-        $tables = [];
+        return self::migrationTables($php)['tables'];
+    }
 
-        $schemaPattern = '/Schema::\s*(?:create|table|drop|dropIfExists|dropColumn|dropColumns|rename)\s*\(\s*[\'"]([^\'"]+)[\'"](?:\s*,\s*[\'"]([^\'"]+)[\'"])?/';
+    /**
+     * {@see self::fromMigrationSource()}, and whether the source also names a table this
+     * cannot read: `Schema::create($tableNames['roles'], ...)`, `DB::table($table)`, a
+     * `config()` call. Such a migration touches tables nobody can name, so what selects by
+     * its tables must not narrow by the ones it could read (`Rules\MigrationRule`).
+     *
+     * @return array{tables: list<string>, unresolved: bool}
+     */
+    public static function migrationTables(string $php): array
+    {
+        $tables = [];
+        $call = '(?:Schema::\s*|Schema::connection\s*\([^)]*\)\s*->\s*)(?:create|table|drop|dropIfExists|dropColumn|dropColumns|rename)\s*\(\s*';
+        $unresolved = preg_match('/' . $call . '(?![\'"])\S/', $php) === 1
+            || preg_match('/DB::table\s*\(\s*(?![\'"])\S/', $php) === 1;
+
+        $schemaPattern = '/' . $call . '[\'"]([^\'"]+)[\'"](?:\s*,\s*[\'"]([^\'"]+)[\'"])?/';
 
         if (preg_match_all($schemaPattern, $php, $matches) !== false) {
             foreach ($matches[1] as $i => $primary) {
@@ -109,6 +125,8 @@ final class TableExtractor
 
         if (preg_match_all('/DB::table\(\s*[\'"]([^\'"]+)[\'"]\s*\)/', $php, $matches) !== false) {
             foreach ($matches[1] as $name) {
+                // `DB::table('posts as p')`: the table, not the alias.
+                $name = (string) preg_replace('/\s+as\s+\w+\s*$/i', '', trim($name));
                 $lower = strtolower(self::lastDottedSegment($name));
 
                 if ($lower !== '' && ! self::isSchemaMeta($lower)) {
@@ -120,7 +138,7 @@ final class TableExtractor
         $out = array_map(strval(...), array_keys($tables));
         sort($out);
 
-        return $out;
+        return ['tables' => $out, 'unresolved' => $unresolved];
     }
 
     private static function unqualified(string $qualified): string

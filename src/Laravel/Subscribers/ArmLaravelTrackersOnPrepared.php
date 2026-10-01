@@ -16,7 +16,8 @@ use PHPUnit\Event\Test\PreparedSubscriber;
 
 /**
  * Laravel integration entry point (SPEC.md §10). `Test\Prepared` fires after `setUp()`, so
- * the application is already booted by the time this runs. `TableTracker`/`BladeTracker` are
+ * the application is already booted by the time this runs; {@see ArmLaravelTrackersOnPreparationStarted}
+ * arms the same trackers earlier, inside `setUp()`, for a Laravel test case. `TableTracker`/`BladeTracker` are
  * armed once per `Illuminate\Container\Container` instance, guarded by a marker binding
  * (`phpunit-replay.armed`) — re-booting the application between tests (a fresh
  * `RefreshDatabase`-less app, or Laravel's own test isolation) naturally re-arms them. On
@@ -59,7 +60,13 @@ final readonly class ArmLaravelTrackersOnPrepared implements PreparedSubscriber
         }
     }
 
-    private function armTrackers(): void
+    /**
+     * Once per container: also called from inside `setUp()`, by the callback
+     * {@see ArmLaravelTrackersOnPreparationStarted} registers, which is what records the
+     * tables `setUp()` queries; at `Prepared` this is the fallback for an application that
+     * hook never saw.
+     */
+    public function armTrackers(): void
     {
         $containerClass = self::CONTAINER_CLASS;
 

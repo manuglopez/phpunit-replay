@@ -90,4 +90,16 @@ final class MigrationTablesTest extends TestCase
     {
         self::assertFalse(MigrationTables::usesDatabase('Manuglopez\\Replay\\Tests\\Unit\\Laravel\\Fixtures\\NeverDeclared'));
     }
+
+    public function test_uses_database_sees_a_trait_used_through_another_trait(): void
+    {
+        // `LazilyRefreshDatabase` uses `RefreshDatabase`; so does many a project's own trait.
+        self::assertTrue(MigrationTables::usesDatabase(Fixtures\LazilyRefreshDatabaseTestCase::class));
+        self::assertTrue(MigrationTables::usesDatabase(Fixtures\ProjectTraitTestCase::class));
+    }
+
+    public function test_uses_database_is_true_for_database_truncation(): void
+    {
+        self::assertTrue(MigrationTables::usesDatabase(Fixtures\DatabaseTruncationTestCase::class));
+    }
 }

@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace Manuglopez\Replay\Select;
 
+use Manuglopez\Replay\Config;
+use Manuglopez\Replay\Laravel\LaravelDetector;
+use Manuglopez\Replay\Laravel\MigrationPaths;
 use Manuglopez\Replay\Support\Glob;
 
 /**
@@ -44,11 +47,11 @@ final class WatchPatterns
      *        they attribute Blade templates and migrations themselves, so the defaults for
      *        those two directories are left out ({@see WatchDefaults\Laravel})
      */
-    public function useDefaults(string $projectRoot, array $testDirectories, bool $laravelRules = false): void
+    public function useDefaults(string $projectRoot, array $testDirectories, bool $laravelRules = false, ?MigrationPaths $migrationPaths = null): void
     {
         $defaults = [
             new WatchDefaults\Php(),
-            new WatchDefaults\Laravel($laravelRules),
+            new WatchDefaults\Laravel($laravelRules, ($migrationPaths ?? MigrationPaths::default())->fallbackPatterns()),
             new WatchDefaults\Symfony(),
         ];
 
@@ -63,6 +66,25 @@ final class WatchPatterns
                 $this->addFallback($default->fallbacks($testDirectories));
             }
         }
+    }
+
+    /**
+     * The defaults and the configured `watch` patterns of a project, as every pass builds
+     * them: with the Laravel rules on, the fallback of each of its migration paths.
+     *
+     * @param list<string> $testDirectories
+     */
+    public static function forProject(string $projectRoot, array $testDirectories, Config $config): self
+    {
+        $laravel = LaravelDetector::enabled($projectRoot, $config);
+        $watch = new self();
+        $watch->useDefaults($projectRoot, $testDirectories, $laravel, $laravel ? MigrationPaths::for($projectRoot, $config) : null);
+
+        if ($config->watch !== []) {
+            $watch->add($config->watch);
+        }
+
+        return $watch;
     }
 
     /** @param array<string, string|list<string>> $patterns pattern → dir or list of dirs */

@@ -158,6 +158,11 @@ final class GraphUpdater
                 $this->graph->replaceTestTables($partial->tables);
             }
 
+            // Whether a file uses a database is a fact about its class, which this run saw for
+            // every file it executed (Laravel\Subscribers\ArmLaravelTrackersOnPrepared). A file
+            // it only replayed never got that far, and keeps what the graph already says.
+            $this->graph->replaceUsesDatabase(self::withoutReplayed($executed, $replayed), $partial->usesDatabase);
+
             foreach ($edgesToRecord as $sources) {
                 $edgesCount += count($sources);
             }
@@ -546,6 +551,30 @@ final class GraphUpdater
         }
 
         return $out;
+    }
+
+    /**
+     * @param list<string> $executed
+     * @param array<string, TestResultArray> $replayed
+     * @return list<string>
+     */
+    private static function withoutReplayed(array $executed, array $replayed): array
+    {
+        if ($replayed === []) {
+            return $executed;
+        }
+
+        $replayedFiles = [];
+
+        foreach ($replayed as $result) {
+            $file = $result['file'] ?? null;
+
+            if (is_string($file) && $file !== '') {
+                $replayedFiles[$file] = true;
+            }
+        }
+
+        return array_values(array_filter($executed, static fn (string $file): bool => ! isset($replayedFiles[$file])));
     }
 
     /** @return list<string> */

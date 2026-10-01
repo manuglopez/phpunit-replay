@@ -43,6 +43,14 @@ final class Graph
     /** @var list<string> */
     private array $notCacheable = [];
 
+    /**
+     * Test files whose class uses a database-refreshing trait (Laravel, SPEC.md §10), as the
+     * last run that executed each one saw it. Encoded as `uses_database` only when non-empty.
+     *
+     * @var list<string>
+     */
+    private array $usesDatabase = [];
+
     /** @var array<string, mixed> */
     private array $fingerprint = [];
 
@@ -309,6 +317,64 @@ final class Graph
     public function testTables(): array
     {
         return $this->testTables;
+    }
+
+    /**
+     * For each file of `$executed`, whether it uses a database is what this run says
+     * (`$usesDatabase`); a file the run did not execute keeps what an earlier run said.
+     *
+     * @param list<string> $executed test files the run executed
+     * @param list<string> $usesDatabase the ones among them that use a database
+     */
+    public function replaceUsesDatabase(array $executed, array $usesDatabase): void
+    {
+        $set = array_fill_keys($this->usesDatabase, true);
+
+        foreach ($executed as $testFile) {
+            $rel = $this->relative($testFile);
+
+            if ($rel !== null) {
+                unset($set[$rel]);
+            }
+        }
+
+        foreach ($usesDatabase as $testFile) {
+            $rel = $this->relative($testFile);
+
+            if ($rel !== null) {
+                $set[$rel] = true;
+            }
+        }
+
+        $files = array_map(strval(...), array_keys($set));
+        sort($files);
+        $this->usesDatabase = $files;
+    }
+
+    /** @return list<string> */
+    public function usesDatabase(): array
+    {
+        return $this->usesDatabase;
+    }
+
+    /**
+     * Every test file known to use a database: the `uses_database` set and every file that
+     * recorded a table (a graph from before 0.13 has only the second).
+     *
+     * @return list<string>
+     */
+    public function databaseTestFiles(): array
+    {
+        $files = array_fill_keys($this->usesDatabase, true);
+
+        foreach (array_keys($this->testTables) as $testFile) {
+            $files[(string) $testFile] = true;
+        }
+
+        $list = array_map(strval(...), array_keys($files));
+        sort($list);
+
+        return $list;
     }
 
     /** @param list<string> $testFiles */
@@ -729,6 +795,7 @@ final class Graph
         $known = array_unique(array_merge(
             array_keys($this->edges),
             array_keys($this->testTables),
+            $this->usesDatabase,
         ));
 
         $edgesChanged = false;
@@ -744,6 +811,7 @@ final class Graph
             }
 
             unset($this->testTables[$testRel]);
+            $this->usesDatabase = array_values(array_diff($this->usesDatabase, [$testRel]));
 
             $this->notCacheable = array_values(array_diff($this->notCacheable, [$testRel]));
         }
@@ -972,6 +1040,8 @@ final class Graph
         $graph->edges = self::decodeEdges($data['edges'] ?? null);
         $graph->testTables = self::decodeStringMap($data['test_tables'] ?? null);
         $graph->notCacheable = self::decodeStringList($data['not_cacheable'] ?? null);
+        $graph->usesDatabase = self::decodeStringList($data['uses_database'] ?? null);
+        sort($graph->usesDatabase);
         $graph->baselines = self::decodeBaselines($data['baselines'] ?? null);
         $graph->configuration = is_string($data['configuration'] ?? null) && $data['configuration'] !== '' ? $data['configuration'] : null;
 
@@ -1316,6 +1386,10 @@ final class Graph
 
         if ($this->configuration !== null) {
             $payload['configuration'] = $this->configuration;
+        }
+
+        if ($this->usesDatabase !== []) {
+            $payload['uses_database'] = $this->usesDatabase;
         }
 
         return Json::encode($payload);

@@ -32,8 +32,15 @@ final class Laravel implements WatchDefault
      * are {@see self::fallbacks()}: they fire only for a changed file no rule claimed, and run
      * every test for it. With the rules off (`laravel => 'off'`) they are ordinary defaults.
      */
-    public function __construct(private readonly bool $rulesAttribute = false)
-    {
+    /**
+     * @param list<string> $migrationPatterns the fallback for each migration path
+     *        (`Laravel\MigrationPaths::fallbackPatterns()`), `database/migrations/**` and any
+     *        other: a non-`.php` file under any of them is what `MigrationRule` cannot claim
+     */
+    public function __construct(
+        private readonly bool $rulesAttribute = false,
+        private readonly array $migrationPatterns = ['database/migrations/**'],
+    ) {
     }
 
     public function applicable(string $projectRoot): bool
@@ -71,6 +78,10 @@ final class Laravel implements WatchDefault
      */
     public function fallbacks(array $testDirectories): array
     {
-        return $this->rulesAttribute ? array_fill_keys(self::ATTRIBUTED, $testDirectories) : [];
+        if (! $this->rulesAttribute) {
+            return [];
+        }
+
+        return array_fill_keys(array_values(array_unique([...self::ATTRIBUTED, ...$this->migrationPatterns])), $testDirectories);
     }
 }

@@ -10,7 +10,6 @@ use Manuglopez\Replay\Change\Git;
 use Manuglopez\Replay\Config;
 use Manuglopez\Replay\Console\ExplainFormatter;
 use Manuglopez\Replay\Console\Runner\ProjectLocator;
-use Manuglopez\Replay\Laravel\LaravelDetector;
 use Manuglopez\Replay\Laravel\LaravelIntegration;
 use Manuglopez\Replay\Record\SourceScope;
 use Manuglopez\Replay\Select\ResiduePatterns;
@@ -67,12 +66,7 @@ final class ExplainCommand extends Command
             : new TestPaths(['tests'], [], ['Test.php']);
         $scope = $configuration !== null ? SourceScope::fromProjectRoot($root, $configuration) : null;
 
-        $watch = new WatchPatterns();
-        $watch->useDefaults($root, $testPaths->directories(), LaravelDetector::enabled($root, $config));
-
-        if ($config->watch !== []) {
-            $watch->add($config->watch);
-        }
+        $watch = WatchPatterns::forProject($root, $testPaths->directories(), $config);
 
         /** @var string $path */
         $path = $input->getArgument('path');
@@ -86,12 +80,21 @@ final class ExplainCommand extends Command
         $watch->addUnattributable($residue->unattributableFor([$rel]));
 
         $extraRules = LaravelIntegration::rulesFor($graph, $root, $config, $stateDir);
-        $selection = Selector::default($graph, $testPaths, $watch, $root, $extraRules)->affected([$rel]);
+        // A rule that compares a file before and after (a schema dump) compares it with what
+        // a pass would diff it from: the branch's baseline, else HEAD.
+        $branch = $git->currentBranch();
+        $base = ($branch !== null ? $graph->recordedSha($branch) : null) ?? $git->currentSha();
+        $selection = Selector::default($graph, $testPaths, $watch, $root, $extraRules)->affected([$rel], $base);
         $runList = new RunList($selection, [], [], []);
 
         $lines = (new ExplainFormatter())->lines($runList);
 
         foreach ($lines as $line) {
+            $output->writeln($line);
+        }
+
+        // Why a change selects nothing, when a rule knows (a squashed migration).
+        foreach ((new ExplainFormatter())->noteLines($selection) as $line) {
             $output->writeln($line);
         }
 

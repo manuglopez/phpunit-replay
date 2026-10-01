@@ -2,6 +2,59 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+
+- **Migrations now select by whether the test database runs them, and each test file keeps the tables it actually queried.** Until 0.12, every test file whose class used `RefreshDatabase`, `DatabaseMigrations` or `DatabaseTransactions` was recorded as touching every table any migration names (`LaravelIntegration::augment()`, inherited from Pest). Every database test file therefore held the same set of tables: 159 on one real project and 111 on another. The `Migration` rule selected by table over that set, so in practice it selected every database test file for every migration, whatever the migration touched. On a project with a schema dump it also selected for migrations that never run in tests: Laravel loads the dump and then runs only the migrations its `migrations` rows do not list, and on one real project 122 of its 124 migrations were already in the dump. With the new default, `migrations => 'precise'`:
+  - **A squashed migration** is one listed in the `migrations` rows of the schema dump the test connection loads. It selects nothing, because no test database runs it, and `explain` / `--dry-run` say so: `database/migrations/…_create_posts_table.php ← Migration squashed into database/schema/sqlite-schema.sql, not run by tests: selects nothing`. The test connection is read from the PHPUnit configuration's `DB_CONNECTION`, then `.env.testing`, `.env` and the default in `config/database.php`. Laravel loads `database/schema/{connection}-schema.dump`, else `.sql`. If the rows cannot be read, or the connection is unknown, nothing counts as squashed.
+  - **Any other migration is pending.** It selects every test file that uses a database, whichever tables it names: every fresh test database runs it, and a migration that throws breaks all of them. That set now includes database test files that recorded no table at all.
+  - **`test_tables` holds only what each test file queried.** Which files use a database is stored apart, as `uses_database` in the graph. The new field is additive: older readers ignore it, and a graph without it still counts every file that recorded a table.
+
+  Measured on the `laravel-lite` fixture with a SQLite schema dump that lists all three of its migrations, plus one test file that builds its own table in `setUp()` (5 test files, 4 of them database tests), with `run --dry-run`:
+
+  | change | 0.12.2 | 0.13.0 |
+  |---|---|---|
+  | edit the squashed `create_posts_table` migration | 3 (by table, over the union) | 0 (`squashed into …`) |
+  | add a pending migration that names no table | 5 (every test) | 4 (every database test) |
+  | add a pending migration that alters `posts` | 3 (the union's holders; the `setUp()` table test was missed) | 4 (every database test) |
+  | change the `ledgers` block of the dump | 0 | 1 (`LedgerTest`) |
+  | change the `posts` block of the dump | 0 | 2 (`PostJsonTest`, `PostsIndexTest`) |
+
+  A pending migration that names a table now selects every database test, which can be more than 0.12 selected: it runs in every fresh test database whichever table it names.
+
+  **`migrations => 'conservative'`** restores the 0.12 behaviour: the union of every migration table at recording time, and selection by table intersection. Use it when a test reaches the database in a way the table tracker cannot see. In that mode, a migration that names a table the extractor cannot read (`Schema::create($tableNames['roles'], …)`, `DB::table($table)`) now selects every database test file instead of narrowing by the tables it could read.
+
+  **One-time cost: the first run after upgrading re-executes every cached test file once**, on each branch the first time that branch runs. The non-edge input digest's version token moves from `n3` to `n4` (new `schema:`, `migrations:pending`, `migrations:unknown` and `sibling-tree:` scopes), so no result stamped by an earlier version matches. The same run replaces each executed file's inflated `test_tables` with what it queried. A database test file that queries no table in that run keeps its old set, which only ever selects more.
+
+  **Known limit (review point):** a query whose result an earlier test cached in a static (a memoized setting, a `once()` value) runs only in the first test of the process that needs it, so only that test file records the table. Later test files that read the cached value do not. Recordings converge over runs as the first loader varies, but a single run can miss a reader. Queries made through raw PDO, or by a seeder `RefreshDatabase` runs before the application hook fires, are not recorded either. `conservative` avoids all three at the 0.12 price.
+
+### Added
+
+- **A change to the schema dump selects the tests that use the tables it changed.** `php artisan schema:dump` writes `database/schema/{connection}-schema.sql` (`.dump` for a `pg_dump` archive). `RefreshDatabase` builds every test database from it before running any migration, coverage never credits it to a test, and it is not a migration, so until 0.12 no rule claimed it: editing or regenerating it ran nothing and replayed every result. The new `SchemaDump` rule compares the dump at the change set's base (`git show <base>:<path>`) with the working tree's, table by table:
+  - a table whose block was added, removed or changed selects the test files that recorded it, plus every database test file that recorded no table: `tests/Feature/PostJsonTest.php ← SchemaDump database/schema/sqlite-schema.sql (posts)`;
+  - a changed table no test records, or a changed statement no table owns (a function, a type), selects every database test file;
+  - a change to the `migrations` rows alone selects nothing beyond what the migration files changed with it select;
+  - a dump that does not parse, including a binary `pg_dump -Fc` archive, a dump with no version at the base, or a change set with no base, selects every database test file. While the graph records no table, it selects every test.
+
+  A block is every statement about the table. The parser covers the dialects as Laravel writes them: MySQL and MariaDB (backquoted `CREATE TABLE`, `/*!NNNNN …*/` executable comments, `DELIMITER` trigger and routine blocks, backslash escapes); PostgreSQL (`CREATE TABLE public.t`, and `ALTER TABLE ONLY public.t ADD CONSTRAINT …`, `CREATE INDEX … ON public.t`, triggers, owned sequences, all attributed to `t`, with `$$` quoting, psql `\restrict` lines and `COPY … FROM stdin` rows); SQLite (`CREATE TABLE IF NOT EXISTS "t"`, `CREATE INDEX … on "t"`, `BEGIN … END` triggers). Comments and whitespace outside quotes do not count, so re-dumping an unchanged schema changes nothing. The digest mirrors the rule per test file: `schema:<dump>@1` holds the dump's global statements, the blocks of the tables that file records, and the blocks of the tables no test records (every block for a database test file with no recorded table). A dump that does not parse is hashed whole. A test file's stamp therefore moves only when a table it depends on changes. On `laravel-lite`, changing the `ledgers` block selects `LedgerTest` only, and changing `posts` selects the two test files that query `posts`, not `UserModelTest`; the digests of exactly those files move.
+- **Migrations in every directory the application loads them from.** The `Migration` rule claimed only `database/migrations/**/*.php`; a migration in `database/tenant`, a module, or any path a provider passes to `loadMigrationsFrom()` was attributed by coverage to whichever test first ran it, or to nothing. The rule now covers, besides `database/migrations`:
+  - the new **`migration_paths`** config key (default `['database/migrations']`);
+  - every **literal** `loadMigrationsFrom()` argument in `app/Providers/**` and `bootstrap/**` (not `bootstrap/cache`): a string, an array of strings, `database_path('…')`, `base_path('…')`, or `__DIR__` / `dirname(__DIR__, n)` concatenated with strings, read with php-parser. An argument built any other way (a variable, a method call, `config()`) is ignored, never guessed: list that directory in `migration_paths`;
+  - `database/migrations/tenant` when `stancl/tenancy` is in `composer.lock` (its documented default). `spatie/laravel-multitenancy` documents no default path of its own, so nothing is added for it.
+
+  Each path also gets the fallback `database/migrations/**` has: a non-`.php` file under it runs every test.
+- **A new file in a new subdirectory of a sibling directory selects the tests next to it.** A new `app/Console/Commands/Reports/SendReport.php`, with no tested file under `Reports/` yet, selected nothing: the `Sibling` rule looked only at the file's own directory. It now walks up to the nearest ancestor directory, up to and including the sibling root (`app/Console/Commands`), under which some test has an edge, and selects the tests with an edge anywhere under it: `tests/Feature/PruneUsersTest.php ← Sibling app/Console/Commands/Reports/SendReport.php (app/Console/Commands/**)`. The walk stops at the first ancestor with edges, and a file with none up to the root is still left to the other rules. Mirrored in the digest as `sibling-tree:<dir>@1`.
+
+### Fixed
+
+- **Fix: the tables a test touched in `setUp()` were never recorded.** The table tracker was armed at `Test\Prepared`, which fires after `setUp()` returns, so the queries of a `setUp()` and its factories were invisible. That is why the 0.12 union of every migration table was load-bearing. The trackers are now armed inside `setUp()`, through Laravel's `afterApplicationCreated()` hook, right after the application and the testing traits are set up. A Laravel test case is found on the call stack at `Test\PreparationStarted`, because PHPUnit dispatches events synchronously. `Prepared` still arms any application the hook never saw. On `laravel-lite`, a test that creates and fills its own table in `setUp()` recorded no table and now records it.
+- **Fix: the in-process extension recorded no table and no template edge.** With the extension registered in `phpunit.xml` and no wrapper, the Laravel trackers were never registered, so `test_tables` stayed empty, and a test rendering a Blade template got no edge to it: a template change could only reach it through the `resources/views/**` fallback, which runs every test. The in-process extension now registers the same trackers and the same uses-database collector as the wrapper's PHPUnit child, and both write the same `test_tables` and `uses_database` for the same suite, checked on `laravel-lite`.
+- **Fix: a database test was not recognised through a trait of a trait.** Only traits used directly by the class or an ancestor counted, so `LazilyRefreshDatabase` (which uses `RefreshDatabase`) and a project's own testing trait were missed, and `DatabaseTruncation` was not in the list. All four Laravel traits now count wherever they sit in the trait tree.
+- **Fix: `DB::table('posts as p')` in a migration was read as a table named `posts as p`.** The alias is dropped.
+
+Content keys, fingerprint composition and the remote layout are unchanged. The graph file gains an optional top-level `uses_database`, written only when non-empty, which older readers ignore.
+
 ## [0.12.4] — 2026-10-02
 
 ### Fixed

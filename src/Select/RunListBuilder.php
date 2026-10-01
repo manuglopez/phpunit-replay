@@ -27,7 +27,7 @@ final class RunListBuilder
     private ?array $candidates = null;
 
     /**
-     * @param array{migration?: Rule, sibling?: Rule, blade?: Rule} $extraRules Laravel-only rules, docs/INTERNALS.md "Laravel"
+     * @param array{migration?: Rule, schema?: Rule, sibling?: Rule, blade?: Rule} $extraRules Laravel-only rules, docs/INTERNALS.md "Laravel"
      * @param bool $staticDeclarationEdges the `static_declaration_edges` opt-in (SPEC.md §4.3.1);
      *        turns on the unattributed half of the {@see ResiduePatterns} fallback, and nothing
      *        else here
@@ -57,8 +57,9 @@ final class RunListBuilder
      * @param array<string, array{reason: Reason, ids: list<string>}> $stale what
      *        {@see LayerAudit::apply()} stopped serving: a file one of whose audited test
      *        ids has no result left anywhere in the merged view executes, as `StaleLayer`
+     * @param string|null $base the sha `$changed` was diffed from ({@see Selector::affected()})
      */
-    public function build(array $changed, string $branch, array $stale = []): RunList
+    public function build(array $changed, string $branch, array $stale = [], ?string $base = null): RunList
     {
         // SPEC.md §4.3.1: whatever nothing could attribute is covered conservatively rather
         // than dropped — with the flag, any `.php` file without an edge; always, a `.php`
@@ -70,7 +71,7 @@ final class RunListBuilder
         $this->watch->addUnattributable($residue->unattributableFor($changed));
 
         $selection = Selector::default($this->graph, $this->testPaths, $this->watch, $this->projectRoot, $this->extraRules)
-            ->affected($changed);
+            ->affected($changed, $base);
 
         $results = $this->graph->results($branch);
         [$staleFiles, $staleReasons] = $this->staleBucket($stale, $results);
@@ -176,8 +177,9 @@ final class RunListBuilder
      * copy of the watch patterns, so it cannot leak into the pass's own {@see self::build()}.
      *
      * @param list<string> $changed project-relative changed files
+     * @param string|null $base the sha `$changed` was diffed from
      */
-    public function select(array $changed): Selection
+    public function select(array $changed, ?string $base = null): Selection
     {
         $watch = clone $this->watch;
         $residue = $this->residue();
@@ -185,7 +187,7 @@ final class RunListBuilder
         $watch->addUnattributable($residue->unattributableFor($changed));
 
         return Selector::default($this->graph, $this->testPaths, $watch, $this->projectRoot, $this->extraRules)
-            ->affected($changed);
+            ->affected($changed, $base);
     }
 
     /**

@@ -6,6 +6,7 @@ namespace Manuglopez\Replay\Console;
 
 use Manuglopez\Replay\Select\Reason;
 use Manuglopez\Replay\Select\RunList;
+use Manuglopez\Replay\Select\Selection;
 
 /**
  * The `--explain` / `explain <path>` rendering (SPEC.md §11): one line per test file,
@@ -38,6 +39,23 @@ final class ExplainFormatter
             $reasons = $runList->reasonsFor($file);
             $line = self::line($file, $reasons[0] ?? null);
             $lines[] = isset($served[$file]) ? $line . ' [served from remote]' : $line;
+        }
+
+        return $lines;
+    }
+
+    /**
+     * One line per changed file a rule claimed and selected nothing for, with why (a
+     * migration squashed into the schema dump): `<path> ← <rule> <why>: selects nothing`.
+     *
+     * @return list<string>
+     */
+    public function noteLines(Selection $selection): array
+    {
+        $lines = [];
+
+        foreach ($selection->notes() as $note) {
+            $lines[] = sprintf('%-40s ← %-8s %s: selects nothing', $note->trigger, $note->rule, $note->detail);
         }
 
         return $lines;

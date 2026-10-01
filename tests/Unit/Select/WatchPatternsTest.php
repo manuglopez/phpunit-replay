@@ -88,6 +88,20 @@ final class WatchPatternsTest extends TestCase
         self::assertSame([], $watch->matches('README.md'));
     }
 
+    public function test_every_migration_path_gets_the_fallback_database_migrations_has(): void
+    {
+        // A `.sql` file a migration in `database/tenant` reads is as unattributable as one
+        // under `database/migrations`.
+        TempDir::write($this->root . '/artisan', "#!/usr/bin/env php\n");
+        TempDir::write($this->root . '/phpunit-replay.php', "<?php\nreturn ['migration_paths' => ['database/tenant']];\n");
+
+        $watch = WatchPatterns::forProject($this->root, ['tests'], \Manuglopez\Replay\Config::load($this->root));
+
+        self::assertSame(['database/tenant/**' => ['tests']], $watch->fallbackMatches('database/tenant/seed.sql'));
+        self::assertSame(['database/migrations/**' => ['tests']], $watch->fallbackMatches('database/migrations/seed.sql'));
+        self::assertSame([], $watch->matches('database/tenant/seed.sql'), 'a fallback, not a pattern for every changed file');
+    }
+
     public function test_a_user_key_equal_to_a_default_unions_its_targets_with_the_default_s(): void
     {
         $watch = new WatchPatterns();

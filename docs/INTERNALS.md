@@ -441,6 +441,8 @@ final readonly class Config                  // SPEC §9 keys
     public int $quarantineReleaseAfter; public string $laravel; public bool $junitMerge;
     public string $mode; public bool $hermeticityHeuristics;
     public bool $staticDeclarationEdges;                              // SPEC §4.3.1, default false; env PHPUNIT_REPLAY_STATIC_DECLARATION_EDGES=1|0
+    /** @var list<string> */ public array $migrationPaths;            // migration_paths, default ['database/migrations'] (Laravel\MigrationPaths adds the framework's and the detected ones)
+    public string $migrations;                                        // migrations: 'precise' (default) | 'conservative'
     public static function defaults(): self;
     public static function load(string $projectRoot): self;           // phpunit-replay.php if present (returns array), else defaults; then env overrides
     public static function fromArray(array $values): self;
@@ -769,18 +771,23 @@ bugs it fixed instead of merely pinning (`--silent`; `-p=N`, above).
 
 ```php
 final class Laravel\LaravelDetector { public static function enabled(string $projectRoot, Config $config): bool; }  // config.laravel: 'on' | 'off' | 'auto' → class_exists(\Illuminate\Container\Container::class) && is_file(root/artisan)
-final class Laravel\TableExtractor  // port of Pest TableExtractor: fromSql(string $sql): list<string>, fromMigrationSource(string $php): list<string>
+final class Laravel\TableExtractor  // port of Pest TableExtractor: fromSql(string $sql): list<string>, fromMigrationSource(string $php): list<string>, migrationTables(string $php): array{tables, unresolved} (unresolved: a Schema::/DB::table() call whose table is not a literal; `DB::table('t as x')` is `t`)
 final class Laravel\TableTracker    // arm(object $app, Recorder $recorder): void — $app['db']->listen(fn (QueryExecuted $q) => foreach TableExtractor::fromSql($q->sql) as $t → $recorder->linkTable($t))
 final class Laravel\BladeTracker    // arm(object $app, Recorder $recorder, string $projectRoot): void — $app['view']->composer('*', fn ($view) => ...) links $view->getPath() UNLESS it is inside config('view.compiled') (read fresh per render, never cached at arm() time) or, as a fallback, SourceScope::isNestedNoisePath($projectRoot, $path) — see "No edges to files git ignores" below
-final class Laravel\MigrationTables // tablesOf(string $projectRoot): list<string> (all tables of database/migrations/**/*.php via TableExtractor::fromMigrationSource); usesDatabase(string $className): bool (RefreshDatabase|DatabaseMigrations|DatabaseTransactions traits, recursively)
+final class Laravel\MigrationTables // tablesOf(string $projectRoot): list<string> (all tables of database/migrations/**/*.php via TableExtractor::fromMigrationSource; `conservative` augment only); usesDatabase(string $className): bool (RefreshDatabase|DatabaseMigrations|DatabaseTransactions|DatabaseTruncation, on the class, its ancestors, and the traits they use, recursively)
+final readonly class Laravel\MigrationPaths // for(root, Config): database/migrations ∪ migration_paths ∪ detected(root) (literal loadMigrationsFrom() args in app/Providers/**, bootstrap/** minus bootstrap/cache, via php-parser; stancl/tenancy in composer.lock → database/migrations/tenant); isMigration(rel), covers(rel), fallbackPatterns() (`<dir>/**` per outermost path)
+final readonly class Laravel\SchemaDump  // parse(sql): ?self — per-table blocks (MySQL/MariaDB, PostgreSQL, SQLite as Laravel's schema:dump writes them), global(): statements no table owns, migrations(): ?list<string> (the `migrations` rows); changedTables(old, new), globalChanged(old, new), none() (a deleted dump), isDumpPath(rel): database/schema/<connection>-schema.sql|.dump
+final class Laravel\TestSchemaDump       // connection(root, ?phpunitConfiguration): DB_CONNECTION from the PHPUnit configuration, .env.testing, .env, config/database.php's default; path(): database/schema/<connection>-schema.dump, else .sql; squashed(): ?array<name, true> (null: nothing is squashed)
 final class Laravel\BladeReferences // referenceMap(root, ?cacheFile): template => templates it references (static @include/@includeFirst/@extends/@component/view('x')/<x-name>; resolved once per process, persisted by template content), ancestorsOf(rel, root, ?cacheFile), ancestorsOfEach(rels, root, ?cacheFile) (one resolution for many) and descendantsOf(map, roots) over it (port of Pest Graph::bladeAncestorsFor and helpers)
-final readonly class Laravel\Subscribers\ArmLaravelTrackersOnPrepared implements PreparedSubscriber  // once per Container instance: binding marker 'phpunit-replay.armed'
-final class Laravel\Rules\MigrationRule  // database/migrations/**/*.php changed → TableExtractor::fromMigrationSource → tests whose graph->testTables() intersect (Reason 'Migration', detail table names); tables no test records → every test with any table; no table to narrow by (unparseable, deleted, a graph with no tables) → every test. Consumes every .php migration; any other file under database/migrations/ is left for the database/migrations/** fallback
-final class Laravel\Rules\SiblingRule    // new/unknown .php under app/Providers|Listeners|Events|Observers|Policies|Console/Commands, database/factories|seeders → tests with edges to files in the same directory (Reason 'Sibling')
+final readonly class Laravel\Subscribers\ArmLaravelTrackersOnPrepared implements PreparedSubscriber  // once per Container instance: binding marker 'phpunit-replay.armed'; armTrackers() public, for the subscriber below; collects uses_database
+final readonly class Laravel\Subscribers\ArmLaravelTrackersOnPreparationStarted implements PreparationStartedSubscriber  // registers afterApplicationCreated(fn => armTrackers()) on the running Laravel TestCase (found with debug_backtrace: events are dispatched synchronously from TestCase::runBare()), so setUp() queries are recorded
+final class Laravel\Rules\MigrationRule  // new MigrationRule(MigrationPaths, 'precise'|'conservative'): a .php under a migration path changed. Graph with no tables → every test. precise: squashed (TestSchemaDump::squashed lists its basename) → nothing, Selection::note('squashed into <dump>, not run by tests'); pending → Graph::databaseTestFiles() ('pending migration: every database test'). conservative: unresolved table → every database test; no table → every test; tables no test records → every test with any table; else tests whose tables intersect. Consumes every .php migration; other files under a migration path are left for its fallback
+final class Laravel\Rules\SchemaDumpRule // a changed database/schema/<conn>-schema.sql|.dump: SchemaDump of Context::$base (git show) vs the working tree → changed tables' recorders + database tests with no recorded table (Reason 'SchemaDump', detail tables); unrecorded table or global statement changed → every database test; rows only → nothing (note); unparseable / no base / no old version → every database test; graph with no tables → every test. Always consumes
+final class Laravel\Rules\SiblingRule    // new/unknown .php under app/Providers|Listeners|Events|Observers|Policies|Console/Commands, database/factories|seeders → tests with edges to files in the same directory (Reason 'Sibling', detail the directory); none → nearestAncestorWithEdges() up to the sibling root → tests with an edge under it (detail '<dir>/**'); none → not consumed
 final class Laravel\Rules\BladeRule      // any changed .blade.php, known or deleted included (additive) → BladeReferences::ancestorsOfEach (once per pass) → tests with edges to an ancestor (Reason 'Blade'); consumes it only when it found one, else it falls to the resources/views/** fallback
-final class Laravel\LaravelIntegration  // rules(...): list<Rule> in SPEC order (Migration first, Sibling/Blade after TestFile, before Watch); subscribers(Recorder): list<Subscriber>; augment(RunPartial, root): RunPartial (MigrationTables for database-using test files → tables ∪ all migration tables)
+final class Laravel\LaravelIntegration  // rules(graph, root, ?stateDir, ?Config): ['migration', 'schema', 'sibling', 'blade'] in SPEC order (Migration, SchemaDump first, Sibling/Blade after TestFile, before Watch); subscribers(Recorder): list<Subscriber> (the wrapper's PHPUnit child); inProcessSubscribers(Recorder): the two arming subscribers, registered by ReplayExtension in in-process mode too (before 0.13 it registered none), the collector handed to ReplayState for the in-process partial; augment(RunPartial, root, Config): RunPartial (conservative only: database-using test files → tables ∪ all migration tables; precise: unchanged)
 ```
-`Selector::default()` gains an optional `array $extraRules` inserted per the SPEC order. Recorder tables flow: `Recorder::perTestTables()` → `RunWriter` `tables.json` → `GraphUpdater::replaceTestTables`.
+`Selector::default()` gains an optional `array $extraRules` inserted per the SPEC order; `Selector::affected($changed, ?string $base)` passes the sha the change set was diffed from to the rules (`Context::$base`, read by `SchemaDumpRule`), from `RunListBuilder::build()`/`select()` and `LayerAudit` (the layer's own sha), and `explain` (the branch's recorded sha, else HEAD). Recorder tables flow: `Recorder::perTestTables()` → `RunWriter` `tables.json` → `GraphUpdater::replaceTestTables`. Uses-database flow: `ArmLaravelTrackersOnPrepared` → `UsesDatabaseCollector` → `uses_database.json` (wrapper) or `ReplayState`'s partial (in-process) → `GraphUpdater` → `Graph::replaceUsesDatabase($executed, $usesDatabase)`: a file the run executed (not one it only replayed) gets what the run saw, others keep theirs. `WatchPatterns::forProject(root, testDirs, Config)` is the one place the defaults, the migration-path fallbacks and the configured patterns are built.
 
 Fixture `tests/Fixtures/Projects/laravel-lite`: created from `composer create-project laravel/laravel`, reduced (sqlite `:memory:`, 3 migrations `users`/`posts`/`comments`, models `User`/`Post`, 4 Feature tests, 2 Blade views), with `manuglopez/phpunit-replay` as a path repository (`../../../..`, `@dev`) so the fixture's own `vendor/` contains PHPUnit (pinned `^12.5.12` in the fixture's own `require-dev`, independent of — and not exercising — this package's own 11.5/12/13 support matrix) and a symlinked copy of this package. `vendor/` is gitignored; integration tests `markTestSkipped` when `vendor/autoload.php` is missing. `FixtureProject::laravelLite()` copies the fixture WITHOUT `vendor/` and symlinks `vendor` to the fixture's installed one.
 
@@ -1026,21 +1033,29 @@ would still serve, both values are recomputed on the current tree and must be eq
   pass, renamed method) fails the audit again on every later pass until a complete pass replaces or
   prunes it — deleting it would leave a file with results for only some of its tests. `LayerAudit`'s
   reason wins for a file both audits drop.
-- **Digest definition** (`NonEdgeInputs`, version token `n3`; its class docblock holds the table):
+- **Digest definition** (`NonEdgeInputs`, version token `n4` since 0.13, `n3` before; its class docblock holds the table):
   scopes over the working tree (`git ls-files -co --exclude-standard`, minus git-ignored, minus missing,
   minus the generated `.phpunit-replay.xml` and an in-project state dir). For test file T:
   `watch:<pattern>@3` (every file the configured pattern matches, T under its targets — watch is
   additive), `unattributable@3` (`.php` files `<source><exclude>` keeps out of coverage, whatever watch
   pattern also names them; additive, whoever has an edge to them), `blade@3` (templates the templates
-  T depends on reference, transitively: `BladeReferences::referenceMap()`), `migrations@3` (migrations
-  whose tables intersect T's), `migrations:untouched@1` (migrations for tables no test records, when T
-  records any), `migrations:unnarrowed@1` (no table to narrow by, or a graph with none),
+  T depends on reference, transitively: `BladeReferences::referenceMap()`), `migrations:pending@1`
+  (`precise`: migrations the test connection's dump does not list, when T uses a database),
+  `migrations@3` (`conservative`: migrations whose tables intersect T's), `migrations:untouched@1`
+  (`conservative`: migrations for tables no test records, when T records any), `migrations:unknown@1`
+  (`conservative`: a table it cannot read, when T uses a database), `migrations:unnarrowed@1` (no
+  table to narrow by, or a graph with none), `schema:<dump>@1` (when T uses a database: the dump's
+  global statements, the blocks of T's tables and of the tables no test records — every block when T
+  records none — each `xxh128(dump . "\0" . table . "\0" . block)`; the whole file when it does not
+  parse, or while the graph records no table, then for T under the residue targets),
   `sibling:<dir>@3` (sibling candidates no test has an edge to, T depending on the directory),
+  `sibling-tree:<dir>@1` (candidates in a directory nobody has an edge into, `<dir>` the nearest
+  ancestor up to the sibling root that has one, T with an edge under `<dir>`),
   `fallback:<pattern>@1` (the Laravel `resources/views/**` and `database/migrations/**` fallbacks: files
   matching them that no rule claims — no edge, not a `.php` migration, not a template some template in
   the universe references), and with `static_declaration_edges` `residue@3`. Every member set minus T's
   own dependencies and T itself.
-  `digest = "n3:" . xxh128("nonedge@3\n" . Σ sorted "<scope>=<xor>:<count>\n")` over the non-empty
+  `digest = "n4:" . xxh128("nonedge@4\n" . Σ sorted "<scope>=<xor>:<count>\n")` over the non-empty
   scopes T carries, where `<xor>` is the XOR of `xxh128(path . "\0" . ContentHash(path))` over the
   members: a scope shared by hundreds of test files is hashed once and each one's dependencies are
   taken out of it per dependency. Null when git cannot list the tree: nothing is stamped with it and

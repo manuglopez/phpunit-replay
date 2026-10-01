@@ -23,6 +23,15 @@ trait DatabaseTransactions
 {
 }
 
+trait LazilyRefreshDatabase
+{
+    use RefreshDatabase;
+}
+
+trait DatabaseTruncation
+{
+}
+
 namespace Manuglopez\Replay\Tests\Unit\Laravel\Fixtures;
 
 class PlainTestCase
@@ -46,4 +55,24 @@ class DatabaseTransactionsTestCase
 
 class ChildOfRefreshDatabaseTestCase extends RefreshDatabaseTestCase
 {
+}
+
+trait ProjectDatabaseTrait
+{
+    use \Illuminate\Foundation\Testing\RefreshDatabase;
+}
+
+class LazilyRefreshDatabaseTestCase
+{
+    use \Illuminate\Foundation\Testing\LazilyRefreshDatabase;
+}
+
+class DatabaseTruncationTestCase
+{
+    use \Illuminate\Foundation\Testing\DatabaseTruncation;
+}
+
+class ProjectTraitTestCase
+{
+    use ProjectDatabaseTrait;
 }

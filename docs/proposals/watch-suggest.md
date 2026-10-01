@@ -1,6 +1,6 @@
 # Proposal: tell a project which `watch` patterns it needs (`watch:suggest`)
 
-**Status: accepted; not yet implemented.** The owner's decisions are recorded in "Decisions (2026-10-01)" below. Nothing below exists in `src/` yet. Line references are
+**Status: accepted; partly implemented.** The owner's decisions are recorded in "Decisions (2026-10-01)" below. Decisions 1 and 6 are implemented in 0.13.0 as package rules (the schema dump, new sibling subdirectories, every migration path); the `watch:suggest` command itself does not exist in `src/` yet. Line references are
 to `main` at `4f4f30e` (v0.12.1). The evidence comes from two real Laravel applications, both
 anonymous here:
 
@@ -863,12 +863,12 @@ The owner chose the recommended option on every open question below.
 
 | # | Question | Decision |
 |---|---|---|
-| 1 | Schema dump and new sibling subdirectories: rules or suggestions? | **Package rules.** Both are universal in Laravel. `schema:dump` is a framework feature that `RefreshDatabase` loads for every database test, and a new subdirectory of a sibling directory is discovered like its parent. They close false greens for every project; they do not promote one project's choices. |
+| 1 | Schema dump and new sibling subdirectories: rules or suggestions? | **Implemented in 0.13.0** (`Laravel\Rules\SchemaDumpRule`, `Laravel\Rules\SiblingRule::nearestAncestorWithEdges()`). **Package rules.** Both are universal in Laravel. `schema:dump` is a framework feature that `RefreshDatabase` loads for every database test, and a new subdirectory of a sibling directory is discovered like its parent. They close false greens for every project; they do not promote one project's choices. |
 | 2 | Initial thresholds (80% dependents → every test; 50% directory density; under-attribution below 50%) | Accepted to start with, then calibrated against the two real cases and user reports. |
 | 3 | Where the ignore list lives | In `phpunit-replay.php`, so it is reviewed and shared. An ignored gap stays visible to the team. |
 | 4 | Does `record` run the detectors? | Yes, within a budget. `record` writes the summary (under 2 s warm) and `status` only reads it, so the hint reaches people who do not know the command exists. |
 | 5 | Recording coverage for excluded paths in a separate scope | Later, as its own proposal. Until then the command advises removing the exclude and states the coverage-percentage trade-off. |
-| 6 | Should `MigrationRule` learn configured paths (`loadMigrationsFrom`, tenant migrations)? | Yes. The rule attributes them table by table, which is more precise than a suggested pattern and covers every project without action. |
+| 6 | Should `MigrationRule` learn configured paths (`loadMigrationsFrom`, tenant migrations)? | **Implemented in 0.13.0** (`Laravel\MigrationPaths`: `migration_paths`, literal `loadMigrationsFrom()` calls, `stancl/tenancy`; by default a migration selects by whether the test database runs it, table by table only under `migrations => 'conservative'`). Yes. The rule attributes them table by table, which is more precise than a suggested pattern and covers every project without action. |
 | 7 | Separate command or `explain --watch` | A separate `watch:suggest` command, with its own `--check`. |
 | 8 | Show the one-time adoption cost in seconds | Yes, computed from recorded test durations. |
 

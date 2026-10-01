@@ -216,6 +216,42 @@ final class GraphTest extends TestCase
         );
     }
 
+    public function test_uses_database_is_replaced_for_the_files_a_run_executed_only(): void
+    {
+        $graph = new Graph($this->root);
+        $graph->replaceUsesDatabase(['tests/AT.php', 'tests/BT.php'], ['tests/AT.php', 'tests/BT.php']);
+        $graph->replaceUsesDatabase(['tests/BT.php', 'tests/CT.php'], ['tests/CT.php']);
+
+        self::assertSame(['tests/AT.php', 'tests/CT.php'], $graph->usesDatabase(), 'B ran and no longer uses one; A did not run');
+    }
+
+    public function test_database_test_files_are_the_uses_database_set_and_every_file_with_tables(): void
+    {
+        // A graph recorded before 0.13 has tables and no `uses_database`: its database tests
+        // are still known.
+        $graph = new Graph($this->root);
+        $graph->replaceTestTables(['tests/WithTablesTest.php' => ['users']]);
+        $graph->replaceUsesDatabase(['tests/NoTablesTest.php'], ['tests/NoTablesTest.php']);
+
+        self::assertSame(['tests/NoTablesTest.php', 'tests/WithTablesTest.php'], $graph->databaseTestFiles());
+    }
+
+    public function test_uses_database_round_trips_and_is_left_out_when_empty(): void
+    {
+        $graph = new Graph($this->root);
+        $json = $graph->encode();
+        self::assertIsString($json);
+        self::assertArrayNotHasKey('uses_database', (array) json_decode($json, true), 'nothing new in a graph that has none');
+
+        $graph->replaceUsesDatabase(['tests/BT.php', 'tests/AT.php'], ['tests/BT.php', 'tests/AT.php']);
+        $json = $graph->encode();
+        self::assertIsString($json);
+        $decoded = Graph::decode($json, $this->root);
+
+        self::assertNotNull($decoded);
+        self::assertSame(['tests/AT.php', 'tests/BT.php'], $decoded->usesDatabase());
+    }
+
     public function test_set_not_cacheable_replaces_and_normalises(): void
     {
         $graph = new Graph($this->root);

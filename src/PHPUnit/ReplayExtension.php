@@ -189,6 +189,12 @@ final class ReplayExtension implements Extension
             new PrintSummaryOnApplicationFinished(),
         );
 
+        // The Laravel trackers, as the wrapper's child registers them (registerSubscribers()):
+        // the tables and templates a test touches, and the files that use a database.
+        if ($recorder !== null && \Manuglopez\Replay\Laravel\LaravelIntegration::shouldArm($root)) {
+            $facade->registerSubscribers(...\Manuglopez\Replay\Laravel\LaravelIntegration::inProcessSubscribers($recorder, $root));
+        }
+
         Warnings::debug(sprintf('extension: in-process mode=%s root=%s', $mode->value, $root));
     }
 
