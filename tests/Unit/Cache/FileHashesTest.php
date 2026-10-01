@@ -44,7 +44,10 @@ final class FileHashesTest extends TestCase
     public function test_a_remembered_hash_is_reused_only_while_the_stat_is_unchanged(): void
     {
         TempDir::write($this->root . '/src/A.php', "<?php\nfinal class A {}\n");
-        $later = static fn (): int => time() + 10;
+        // The file's ctime has to be two seconds older than the read, by the file system's own
+        // clock, which the cache probes: waited for, not faked.
+        sleep(3);
+        $later = null;
 
         $first = new FileHashes($this->root, $this->cache, $later);
         $hash = $first->of('src/A.php');
@@ -68,6 +71,21 @@ final class FileHashesTest extends TestCase
         self::assertNotSame($hash, $fresh);
     }
 
+    public function test_a_process_clock_ahead_of_the_file_system_does_not_make_a_fresh_file_look_old(): void
+    {
+        // A network file system whose server runs behind this machine: by this process's clock
+        // the file was changed long ago, by the file system's it was changed just now.
+        TempDir::write($this->root . '/src/A.php', "<?php\nfinal class A {}\n");
+        $ahead = static fn (): int => time() + 60;
+
+        $hashes = new FileHashes($this->root, $this->cache, $ahead);
+        $hashes->of('src/A.php');
+        $hashes->save();
+
+        self::assertFileDoesNotExist($this->cache, 'racily clean by the file system\'s clock: not remembered');
+        self::assertSame([], glob($this->root . '/.phpunit-replay-clock-*') ?: [], 'the clock probe leaves nothing behind');
+    }
+
     public function test_a_cache_from_another_version_is_ignored(): void
     {
         TempDir::write($this->root . '/src/A.php', "<?php\nfinal class A {}\n");
@@ -89,6 +107,27 @@ final class FileHashesTest extends TestCase
         TempDir::write($this->root . '/src/A.php', "<?php\nfinal class A { public int \$x = 1; }\n");
 
         self::assertFalse($other->stable('src/A.php'));
+    }
+
+    public function test_a_file_rewritten_with_the_same_bytes_during_the_run_is_stable(): void
+    {
+        // A test that rewrites its own fixture must not unstamp every test the fixture's watch
+        // pattern maps to: stability is the content, not the timestamps.
+        TempDir::write($this->root . '/tests/Fixtures/data.json', "{}\n");
+        touch($this->root . '/tests/Fixtures/data.json', time() - 100);
+
+        $hashes = new FileHashes($this->root);
+        $hashes->of('tests/Fixtures/data.json');
+        $hashes->markRunStart(['tests/Fixtures/data.json']);
+
+        TempDir::write($this->root . '/tests/Fixtures/data.json', "{}\n");
+        self::assertTrue($hashes->stable('tests/Fixtures/data.json'));
+
+        $other = new FileHashes($this->root);
+        $other->of('tests/Fixtures/data.json');
+        $other->markRunStart(['tests/Fixtures/data.json']);
+        TempDir::write($this->root . '/tests/Fixtures/data.json', "{\"changed\": true}\n");
+        self::assertFalse($other->stable('tests/Fixtures/data.json'), 'the content really moved');
     }
 
     public function test_a_file_first_read_after_the_run_started_is_stable_only_if_it_changed_before(): void

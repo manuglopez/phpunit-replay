@@ -79,7 +79,7 @@ final class SiblingRule implements Rule
         }
     }
 
-    /** Shared with `Select\NonEdgeInputs`, whose `sibling:<dir>@1` scopes are this rule's claim. */
+    /** Shared with `Select\NonEdgeInputs`, whose `sibling:<dir>@3` scopes are this rule's claim. */
     public static function isSiblingCandidate(string $rel): bool
     {
         if (! str_ends_with($rel, '.php')) {

@@ -1344,7 +1344,7 @@ final class RunPipeline
             $this->reader,
             new Policy($graph, $this->config, $this->quarantine, $root),
             $root,
-            LaravelIntegration::rulesFor($graph, $root, $this->config),
+            LaravelIntegration::rulesFor($graph, $root, $this->config, $this->stateDir),
             $this->config->staticDeclarationEdges,
             $this->sourceScope,
         );

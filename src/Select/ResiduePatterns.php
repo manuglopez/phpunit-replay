@@ -47,9 +47,9 @@ use Manuglopez\Replay\Support\Paths;
  * a glob: `WatchPatterns::parse()` splits a key on whitespace and reads a leading `!` as an
  * exclude token, so `lang/es MX/messages.php` would otherwise never match its own file.
  *
- * `.blade.php` is excluded: {@see \Manuglopez\Replay\Laravel\Rules\BladeRule} and the Laravel `resources/views/**`
- * default already own that path, and its own unmatched files already fall through to
- * `WatchRule` anyway.
+ * `.blade.php` is excluded: {@see \Manuglopez\Replay\Laravel\Rules\BladeRule} and the Laravel
+ * `resources/views/**` pattern (a default, or with the Laravel rules on a fallback) cover that
+ * path, and a template nothing claims already falls through to `WatchRule` anyway.
  *
  * Shared by {@see RunListBuilder::build()} and `Console\Commands\ExplainCommand` on purpose:
  * `explain` has to show the plan a real pass would produce, not a rosier one, and a second
@@ -93,7 +93,7 @@ final readonly class ResiduePatterns
     }
 
     /**
-     * {@see self::targets()}, for {@see NonEdgeInputs}' `residue@1` scope.
+     * {@see self::targets()}, for {@see NonEdgeInputs}' `residue@3` and `unattributable@2` scopes.
      *
      * @return list<string>
      */
@@ -106,10 +106,35 @@ final readonly class ResiduePatterns
     }
 
     /**
+     * The `static_declaration_edges` residue among `$changed`: a `.php` file without an edge.
+     * A fallback (`WatchPatterns::addFallback()`), for what no rule claimed.
+     *
      * @param list<string> $changed project-relative
      * @return array<string, list<string>> pattern (a literal path) => test directories/files
      */
     public function for(array $changed): array
+    {
+        return $this->patternsFor($changed, fn (string $rel): bool => $this->isResidue($rel));
+    }
+
+    /**
+     * The files among `$changed` coverage cannot see ({@see self::isUnattributable()}).
+     * Additive (`WatchPatterns::addUnattributable()`), like a configured pattern.
+     *
+     * @param list<string> $changed project-relative
+     * @return array<string, list<string>> pattern (a literal path) => test directories/files
+     */
+    public function unattributableFor(array $changed): array
+    {
+        return $this->patternsFor($changed, fn (string $rel): bool => $this->isUnattributable($rel));
+    }
+
+    /**
+     * @param list<string> $changed
+     * @param \Closure(string): bool $claims
+     * @return array<string, list<string>>
+     */
+    private function patternsFor(array $changed, \Closure $claims): array
     {
         $targets = $this->targets();
 
@@ -120,7 +145,7 @@ final readonly class ResiduePatterns
         $patterns = [];
 
         foreach ($changed as $rel) {
-            if ($this->isResidue($rel)) {
+            if ($claims($rel)) {
                 $patterns[$rel] = $targets;
             }
         }
@@ -130,15 +155,7 @@ final readonly class ResiduePatterns
 
     public function isResidue(string $rel): bool
     {
-        if (! self::hasResidueShape($rel, $this->testPaths)) {
-            return false;
-        }
-
-        if ($this->unattributed && $this->graph->fileId($rel) === null) {
-            return true;
-        }
-
-        return $this->isUnattributable($rel);
+        return $this->unattributed && self::hasResidueShape($rel, $this->testPaths) && $this->graph->fileId($rel) === null;
     }
 
     /**
@@ -147,7 +164,10 @@ final readonly class ResiduePatterns
      * attributed to the tests that execute it, whether they do or not. It runs everything,
      * unless a configured watch pattern already says which tests it belongs to, which is more
      * precise and was the project's own statement about it. A function of the path and the
-     * configuration only, never of the graph.
+     * configuration only, never of the graph: an edge such a file has anyway (a name another
+     * file mentions) does not say which tests execute it, so the rule applies whatever edges it
+     * has ({@see Rules\WatchRule}), and `NonEdgeInputs`' `unattributable@2` scope, not relative to
+     * the universe either, is its claim.
      */
     public function isUnattributable(string $rel): bool
     {
@@ -165,7 +185,7 @@ final readonly class ResiduePatterns
     /**
      * The half of {@see self::isResidue()} that does not ask the graph: a `.php` file that is
      * neither a Blade template nor a test file. Shared with {@see NonEdgeInputs}, whose
-     * `residue@1` scope is this fallback's claim.
+     * `residue@3` scope is this fallback's claim.
      */
     public static function hasResidueShape(string $rel, TestPaths $testPaths): bool
     {

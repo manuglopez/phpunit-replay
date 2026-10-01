@@ -15,17 +15,22 @@ use Manuglopez\Replay\Support\Paths;
  */
 final class Laravel implements WatchDefault
 {
+    /** The directories the Laravel rules attribute, and a fallback covers for what they cannot. */
+    private const ATTRIBUTED = ['database/migrations/**', 'resources/views/**'];
+
     /**
-     * `$rulesAttribute`: the Laravel rules run (`LaravelDetector::enabled()`). A watch pattern
-     * applies to every changed file, edges or not (`Rules\WatchRule`), so these defaults say
-     * "every test depends on these directories". That is the right fallback for what nothing
-     * attributes, and wrong for two directories the Laravel rules DO attribute, per test and on
-     * every run: templates (`BladeTracker` links every render, `BladeRule` every static include
-     * of a rendered template) and migrations (`MigrationRule`, by the tables each test's queries
-     * touched; a migration it cannot read tables from runs everything, which is what the
-     * `database/migrations/**` default used to do for it). With the rules on, those two defaults
-     * would turn every view or migration edit into a full run; with them off (`laravel =>
-     * 'off'`), nothing else covers them and the defaults stay.
+     * `$rulesAttribute`: the Laravel rules run (`LaravelDetector::enabled()`). A configured watch
+     * pattern applies to every changed file, edges or not (`Rules\WatchRule`), which says "every
+     * test depends on these directories". For `resources/views/**` and `database/migrations/**`
+     * that is too broad while the Laravel rules run: a template a test renders is linked to it
+     * on every render (`BladeTracker`), one a rendered template references is `BladeRule`'s,
+     * and a `.php` migration is `MigrationRule`'s, by table. It is not too broad for what those
+     * rules cannot see, and running more is the rule when nothing can say less: a template no
+     * rendered template references statically (`vendor/pagination/*` overrides, `errors/404`,
+     * a `view('pages.' . $slug)` target, the other candidate of an `@includeFirst`), a plain
+     * `.php` view, a `.sql` file a migration reads. So with the rules on, those two patterns
+     * are {@see self::fallbacks()}: they fire only for a changed file no rule claimed, and run
+     * every test for it. With the rules off (`laravel => 'off'`) they are ordinary defaults.
      */
     public function __construct(private readonly bool $rulesAttribute = false)
     {
@@ -42,7 +47,7 @@ final class Laravel implements WatchDefault
         $patterns = [
             'config/**',
             'routes/**',
-            ...($this->rulesAttribute ? [] : ['database/migrations/**', 'resources/views/**']),
+            ...($this->rulesAttribute ? [] : self::ATTRIBUTED),
             'lang/**',
             'resources/lang/**',
             'app/** !*.php',
@@ -56,5 +61,16 @@ final class Laravel implements WatchDefault
         }
 
         return $result;
+    }
+
+    /**
+     * The patterns that apply only to a changed file no rule claimed (`WatchPatterns::addFallback()`).
+     *
+     * @param list<string> $testDirectories
+     * @return array<string, list<string>>
+     */
+    public function fallbacks(array $testDirectories): array
+    {
+        return $this->rulesAttribute ? array_fill_keys(self::ATTRIBUTED, $testDirectories) : [];
     }
 }

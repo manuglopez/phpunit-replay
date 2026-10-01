@@ -869,7 +869,7 @@ final class ReplayState
             $reader,
             $policy,
             $root,
-            LaravelIntegration::rulesFor($graph, $root, $config),
+            LaravelIntegration::rulesFor($graph, $root, $config, $stateDir),
             $config->staticDeclarationEdges,
             self::$sourceScope,
         );

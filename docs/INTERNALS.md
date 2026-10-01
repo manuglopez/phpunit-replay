@@ -773,11 +773,11 @@ final class Laravel\TableExtractor  // port of Pest TableExtractor: fromSql(stri
 final class Laravel\TableTracker    // arm(object $app, Recorder $recorder): void — $app['db']->listen(fn (QueryExecuted $q) => foreach TableExtractor::fromSql($q->sql) as $t → $recorder->linkTable($t))
 final class Laravel\BladeTracker    // arm(object $app, Recorder $recorder, string $projectRoot): void — $app['view']->composer('*', fn ($view) => ...) links $view->getPath() UNLESS it is inside config('view.compiled') (read fresh per render, never cached at arm() time) or, as a fallback, SourceScope::isNestedNoisePath($projectRoot, $path) — see "No edges to files git ignores" below
 final class Laravel\MigrationTables // tablesOf(string $projectRoot): list<string> (all tables of database/migrations/**/*.php via TableExtractor::fromMigrationSource); usesDatabase(string $className): bool (RefreshDatabase|DatabaseMigrations|DatabaseTransactions traits, recursively)
-final class Laravel\BladeReferences // ancestorsOf(string $bladeRel, string $projectRoot): list<string> — static @include/@extends/@component/view('x')/<x-name> walk (port of Pest Graph::bladeAncestorsFor and helpers)
+final class Laravel\BladeReferences // referenceMap(root, ?cacheFile): template => templates it references (static @include/@includeFirst/@extends/@component/view('x')/<x-name>; resolved once per process, persisted by template content), ancestorsOf(rel, root, ?cacheFile), ancestorsOfEach(rels, root, ?cacheFile) (one resolution for many) and descendantsOf(map, roots) over it (port of Pest Graph::bladeAncestorsFor and helpers)
 final readonly class Laravel\Subscribers\ArmLaravelTrackersOnPrepared implements PreparedSubscriber  // once per Container instance: binding marker 'phpunit-replay.armed'
-final class Laravel\Rules\MigrationRule  // database/migrations/**/*.php changed → TableExtractor::fromMigrationSource → tests whose graph->testTables() intersect (Reason 'Migration', detail table names); unparseable → left for WatchRule
+final class Laravel\Rules\MigrationRule  // database/migrations/**/*.php changed → TableExtractor::fromMigrationSource → tests whose graph->testTables() intersect (Reason 'Migration', detail table names); tables no test records → every test with any table; no table to narrow by (unparseable, deleted, a graph with no tables) → every test. Consumes every .php migration; any other file under database/migrations/ is left for the database/migrations/** fallback
 final class Laravel\Rules\SiblingRule    // new/unknown .php under app/Providers|Listeners|Events|Observers|Policies|Console/Commands, database/factories|seeders → tests with edges to files in the same directory (Reason 'Sibling')
-final class Laravel\Rules\BladeRule      // unknown .blade.php → BladeReferences::ancestorsOf → tests with edges to an ancestor (Reason 'Blade')
+final class Laravel\Rules\BladeRule      // any changed .blade.php, known or deleted included (additive) → BladeReferences::ancestorsOfEach (once per pass) → tests with edges to an ancestor (Reason 'Blade'); consumes it only when it found one, else it falls to the resources/views/** fallback
 final class Laravel\LaravelIntegration  // rules(...): list<Rule> in SPEC order (Migration first, Sibling/Blade after TestFile, before Watch); subscribers(Recorder): list<Subscriber>; augment(RunPartial, root): RunPartial (MigrationTables for database-using test files → tables ∪ all migration tables)
 ```
 `Selector::default()` gains an optional `array $extraRules` inserted per the SPEC order. Recorder tables flow: `Recorder::perTestTables()` → `RunWriter` `tables.json` → `GraphUpdater::replaceTestTables`.
@@ -794,7 +794,7 @@ Wrapper: `--parallel|-p[=N]` → launches `vendor/bin/paratest -c <xml> --proces
 
 Keys: `graph/<project-key>/<branch>.json` (full graph of a branch baseline) and `objects/<yyyy-mm>/<k>.json`
 (results of one test file by content key; the month shard is the write month; lookups try every shard, newest first).
-`objects/*` are append-only and content-addressed: writing the same key twice is a no-op.
+`objects/*` are addressed by content key and merged on publish: a body holds up to 20 non-edge digests (the newest's results at the top level, which is all an older reader reads, older ones under `variants`, identical outcomes as `aliases`), and publishing a digest the remote's copy already names is skipped (`ObjectStore::putObject()`); the git backend merges again with upstream when a push is rejected.
 
 ```php
 interface Cache\Remote\RemoteCache
@@ -836,7 +836,7 @@ skipped object even by forgetting the check. `RunPipeline::closeRemote()`,
 
 - Mirror: `<stateDir>/remote/git/` = shallow clone (`--depth 1`, single branch, default `main`, configurable `remote_branch`).
 - `begin()`: create the mirror if missing; otherwise `git fetch --depth 1 origin <branch>` + `git reset --hard FETCH_HEAD` when the mirror is older than `remote_refresh_seconds` (default 300). If fetch reports unrelated/rewritten history → wipe and re-clone. Any failure → warning, continue with what the mirror has (offline mode).
-- `put()`: writes into the mirror working tree (AtomicFile) and remembers the path (buffer). `delete()`: unlinks it and remembers the key too (tombstone) — even when the key was already absent locally, since this mirror can be stale relative to upstream; `put()`/`delete()` of the same key on the same instance cancel each other's entry, so whichever happened last wins. `end()`: `git add` + one commit `replay: <project-key> <branch> <sha7> +N objects` + `git push origin HEAD:<branch>`; on rejection: **never a rebase** — a `--depth 1` fetch severs the parent link of what it retrieves, so two mirrors that really are descendants of one history can look unrelated to `git rebase` purely from that truncation, observed as a flaky "unresolved rebase conflict outside graph/**" on CI. Instead `adoptFetchedHistory()` takes upstream wholesale (`git reset --hard FETCH_HEAD`) and replays this run's own buffer and tombstones on top of it — a reset would otherwise silently restore a file this run deleted, exactly as it restores a write — then commits and retries; no path-by-path reconciliation, because objects are content-addressed and append-only and `graph/**` is ours-wins by construction → retry up to 3 times; still failing → warning, objects stay committed locally and go with the next push. Push is skipped when nothing was written. Total time budget: `remote_timeout` (default 60 s) — beyond it the push is abandoned with a warning.
+- `put()`: writes into the mirror working tree (AtomicFile) and remembers the path (buffer). `delete()`: unlinks it and remembers the key too (tombstone) — even when the key was already absent locally, since this mirror can be stale relative to upstream; `put()`/`delete()` of the same key on the same instance cancel each other's entry, so whichever happened last wins. `end()`: `git add` + one commit `replay: <project-key> <branch> <sha7> +N objects` + `git push origin HEAD:<branch>`; on rejection: **never a rebase** — a `--depth 1` fetch severs the parent link of what it retrieves, so two mirrors that really are descendants of one history can look unrelated to `git rebase` purely from that truncation, observed as a flaky "unresolved rebase conflict outside graph/**" on CI. Instead `adoptFetchedHistory()` takes upstream wholesale (`git reset --hard FETCH_HEAD`) and replays this run's own buffer and tombstones on top of it — a reset would otherwise silently restore a file this run deleted, exactly as it restores a write — then commits and retries; the only path-by-path reconciliation is for `objects/**`, whose buffered body is merged with upstream's copy (`ObjectStore::mergeBodies()`: every digest variant of both, bounded) and replaces the buffered one; `graph/**` is ours-wins by construction → retry up to 3 times; still failing → warning, objects stay committed locally and go with the next push. Push is skipped when nothing was written. Total time budget: `remote_timeout` (default 60 s) — beyond it the push is abandoned with a warning.
 - Locking: `flock` on `<stateDir>/remote/git.lock` around begin/end (Paratest workers do not touch the remote; only the wrapper does).
 - Policy `remote_push`: `objects` (default for developers: only `objects/**`), `all` (CI baseline job: objects + `graph/**`), `off` (pull only).
 - Auth: whatever git already has (SSH agent, credential helper, deploy key in CI). No token handling in the package.
@@ -1026,33 +1026,50 @@ would still serve, both values are recomputed on the current tree and must be eq
   pass, renamed method) fails the audit again on every later pass until a complete pass replaces or
   prunes it — deleting it would leave a file with results for only some of its tests. `LayerAudit`'s
   reason wins for a file both audits drop.
-- **Digest definition** (`NonEdgeInputs`, version token `n2`): scopes over the working tree
-  (`git ls-files -co --exclude-standard`, minus git-ignored, minus missing, minus the generated
-  `.phpunit-replay.xml` and an in-project state dir). For test file T: `watch:<pattern>@2` (every file
-  the configured pattern matches, T under its targets — watch is additive), `migrations@2` (migrations
-  whose tables intersect T's; with no table to narrow by, every migration), `blade@2` (templates the
-  templates T depends on reference, transitively: `BladeReferences::referenceMap()`), `sibling:<dir>@2`
-  (sibling candidates no test has an edge to, T depending on the directory), `unattributable@1` (`.php`
-  files `<source><exclude>` keeps out of coverage that no configured pattern names), and with
-  `static_declaration_edges` `residue@2`. Every member set minus T's own dependencies and T itself.
-  `digest = "n2:" . xxh128("nonedge@2\n" . Σ sorted "<scope>=<xor>:<count>\n")` over the non-empty
+- **Digest definition** (`NonEdgeInputs`, version token `n3`; its class docblock holds the table):
+  scopes over the working tree (`git ls-files -co --exclude-standard`, minus git-ignored, minus missing,
+  minus the generated `.phpunit-replay.xml` and an in-project state dir). For test file T:
+  `watch:<pattern>@3` (every file the configured pattern matches, T under its targets — watch is
+  additive), `unattributable@2` (`.php` files `<source><exclude>` keeps out of coverage that no
+  configured pattern names; additive, whoever has an edge to them), `blade@3` (templates the templates
+  T depends on reference, transitively: `BladeReferences::referenceMap()`), `migrations@3` (migrations
+  whose tables intersect T's), `migrations:untouched@1` (migrations for tables no test records, when T
+  records any), `migrations:unnarrowed@1` (no table to narrow by, or a graph with none),
+  `sibling:<dir>@3` (sibling candidates no test has an edge to, T depending on the directory),
+  `fallback:<pattern>@1` (the Laravel `resources/views/**` and `database/migrations/**` fallbacks: files
+  matching them that no rule claims — no edge, not a `.php` migration, not a template some template in
+  the universe references), and with `static_declaration_edges` `residue@3`. Every member set minus T's
+  own dependencies and T itself.
+  `digest = "n3:" . xxh128("nonedge@3\n" . Σ sorted "<scope>=<xor>:<count>\n")` over the non-empty
   scopes T carries, where `<xor>` is the XOR of `xxh128(path . "\0" . ContentHash(path))` over the
   members: a scope shared by hundreds of test files is hashed once and each one's dependencies are
   taken out of it per dependency. Null when git cannot list the tree: nothing is stamped with it and
-  nothing validates against it. Only `sibling` and `residue` look at the graph's universe (they are
-  presumptions about unattributed files, `NonEdgeInputs::inUniverse()`), so another test gaining or
-  losing an edge moves no digest but, at most, those two scopes' when a file in them gains its first.
+  nothing validates against it. Only `sibling`, `fallback` and `residue` look at the graph's universe
+  (they are presumptions about unattributed files, `NonEdgeInputs::inUniverse()` and
+  `claimedByBlade()`), and `migrations:untouched` at the tables tests record, so another test gaining
+  or losing an edge moves no digest but, at most, those scopes' when a file in them gains its first.
 - **Cost**: each file is hashed once per pass, and across passes only when its `stat()` moved
   (`<stateDir>/content-hashes.json`: size, mtime, ctime, inode, device; an entry is written only for a
   file whose ctime is at least two seconds older than the read, so any later change — which sets ctime
-  in a later second, even one that forges mtime — misses it). Template references persist in
+  in a later second, even one that forges mtime — misses it). "The read" is on the file system's
+  clock: `FileHashes::probeFileSystem()` writes `.phpunit-replay-clock-<rand>` in the project root once
+  per process and takes `min(0, its mtime − time())` as the offset, so a lagging mount cannot make a
+  fresh file look old. The same probe forges its mtime an hour back and checks ctime followed; where
+  it did not (FAT/exFAT, FUSE mounts like sshfs that pass the forged time through), on Windows (PHP's
+  `ctime` is the creation time there), or where the probe cannot be written, the persistent cache is
+  off and every file is read each pass. `FileHashes::stable()` is content-based: a file whose `stat()`
+  moved during the run but whose content hashes the same is stable (so an A → B → A edit inside the run
+  counts as stable — a documented limit, the window being the run). Template references persist in
   `<stateDir>/blade-references.json`, keyed by each template's raw content hash and the hash of the
-  template path list. Measured on a real project (726 test files, 6,446 tree files): 0.30–0.37 s per
-  pass warm, 0.84 s cold.
+  template path list; `BladeRule` resolves them once per pass for all changed templates
+  (`BladeReferences::ancestorsOfEach()`). Measured on a real project (726 test files, 6,446 tree
+  files): 0.34–0.38 s per pass warm, 0.76 s cold.
 - **Remote** (`Cache\Remote\Exchange`, shared by the wrapper, the in-process path and `push`): an object
   serves a file only with the results it holds under the file's current key and digest
   (`ObjectStore::resultsFor()`; an object without any digest keeps the key-covered rule), for a file
-  selected or stale; objects hold up to 20 digest variants, newest at the top level; only results
+  selected or stale; objects hold up to 20 digests, newest at the top level, a digest with the same
+  outcome as a held variant as an alias (`aliases`), merged with the remote's copy fetched before each
+  publish of a new digest and, on a rejected git push, with the fetched history; only results
   stamped with the current key and digest are published; a published graph carries only the branch's
   results stamped for the tree, and only from a tree `Cache\GraphPublication` finds clean.
 - **Quarantine**: a flip is a status change under an unchanged key AND digest (`GraphUpdater::detectFlip()`):

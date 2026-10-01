@@ -25,11 +25,21 @@ use Manuglopez\Replay\Support\AtomicFile;
  * taken under — size, mtime, ctime, inode, device — and is used only when the current `stat()`
  * equals it field for field. It is sound the way git's racy-clean index rule is, adapted to the
  * one-second timestamps PHP's `stat()` returns: an entry is written only when the file's ctime
- * is at least two seconds older than the moment its content was read. Any later change to the
- * file — including one that forges its mtime, since ctime is set by the kernel and cannot be —
- * gives it a ctime in a later second than the one recorded, so the entry no longer matches.
- * The second second of margin covers the kernel's coarse clock, which can stamp a change with
- * the previous second. A file changed that recently is simply re-read next time. The version
+ * is at least two seconds older than the moment its content was read. On a POSIX file system
+ * ctime is set by the kernel on every change and cannot be set by a program, so any later
+ * change to the file — including one that forges its mtime — gives it a ctime in a later
+ * second than the one recorded, and the entry no longer matches. The second second of margin
+ * covers the kernel's coarse clock, which can stamp a change with the previous second. A file
+ * changed that recently is simply re-read next time.
+ *
+ * "The moment its content was read" is the FILE SYSTEM's clock, not this process's: a network
+ * file system whose server runs behind the client would otherwise make a file changed a
+ * second ago look two seconds old. It is measured once per pass by writing a probe file in
+ * the project root ({@see self::probeFileSystem()}), which also tests the premise itself: the
+ * probe's mtime is set into the past, and if its ctime follows, ctime is not a kernel-owned
+ * change time on this file system (FAT and exFAT, some FUSE mounts such as sshfs) and the
+ * pass-to-pass cache is not used at all: every file is re-read. So is it on Windows, where
+ * `stat()`'s ctime is the creation time, and wherever the probe cannot be written. The version
  * token covers `ContentHash`'s own definition and the PHP version (the tokenizer it relies on).
  */
 final class FileHashes
@@ -51,10 +61,14 @@ final class FileHashes
     /** @var array<string, bool> this round's answers of {@see self::stable()} */
     private array $stable = [];
 
+    /** @var array{offset: int, trusted: bool}|null the file system's clock and ctime, once probed */
+    private ?array $fileSystem = null;
+
     /**
      * @param string|null $cacheFile where hashes persist across passes; null keeps them in this
      *        process only
-     * @param Closure(): int|null $clock seconds since the epoch; a test seam, `time()` otherwise
+     * @param Closure(): int|null $clock this process's clock, seconds since the epoch; a test
+     *        seam for `time()`. The file system's clock is still probed against it.
      */
     public function __construct(
         private readonly string $projectRoot,
@@ -72,9 +86,72 @@ final class FileHashes
         return new self($projectRoot, rtrim($stateDir, '/') . '/content-hashes.json');
     }
 
+    /** Now, by the file system's clock, never ahead of it (see the class docblock). */
     private function now(): int
     {
+        return $this->processTime() + $this->probeFileSystem()['offset'];
+    }
+
+    private function processTime(): int
+    {
         return $this->clock !== null ? ($this->clock)() : time();
+    }
+
+    /** Whether the pass-to-pass cache may be read and written on this file system. */
+    private function cacheUsable(): bool
+    {
+        if ($this->cacheFile === null || PHP_OS_FAMILY === 'Windows') {
+            return false;
+        }
+
+        return $this->probeFileSystem()['trusted'];
+    }
+
+    /**
+     * Writes a probe file in the project root: its mtime is the file system's clock (the
+     * offset kept is never positive, so "now" is never later than that clock), and setting that
+     * mtime into the past shows whether ctime follows it (then it is no kernel-owned change time
+     * and the cache is off). A probe that cannot be written leaves the cache off.
+     *
+     * @return array{offset: int, trusted: bool}
+     */
+    private function probeFileSystem(): array
+    {
+        if ($this->fileSystem !== null) {
+            return $this->fileSystem;
+        }
+
+        $probe = rtrim($this->projectRoot, '/') . '/.phpunit-replay-clock-' . bin2hex(random_bytes(4));
+        $before = $this->processTime();
+
+        if (@file_put_contents($probe, '') === false) {
+            return $this->fileSystem = ['offset' => 0, 'trusted' => false];
+        }
+
+        try {
+            $written = self::rawStat($probe);
+            $forged = $written !== null && @touch($probe, $written['mtime'] - 3600) ? self::rawStat($probe) : null;
+
+            if ($written === null || $forged === null) {
+                return $this->fileSystem = ['offset' => 0, 'trusted' => false];
+            }
+
+            return $this->fileSystem = [
+                'offset' => min(0, $written['mtime'] - $before),
+                'trusted' => $forged['ctime'] >= $written['mtime'] - 1,
+            ];
+        } finally {
+            @unlink($probe);
+        }
+    }
+
+    /** @return array{mtime: int, ctime: int}|null */
+    private static function rawStat(string $absolute): ?array
+    {
+        clearstatcache(true, $absolute);
+        $stat = @stat($absolute);
+
+        return $stat === false ? null : ['mtime' => (int) $stat['mtime'], 'ctime' => (int) $stat['ctime']];
     }
 
     /** Null when the file does not exist or cannot be read. */
@@ -94,7 +171,7 @@ final class FileHashes
             return null;
         }
 
-        $cached = $this->cache[$relative] ?? null;
+        $cached = $this->cacheUsable() ? ($this->cache[$relative] ?? null) : null;
 
         if ($cached !== null && array_slice($cached, 0, 5) === $before && is_string($cached[5])) {
             $this->files[$relative] = ['hash' => $cached[5], 'stat' => $before, 'readAt' => $readAt, 'afterStart' => $this->runStart !== null, 'unstable' => false];
@@ -109,7 +186,7 @@ final class FileHashes
         $this->files[$relative] = ['hash' => $hash, 'stat' => $before, 'readAt' => $readAt, 'afterStart' => $this->runStart !== null, 'unstable' => $unstable];
 
         // Racy-clean rule: only a file whose last change is safely in the past is remembered.
-        if (! $unstable && $hash !== null && $before[2] <= $readAt - 2) {
+        if (! $unstable && $hash !== null && $before[2] <= $readAt - 2 && $this->cacheUsable()) {
             $this->cache[$relative] = [...$before, $hash];
             $this->cacheDirty = true;
         } elseif (isset($this->cache[$relative])) {
@@ -150,9 +227,17 @@ final class FileHashes
 
     /**
      * Whether the hash {@see self::of()} gave for this file is the content the tests ran on,
-     * so that a stamp may carry it. The file must not have changed since it was read (same
-     * `stat()`, and for one changed within a second of being read, the same content now), and
-     * a file first read after the tests started must not have changed since before they did.
+     * so that a stamp may carry it. Decided by CONTENT: a file whose bytes after the run hash
+     * as they did when the pass read them is stable, whatever its mtime or ctime say — a test
+     * that rewrites a watched fixture with the same bytes must not unstamp every test under
+     * the pattern on every pass. The stat() only saves the re-read: unchanged, and not changed
+     * within a second of the read, the content cannot have moved.
+     *
+     * Two cases are refused. A file first read after the tests started, and changed since
+     * shortly before they did: there is no earlier content to compare with. A file whose
+     * content really differs now, since the tests may have read either version. The case this
+     * cannot see: content changed during the run and changed back to the same bytes before it
+     * ended (an A → B → A rewrite); the stamp then says A although some test may have read B.
      * A file that never existed is stable while it still does not.
      */
     public function stable(string $relative): bool
@@ -170,27 +255,19 @@ final class FileHashes
 
         $now = self::statOf($this->absolute($relative));
 
-        if ($now !== $entry['stat']) {
-            return $this->stable[$relative] = false;
+        if ($now === null || $entry['stat'] === null) {
+            return $this->stable[$relative] = $now === $entry['stat'];
         }
 
-        if ($now === null) {
+        if ($entry['afterStart'] && $this->runStart !== null) {
+            return $this->stable[$relative] = $now === $entry['stat'] && $now[2] < $this->runStart - 1;
+        }
+
+        if ($now === $entry['stat'] && $now[2] < $entry['readAt'] - 1) {
             return $this->stable[$relative] = true;
         }
 
-        $ctime = $now[2];
-
-        if ($entry['afterStart'] && $this->runStart !== null && $ctime >= $this->runStart - 1) {
-            return $this->stable[$relative] = false;
-        }
-
-        // Changed within a second of being read: the same stat() cannot prove the content did
-        // not change again in that second, the content itself can.
-        if ($ctime >= $entry['readAt'] - 1) {
-            return $this->stable[$relative] = ContentHash::of($this->absolute($relative)) === $entry['hash'];
-        }
-
-        return $this->stable[$relative] = true;
+        return $this->stable[$relative] = ContentHash::of($this->absolute($relative)) === $entry['hash'];
     }
 
     /** Writes what this pass learnt for the next one. */

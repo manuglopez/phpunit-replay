@@ -54,7 +54,7 @@ final class NonEdgeInputsTest extends TestCase
 
         self::assertNotNull($digest);
         self::assertStringStartsWith(NonEdgeInputs::VERSION . ':', $digest);
-        self::assertSame('n2', NonEdgeInputs::VERSION);
+        self::assertSame('n3', NonEdgeInputs::VERSION);
         self::assertSame($digest, $this->inputs()->digestFor('tests/ATest.php'));
     }
 
@@ -186,6 +186,56 @@ final class NonEdgeInputsTest extends TestCase
         self::assertNotSame($b, $this->inputs(extraRules: $rules)->digestFor('tests/BTest.php'));
     }
 
+    public function test_a_migration_for_tables_no_test_records_is_an_input_of_every_database_test(): void
+    {
+        $this->repo->write('database/migrations/2030_create_widgets.php', "<?php\nSchema::create('widgets', function () {});\n");
+        $this->graph->replaceTestTables(['tests/ATest.php' => ['users']]);
+        $rules = ['migration' => new MigrationRule()];
+
+        $a = $this->inputs(extraRules: $rules)->digestFor('tests/ATest.php');
+        $b = $this->inputs(extraRules: $rules)->digestFor('tests/BTest.php');
+
+        $this->repo->write('database/migrations/2030_create_widgets.php', "<?php\nSchema::create('widgets', function () { \$x = 1; });\n");
+
+        self::assertNotSame($a, $this->inputs(extraRules: $rules)->digestFor('tests/ATest.php'), 'A uses the database');
+        self::assertSame($b, $this->inputs(extraRules: $rules)->digestFor('tests/BTest.php'), 'B records no table');
+    }
+
+    public function test_a_file_coverage_cannot_see_stays_every_test_s_input_when_another_test_has_an_edge_to_it(): void
+    {
+        $this->repo->write('app/Providers/AppServiceProvider.php', "<?php\nfinal class AppServiceProvider {}\n");
+        $scope = new SourceScope([$this->repo->root . '/app'], [$this->repo->root . '/app/Providers'], [realpath($this->repo->root) . '/app/Providers']);
+        // A static-declaration or once-process edge: A records it, B still boots it.
+        $this->graph->unionEdges(['tests/ATest.php' => ['app/Providers/AppServiceProvider.php']]);
+
+        $b = $this->inputs(scope: $scope)->digestFor('tests/BTest.php');
+        $this->repo->write('app/Providers/AppServiceProvider.php', "<?php\nfinal class AppServiceProvider { public int \$x = 1; }\n");
+
+        self::assertNotSame($b, $this->inputs(scope: $scope)->digestFor('tests/BTest.php'));
+    }
+
+    public function test_a_template_no_rule_claims_is_every_test_s_input_through_the_views_fallback(): void
+    {
+        $this->repo->write('resources/views/home.blade.php', "@include('partial')\n");
+        $this->repo->write('resources/views/partial.blade.php', "<p>one</p>\n");
+        $this->graph->unionEdges(['tests/ATest.php' => ['resources/views/home.blade.php']]);
+        $rules = ['blade' => new BladeRule()];
+        $fallback = ['resources/views/**' => ['tests']];
+
+        $a = $this->inputs(extraRules: $rules, fallback: $fallback)->digestFor('tests/ATest.php');
+        $b = $this->inputs(extraRules: $rules, fallback: $fallback)->digestFor('tests/BTest.php');
+
+        // An error page, a pagination override: nothing references it.
+        $this->repo->write('resources/views/errors/404.blade.php', "<h1>gone</h1>\n");
+        self::assertNotSame($a, $this->inputs(extraRules: $rules, fallback: $fallback)->digestFor('tests/ATest.php'));
+        self::assertNotSame($b, $this->inputs(extraRules: $rules, fallback: $fallback)->digestFor('tests/BTest.php'));
+
+        // A template the Blade rule attributes is not the fallback's.
+        $b = $this->inputs(extraRules: $rules, fallback: $fallback)->digestFor('tests/BTest.php');
+        $this->repo->write('resources/views/partial.blade.php', "<p>two</p>\n");
+        self::assertSame($b, $this->inputs(extraRules: $rules, fallback: $fallback)->digestFor('tests/BTest.php'));
+    }
+
     public function test_a_new_sibling_is_an_input_of_the_tests_depending_on_its_directory(): void
     {
         $this->repo->write('app/Providers/AppProvider.php', "<?php\nfinal class AppProvider {}\n");
@@ -279,6 +329,7 @@ final class NonEdgeInputsTest extends TestCase
     /**
      * @param array{migration?: MigrationRule, sibling?: SiblingRule, blade?: BladeRule} $extraRules
      * @param array<string, list<string>> $watch
+     * @param array<string, list<string>> $fallback
      */
     private function inputs(
         bool $staticDeclarationEdges = false,
@@ -287,9 +338,11 @@ final class NonEdgeInputsTest extends TestCase
         ?string $stateDir = null,
         ?SourceScope $scope = null,
         ?FileHashes $hashes = null,
+        array $fallback = [],
     ): NonEdgeInputs {
         $patterns = new WatchPatterns();
         $patterns->add(['tests/**/Fixtures/**' => ['tests'], ...$watch]);
+        $patterns->addFallback($fallback);
 
         return new NonEdgeInputs(
             $this->graph,

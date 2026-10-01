@@ -42,11 +42,11 @@ final readonly class LastRunTree
         $tree = [];
 
         foreach ($decoded['tree'] as $key => $value) {
-            if (! is_string($key) || ! is_string($value)) {
+            if (! is_string($value)) {
                 return null;
             }
 
-            $tree[$key] = $value;
+            $tree[(string) $key] = $value;
         }
 
         if (! array_key_exists('finishedAt', $decoded) || ! is_int($decoded['finishedAt'])) {
@@ -144,13 +144,13 @@ final readonly class LastRunTree
             $all[$file] = true;
         }
 
-        foreach (array_keys($this->tree) as $file) {
+        foreach (array_map(strval(...), array_keys($this->tree)) as $file) {
             $all[$file] = true;
         }
 
         $remaining = [];
 
-        foreach (array_keys($all) as $file) {
+        foreach (array_map(strval(...), array_keys($all)) as $file) {
             $snapshot = $this->tree[$file] ?? null;
             $current = $changedFiles->currentHash($file);
 

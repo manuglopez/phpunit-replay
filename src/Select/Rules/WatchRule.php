@@ -19,9 +19,12 @@ use Manuglopez\Replay\Select\Rule;
  * so letting `PhpEdgeRule` consume such a file silently dropped every other test the pattern
  * named.
  *
- * The residue patterns (`Select\ResiduePatterns`, registered with
- * `WatchPatterns::addFallback()`) are the opposite: "nothing attributes this file", so they
- * apply only to a file no rule claimed.
+ * The fallback patterns (`WatchPatterns::addFallback()`) are the opposite, "nothing attributed
+ * this file", so they apply only to a file no rule claimed: the `static_declaration_edges`
+ * residue, and the Laravel `resources/views/**` / `database/migrations/**` defaults while the
+ * Laravel rules run. A `.php` file coverage cannot see at all (`<source><exclude>`,
+ * `WatchPatterns::addUnattributable()`) is additive like a configured pattern: any edge it has
+ * is a name reference, which does not say who executes it.
  */
 final class WatchRule implements Rule
 {
@@ -36,7 +39,7 @@ final class WatchRule implements Rule
         $remaining = array_fill_keys($context->remaining, true);
 
         foreach ($context->changed as $rel) {
-            $matches = $context->watch->matches($rel);
+            $matches = $context->watch->matches($rel) + $context->watch->unattributableMatches($rel);
 
             if (isset($remaining[$rel])) {
                 $matches += $context->watch->fallbackMatches($rel);

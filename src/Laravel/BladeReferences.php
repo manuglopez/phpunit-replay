@@ -16,13 +16,23 @@ use SplFileInfo;
  *
  * Static (non-executed) Blade dependency walk: `ancestorsOf('resources/views/partials/x.blade.php', root)`
  * returns every other Blade file that references it, directly or transitively, via
- * `@include`/`@includeIf`/`@includeWhen`/`@includeUnless`/`@extends`/`@component`/`@each`,
+ * `@include`/`@includeIf`/`@includeWhen`/`@includeUnless`/`@includeFirst`/`@extends`/`@component`/`@each`,
  * `view('x')`/`View::make('x')`, or a matching `<x-name` component tag.
  */
 final class BladeReferences
 {
     /** Bumped whenever {@see self::sourceReferences()} changes what it recognises. */
-    private const CACHE_VERSION = 'blade-references@1';
+    private const CACHE_VERSION = 'blade-references@2';
+
+    /**
+     * This process's own copy of what {@see self::referenceMap()} resolved, by the same key a
+     * cache file uses: root, path list hash, and per template its raw content hash. Two callers
+     * in one pass (`Rules\BladeRule`, `Select\NonEdgeInputs`) resolve the tree once, and an
+     * edited template is resolved again since its content hash moved.
+     *
+     * @var array<string, array<string, array{h: string, r: list<string>}>>
+     */
+    private static array $memo = [];
 
     /**
      * The templates `$roots` reference, directly or transitively, over a
@@ -51,101 +61,82 @@ final class BladeReferences
         return $seen;
     }
 
-    /** @return list<string> Project-relative Blade files that statically depend on $bladeRel, directly or transitively. */
-    public static function ancestorsOf(string $bladeRel, string $projectRoot): array
+    /**
+     * Project-relative Blade files that statically depend on `$bladeRel`, directly or
+     * transitively, sorted: the reverse closure of {@see self::referenceMap()}. A template not
+     * in the map — deleted, or not written yet — is looked up against every template's source.
+     *
+     * @return list<string>
+     */
+    public static function ancestorsOf(string $bladeRel, string $projectRoot, ?string $cacheFile = null): array
     {
-        $allBladeFiles = self::allBladeFiles($projectRoot);
-
-        if ($allBladeFiles === []) {
-            return [];
-        }
-
-        $targets = [$bladeRel => true];
-        $ancestors = [];
-        $changed = true;
-
-        while ($changed) {
-            $changed = false;
-
-            foreach ($allBladeFiles as $candidate) {
-                if (isset($targets[$candidate]) || isset($ancestors[$candidate])) {
-                    continue;
-                }
-
-                $source = @file_get_contents(rtrim($projectRoot, '/') . '/' . $candidate);
-
-                if ($source === false) {
-                    continue;
-                }
-
-                foreach (array_keys($targets) as $target) {
-                    if (self::sourceReferences($source, $target)) {
-                        $ancestors[$candidate] = true;
-                        $targets[$candidate] = true;
-                        $changed = true;
-
-                        break;
-                    }
-                }
-            }
-        }
-
-        return array_keys($ancestors);
+        return self::ancestorsOfEach([$bladeRel], $projectRoot, $cacheFile)[$bladeRel] ?? [];
     }
 
     /**
-     * {@see self::ancestorsOf()} for several templates at once, reading every template once
-     * instead of once per target and per round (`Select\NonEdgeInputs` asks it of every
-     * template the graph does not know, on every pass). Same fixpoint, same references, so
-     * the same answer per template.
+     * {@see self::ancestorsOf()} for every template of `$bladeRels` over ONE resolution of the
+     * tree (`Rules\BladeRule`, with the pass's changed templates): the map is listed, read and
+     * validated once, and its reverse index built once, however many templates changed.
      *
-     * @param list<string> $bladeRels project-relative
-     * @return array<string, list<string>> template => its ancestors
+     * @param list<string> $bladeRels
+     * @return array<string, list<string>> template => its ancestors, sorted
      */
-    public static function ancestorsOfMany(array $bladeRels, string $projectRoot): array
+    public static function ancestorsOfEach(array $bladeRels, string $projectRoot, ?string $cacheFile = null): array
     {
+        $out = array_fill_keys($bladeRels, []);
+
         if ($bladeRels === []) {
-            return [];
+            return $out;
         }
 
-        $sources = [];
+        $map = self::referenceMap($projectRoot, $cacheFile);
 
-        foreach (self::allBladeFiles($projectRoot) as $candidate) {
-            $source = @file_get_contents(rtrim($projectRoot, '/') . '/' . $candidate);
+        if ($map === []) {
+            return $out;
+        }
 
-            if ($source !== false) {
-                $sources[$candidate] = $source;
+        $referrers = [];
+
+        foreach ($map as $source => $targets) {
+            foreach ($targets as $target) {
+                $referrers[$target][] = (string) $source;
             }
         }
 
-        $out = [];
-
         foreach ($bladeRels as $bladeRel) {
-            $targets = [$bladeRel => true];
-            $ancestors = [];
-            $changed = $sources !== [];
+            $queue = [];
 
-            while ($changed) {
-                $changed = false;
+            if (isset($map[$bladeRel])) {
+                $queue = $referrers[$bladeRel] ?? [];
+            } else {
+                foreach (array_keys($map) as $candidate) {
+                    $source = @file_get_contents(rtrim($projectRoot, '/') . '/' . $candidate);
 
-                foreach ($sources as $candidate => $source) {
-                    if (isset($targets[$candidate]) || isset($ancestors[$candidate])) {
-                        continue;
-                    }
-
-                    foreach (array_keys($targets) as $target) {
-                        if (self::sourceReferences($source, (string) $target)) {
-                            $ancestors[$candidate] = true;
-                            $targets[$candidate] = true;
-                            $changed = true;
-
-                            break;
-                        }
+                    if ($source !== false && self::sourceReferences($source, $bladeRel)) {
+                        $queue[] = (string) $candidate;
                     }
                 }
             }
 
-            $out[$bladeRel] = array_map(strval(...), array_keys($ancestors));
+            $ancestors = [];
+
+            while ($queue !== []) {
+                $current = array_pop($queue);
+
+                if ($current === $bladeRel || isset($ancestors[$current])) {
+                    continue;
+                }
+
+                $ancestors[$current] = true;
+
+                foreach ($referrers[$current] ?? [] as $referrer) {
+                    $queue[] = $referrer;
+                }
+            }
+
+            $list = array_map(strval(...), array_keys($ancestors));
+            sort($list);
+            $out[$bladeRel] = $list;
         }
 
         return $out;
@@ -209,7 +200,7 @@ final class BladeReferences
         if ($view !== null) {
             $quoted = preg_quote($view, '#');
 
-            if (preg_match('#@(include|includeIf|includeWhen|includeUnless|extends|component|each)\s*\([^)]*[\'"]' . $quoted . '[\'"]#', $source) === 1) {
+            if (preg_match('#@(include|includeIf|includeWhen|includeUnless|includeFirst|extends|component|each)\s*\([^)]*[\'"]' . $quoted . '[\'"]#', $source) === 1) {
                 return true;
             }
 
@@ -261,9 +252,10 @@ final class BladeReferences
         }
 
         $pathsKey = hash('xxh128', self::CACHE_VERSION . "\n" . implode("\n", $templates));
-        $cached = [];
+        $memoKey = $projectRoot . "\0" . $pathsKey;
+        $cached = self::$memo[$memoKey] ?? [];
 
-        if ($cacheFile !== null) {
+        if ($cached === [] && $cacheFile !== null) {
             $data = json_decode((string) @file_get_contents($cacheFile), true);
 
             if (is_array($data) && ($data['paths'] ?? null) === $pathsKey && is_array($data['entries'] ?? null)) {
@@ -303,7 +295,9 @@ final class BladeReferences
             $entries[$template] = ['h' => $hash, 'r' => $refs];
         }
 
-        if ($cacheFile !== null && ($dirty || count($entries) !== count($cached))) {
+        self::$memo = [$memoKey => $entries];
+
+        if ($cacheFile !== null && ($dirty || count($entries) !== count($cached) || ! is_file($cacheFile))) {
             $json = json_encode(['paths' => $pathsKey, 'entries' => $entries], JSON_UNESCAPED_SLASHES);
 
             if ($json !== false) {

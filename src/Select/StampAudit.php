@@ -93,6 +93,7 @@ final readonly class StampAudit
             $masked = [];
 
             foreach ($byFile as $file => $results) {
+                $file = (string) $file;
                 $current[$file] ??= ['key' => ($this->key)($file), 'digest' => ($this->digest)($file)];
                 $why = null;
                 $ids = [];

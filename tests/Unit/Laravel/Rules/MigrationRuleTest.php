@@ -59,14 +59,16 @@ final class MigrationRuleTest extends TestCase
         self::assertSame('posts', $reason->detail);
     }
 
-    public function test_consumes_a_parseable_migration_even_when_no_test_table_intersects(): void
+    public function test_a_migration_whose_tables_no_test_records_runs_every_database_test(): void
     {
         $this->write(
             'database/migrations/2024_01_01_000000_create_widgets_table.php',
             "<?php\nSchema::create('widgets', function (\$table) {});\n",
         );
 
-        $graph = new Graph($this->root);
+        // No test queries `widgets` yet, and every test that migrates a database runs this
+        // migration: one that throws breaks all of them.
+        $graph = $this->graphWithTwoTests();
         $graph->replaceTestTables(['tests/PostsTest.php' => ['posts']]);
 
         $selection = new Selection();
@@ -74,7 +76,7 @@ final class MigrationRuleTest extends TestCase
 
         (new MigrationRule())->apply($context);
 
-        self::assertSame([], $selection->testFiles());
+        self::assertSame(['tests/PostsTest.php'], $selection->testFiles(), 'the database tests, not the one without tables');
         self::assertSame([], $context->remaining);
     }
 

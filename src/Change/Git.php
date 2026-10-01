@@ -155,7 +155,8 @@ final readonly class Git
             }
         }
 
-        return array_keys($files);
+        // A path like `2024` is an int array key: every key goes back out as the string it was.
+        return array_map(strval(...), array_keys($files));
     }
 
     /**

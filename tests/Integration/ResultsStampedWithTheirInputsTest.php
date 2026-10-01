@@ -289,6 +289,30 @@ final class ResultsStampedWithTheirInputsTest extends TestCase
         self::assertSame(35, ReplayAssert::replayedCount($then['stdout']), ReplayAssert::lastLine($then['stdout']));
     }
 
+    public function test_a_file_with_a_numeric_name_at_the_root_is_hashed_like_any_other(): void
+    {
+        // `2024`, `404`: PHP turns a numeric string array key into an int, and every map
+        // keyed by path handed one to a `string` parameter.
+        $fixture = $this->recordedPlain();
+        $fixture->write('2024', "notes\n");
+        $fixture->repo->commitAll('a file named 2024');
+
+        $recorded = $fixture->replay(['record'], self::env());
+        self::assertSame(0, $recorded['exitCode'], $recorded['stdout'] . $recorded['stderr']);
+
+        $fixture->write('2024', "more notes\n");
+        $fixture->write('404', "new\n");
+
+        $dirty = $fixture->replay([], self::env());
+        self::assertSame(0, $dirty['exitCode'], $dirty['stdout'] . $dirty['stderr']);
+        self::assertStringNotContainsString('TypeError', $dirty['stdout'] . $dirty['stderr']);
+
+        $again = $fixture->replay([], self::env());
+        self::assertSame(0, $again['exitCode'], $again['stdout'] . $again['stderr']);
+        self::assertSame(0, ReplayAssert::executedCount($again['stdout']), ReplayAssert::lastLine($again['stdout']));
+        self::assertSame(35, ReplayAssert::replayedCount($again['stdout']), ReplayAssert::lastLine($again['stdout']));
+    }
+
     public function test_push_graph_refuses_a_dirty_tree_and_still_publishes_objects(): void
     {
         $shared = TempDir::make('shared');

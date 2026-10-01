@@ -63,8 +63,11 @@ final class RunListBuilder
         // SPEC.md §4.3.1: whatever nothing could attribute is covered conservatively rather
         // than dropped — with the flag, any `.php` file without an edge; always, a `.php`
         // file `<source><exclude>` keeps out of coverage. Added before the rule chain runs so
-        // Rules\WatchRule sees it, as a fallback: only for what no rule claimed.
-        $this->watch->addFallback($this->residue()->for($changed));
+        // Rules\WatchRule sees it: the first as a fallback, for what no rule claimed; the second
+        // on every changed file, since coverage cannot say who executes it.
+        $residue = $this->residue();
+        $this->watch->addFallback($residue->for($changed));
+        $this->watch->addUnattributable($residue->unattributableFor($changed));
 
         $selection = Selector::default($this->graph, $this->testPaths, $this->watch, $this->projectRoot, $this->extraRules)
             ->affected($changed);
@@ -177,7 +180,9 @@ final class RunListBuilder
     public function select(array $changed): Selection
     {
         $watch = clone $this->watch;
-        $watch->addFallback($this->residue()->for($changed));
+        $residue = $this->residue();
+        $watch->addFallback($residue->for($changed));
+        $watch->addUnattributable($residue->unattributableFor($changed));
 
         return Selector::default($this->graph, $this->testPaths, $watch, $this->projectRoot, $this->extraRules)
             ->affected($changed);

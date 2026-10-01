@@ -69,7 +69,7 @@ final readonly class ChangedFiles
             return null;
         }
 
-        $candidates = array_keys($filtered);
+        $candidates = array_map(strval(...), array_keys($filtered));
 
         if ($sha !== null && $sha !== '') {
             $candidates = $this->filterContentUnchanged($candidates, $sha);
@@ -183,7 +183,7 @@ final readonly class ChangedFiles
             return $candidates;
         }
 
-        $ignored = $this->git->ignored(array_keys($candidates));
+        $ignored = $this->git->ignored(array_map(strval(...), array_keys($candidates)));
 
         if ($ignored === null) {
             return null;

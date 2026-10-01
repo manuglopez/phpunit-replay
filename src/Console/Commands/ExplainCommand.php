@@ -81,9 +81,11 @@ final class ExplainCommand extends Command
         // SPEC.md §4.3.1: the same conservative watch fallback Select\RunListBuilder adds on
         // a real pass, through the same object — `explain` has to show the plan a real run
         // would produce, not a rosier one.
-        $watch->addFallback((new ResiduePatterns($graph, $testPaths, $config->staticDeclarationEdges, $scope, $watch))->for([$rel]));
+        $residue = new ResiduePatterns($graph, $testPaths, $config->staticDeclarationEdges, $scope, $watch);
+        $watch->addFallback($residue->for([$rel]));
+        $watch->addUnattributable($residue->unattributableFor([$rel]));
 
-        $extraRules = LaravelIntegration::rulesFor($graph, $root, $config);
+        $extraRules = LaravelIntegration::rulesFor($graph, $root, $config, $stateDir);
         $selection = Selector::default($graph, $testPaths, $watch, $root, $extraRules)->affected([$rel]);
         $runList = new RunList($selection, [], [], []);
 

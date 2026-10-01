@@ -141,22 +141,6 @@ final class RunList
     }
 
     /**
-     * A copy of this list with the given files dropped from {@see self::$selection} only
-     * (SPEC.md §9, docs/INTERNALS.md "Pipeline changes": a test file whose content key was
-     * found on the remote leaves the run list — its tests then decide from the merged-in
-     * cached result instead of re-running). Every other bucket is passed through unchanged:
-     * a file eligible for this in the first place is never one already held for another
-     * reason (unknown/rerun/quarantined/not-cacheable files are excluded from remote-replay
-     * eligibility by the caller).
-     *
-     * @param list<string> $files
-     */
-    public function withoutFromSelection(array $files): self
-    {
-        return $this->withoutServed($files, false);
-    }
-
-    /**
      * A copy without these files in the selection or the stale bucket: the files a remote
      * object stands in for (`PHPUnit\ReplayState`, `Cache\Remote\Exchange::served()`), which
      * then decide from the results merged in for them. Their stale reason is kept, so `--explain`
@@ -164,7 +148,7 @@ final class RunList
      *
      * @param list<string> $files
      */
-    public function withoutServed(array $files, bool $fromStale = true): self
+    public function withoutServed(array $files): self
     {
         if ($files === []) {
             return $this;
@@ -193,7 +177,7 @@ final class RunList
             $this->notCacheable,
             $this->notCacheableReasons,
             $this->noResult,
-            $fromStale ? array_values(array_diff($this->stale, $files)) : $this->stale,
+            array_values(array_diff($this->stale, $files)),
             $this->staleReasons,
         );
     }

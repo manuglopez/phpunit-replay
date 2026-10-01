@@ -11,6 +11,7 @@ use Manuglopez\Replay\Config;
 use Manuglopez\Replay\Laravel\BladeReferences;
 use Manuglopez\Replay\Laravel\LaravelDetector;
 use Manuglopez\Replay\Laravel\LaravelIntegration;
+use Manuglopez\Replay\Laravel\Rules\BladeRule;
 use Manuglopez\Replay\Laravel\Rules\MigrationRule;
 use Manuglopez\Replay\Laravel\Rules\SiblingRule;
 use Manuglopez\Replay\PHPUnit\ConfigurationWriter;
@@ -36,38 +37,42 @@ use Manuglopez\Replay\Support\Paths;
  *
  * | scope | the rule it stands for | members, for test file T | carried by T when |
  * |---|---|---|---|
- * | `watch:<pattern>@2` | `Rules\WatchRule`, configured patterns (additive) | files matching the pattern | T is under one of its targets |
- * | `migrations@2` | `Laravel\Rules\MigrationRule` | migrations whose tables intersect T's; with no table to narrow by, every migration | always |
- * | `blade@2` | `Laravel\Rules\BladeRule` (additive) | templates the templates T depends on reference, transitively | always |
- * | `sibling:<dir>@2` | `Laravel\Rules\SiblingRule` | sibling candidates in `<dir>` no test has an edge to | T depends on a file in `<dir>` |
- * | `unattributable@1` | `ResiduePatterns::isUnattributable()` | `.php` files `<source><exclude>` keeps out of coverage, no configured pattern names, no rule claims | T is under the residue targets |
- * | `residue@2` | `ResiduePatterns`, `static_declaration_edges` only | `.php` files no test has an edge to that no rule claims | T is under the residue targets |
+ * | `watch:<pattern>@3` | `Rules\WatchRule`, configured patterns (additive) | files matching the pattern | T is under one of its targets |
+ * | `unattributable@2` | `ResiduePatterns::isUnattributable()` (additive) | `.php` files `<source><exclude>` keeps out of coverage that no configured pattern names | T is under the residue targets |
+ * | `blade@3` | `Laravel\Rules\BladeRule` (additive) | templates the templates T depends on reference, transitively | always |
+ * | `migrations@3` | `Laravel\Rules\MigrationRule` | migrations whose tables intersect T's | always |
+ * | `migrations:untouched@1` | `Laravel\Rules\MigrationRule` | migrations whose tables no test records | T records any table |
+ * | `migrations:unnarrowed@1` | `Laravel\Rules\MigrationRule` | migrations with no table to narrow by (or every one, while the graph records none) | T is under the residue targets |
+ * | `sibling:<dir>@3` | `Laravel\Rules\SiblingRule` | sibling candidates in `<dir>` no test has an edge to | T depends on a file in `<dir>` |
+ * | `fallback:<pattern>@1` | `Rules\WatchRule`, fallback patterns (the Laravel `resources/views/**` and `database/migrations/**` while the Laravel rules run) | files matching the pattern that no rule claims | T is under one of its targets |
+ * | `residue@3` | `ResiduePatterns`, `static_declaration_edges` only | `.php` files no test has an edge to that no rule claims | T is under the residue targets |
  *
  * **Every member set excludes T's own dependencies and T itself**: those are T's key inputs,
- * and the key already covers them. What a scope holds for T is therefore a function of the
- * tree, of T's own edges and tables, and of nothing another test records. Another test
- * gaining or losing an edge never moves T's digest; T gaining one moves that file from its
- * scope into its key, and re-runs T alone, once. This is only consistent with selection
- * because the rules behind the first three scopes are additive: a watch pattern or a Blade
- * reference applies to a changed file whatever other rule, or other test's edge, already
- * claimed it.
+ * and the key already covers them. For the first four scopes what a scope holds for T is a
+ * function of the tree and of T's own edges and tables, and of nothing another test records:
+ * another test gaining or losing an edge never moves them; T gaining one moves that file from
+ * its scope into its key, and re-runs T alone, once. That is consistent with selection because
+ * the rules behind them are additive: a configured watch pattern, a file coverage cannot see,
+ * a Blade reference apply to a changed file whatever other rule, or other test's edge,
+ * already claimed it.
  *
- * Two scopes stay relative to the graph's universe (the files some test has an edge to), by
- * what they mean: `SiblingRule` and the flag's residue are presumptions about files nothing
- * attributes yet. When such a file gains its first edge it leaves the scope, and the test
- * files that carried the scope re-run once; in the common case that is the same pass the
- * chain had already selected them in, for the new file. The step that decides it is
- * {@see self::inUniverse()}, alone.
+ * The others stay relative to what the graph records, by what they mean. `SiblingRule`, the
+ * fallback patterns and the flag's residue are about files nothing attributes yet: when such a
+ * file gains its first edge (or a template gains a rendered ancestor), it leaves the scope,
+ * and the test files that carried it re-run once — in the common case the pass that ran them
+ * all for the new file anyway. `migrations:untouched@1` moves when some test records its
+ * table for the first time. The steps that decide it are {@see self::inUniverse()} and
+ * {@see self::claimedByBlade()}.
  *
  * ```
- * digest(T)       = "n2:" . xxh128("nonedge@2\n" . Σ sorted "<scope id>=<scope digest>\n")
+ * digest(T)       = "n3:" . xxh128("nonedge@3\n" . Σ sorted "<scope id>=<scope digest>\n")
  *                   over the scopes T carries that have at least one member
  * scope digest(T) = hex(⊕ xxh128(path . "\0" . ContentHash(path))) . ":" . |members|
  * ```
  *
  * A scope digest is an XOR over its members, so a scope shared by hundreds of test files is
  * hashed once and each test file's own dependencies are taken out of it in constant time per
- * dependency. `n2` is the version token: anything that changes what a digest means changes
+ * dependency. `n3` is the version token: anything that changes what a digest means changes
  * it, and a stamp with another version never matches. A null digest means it could not be
  * computed (git failed): nothing is stamped with it and nothing stamped validates against it.
  *
@@ -79,15 +84,18 @@ use Manuglopez\Replay\Support\Paths;
  */
 final class NonEdgeInputs
 {
-    public const VERSION = 'n2';
+    public const VERSION = 'n3';
 
-    private const MATERIAL = "nonedge@2\n";
+    private const MATERIAL = "nonedge@3\n";
 
     /** @var list<string>|null|false present files, false until listed, null when git failed */
     private array|false|null $tree = false;
 
     /** @var array<string, array<string, list<string>>> path => configured pattern => targets */
     private array $watchMatches = [];
+
+    /** @var array<string, array<string, list<string>>> path => fallback pattern => targets */
+    private array $fallbackMatches = [];
 
     /** @var array<string, list<string>> migration path => lowercased tables */
     private array $migrationTables = [];
@@ -134,7 +142,7 @@ final class NonEdgeInputs
      *        pass runs (their presence is all that is read), as for {@see RunListBuilder}
      * @param WatchPatterns $watch the configured patterns only — never an instance
      *        {@see RunListBuilder::build()} has added the residue of a change set to
-     * @param SourceScope|null $scope the coverage scope, for the `unattributable@1` scope
+     * @param SourceScope|null $scope the coverage scope, for the `unattributable@2` scope
      */
     public function __construct(
         private readonly Graph $graph,
@@ -178,7 +186,7 @@ final class NonEdgeInputs
             $projectRoot,
             $hashes,
             $git,
-            LaravelIntegration::rulesFor($graph, $projectRoot, $config),
+            LaravelIntegration::rulesFor($graph, $projectRoot, $config, $stateDir),
             $config->staticDeclarationEdges,
             $stateDir,
             $scope,
@@ -291,13 +299,18 @@ final class NonEdgeInputs
             return null;
         }
 
-        $own = array_fill_keys($this->graph->dependenciesOf($testFile), true);
-        $own[$testFile] = true;
+        $own = [];
+
+        foreach ([...$this->graph->dependenciesOf($testFile), $testFile] as $path) {
+            $own[$path] = true;
+        }
+
+        $tables = array_fill_keys($this->graph->testTables()[$testFile] ?? [], true);
         $underResidueTargets = $this->watch->testsUnderDirectories($this->residueTargets, [$testFile]) !== [];
         $scopes = [];
 
         foreach ($state['shared'] as $id => $scope) {
-            if ($this->carries($testFile, $id, $state, $own, $underResidueTargets)) {
+            if ($this->carries($testFile, (string) $id, $state, $own, $underResidueTargets, $tables !== [])) {
                 $scopes[$id] = ['acc' => $scope['acc'], 'count' => $scope['count']];
             }
         }
@@ -313,7 +326,6 @@ final class NonEdgeInputs
         }
 
         // MigrationRule, narrowed by the tables this test file was recorded touching.
-        $tables = array_fill_keys($this->graph->testTables()[$testFile] ?? [], true);
         $byTable = [];
 
         foreach ($tables === [] ? [] : $state['migrationsByTable'] as $path => $migrationTables) {
@@ -329,7 +341,7 @@ final class NonEdgeInputs
         }
 
         if ($byTable !== []) {
-            $scopes['migrations@2'] = self::merge($scopes['migrations@2'] ?? null, $this->accumulate($byTable), $byTable);
+            $scopes['migrations@3'] = ['acc' => $this->accumulate($byTable)['acc'], 'count' => count($byTable), 'members' => $byTable];
         }
 
         // BladeRule: what the templates this test file renders may include.
@@ -351,7 +363,7 @@ final class NonEdgeInputs
             }
 
             if ($blade !== []) {
-                $scopes['blade@2'] = ['acc' => $this->accumulate($blade)['acc'], 'count' => count($blade), 'members' => $blade];
+                $scopes['blade@3'] = ['acc' => $this->accumulate($blade)['acc'], 'count' => count($blade), 'members' => $blade];
             }
         }
 
@@ -362,17 +374,17 @@ final class NonEdgeInputs
      * @param array{watchTargets: array<string, list<string>>} $state
      * @param array<string, true> $own
      */
-    private function carries(string $testFile, string $id, array $state, array $own, bool $underResidueTargets): bool
+    private function carries(string $testFile, string $id, array $state, array $own, bool $underResidueTargets, bool $recordsTables): bool
     {
         if (isset($state['watchTargets'][$id])) {
             return $this->watch->testsUnderDirectories($state['watchTargets'][$id], [$testFile]) !== [];
         }
 
         if (str_starts_with($id, 'sibling:')) {
-            $dir = substr($id, strlen('sibling:'), -strlen('@2'));
+            $dir = substr($id, strlen('sibling:'), -strlen('@3'));
 
             foreach (array_keys($own) as $path) {
-                if (dirname((string) $path) === $dir && $path !== $testFile) {
+                if (dirname((string) $path) === $dir && (string) $path !== $testFile) {
                     return true;
                 }
             }
@@ -380,7 +392,11 @@ final class NonEdgeInputs
             return false;
         }
 
-        // residue@2, unattributable@1, and migrations@2's every-test half: the residue targets.
+        if ($id === 'migrations:untouched@1') {
+            return $recordsTables;
+        }
+
+        // residue@3, unattributable@2, migrations:unnarrowed@1: the residue targets.
         return $underResidueTargets;
     }
 
@@ -407,9 +423,24 @@ final class NonEdgeInputs
         }
 
         $migrationsActive = isset($this->extraRules['migration']);
-        $narrowByTable = $this->graph->testTables() !== [];
+        $testTables = $this->graph->testTables();
+        $recordedTables = [];
+
+        foreach ($testTables as $tables) {
+            foreach ($tables as $table) {
+                $recordedTables[$table] = true;
+            }
+        }
+
         $siblingsActive = isset($this->extraRules['sibling']);
         $dependentDirs = $siblingsActive ? $this->dependentDirectories() : [];
+        $bladeActive = isset($this->extraRules['blade']);
+
+        if ($bladeActive) {
+            $this->bladeMap ??= BladeReferences::referenceMap($this->projectRoot, BladeRule::cacheFileIn($this->stateDir));
+        }
+
+        $claimedByBlade = $bladeActive ? $this->claimedByBlade() : [];
 
         /** @var array<string, list<string>> $sets scope id => members */
         $sets = [];
@@ -420,12 +451,12 @@ final class NonEdgeInputs
         foreach ($tree as $rel) {
             // Rules\WatchRule: additive, whoever else claims the file (a test file included).
             foreach ($this->watchMatches($rel) as $pattern => $targets) {
-                $id = 'watch:' . $pattern . '@2';
+                $id = 'watch:' . $pattern . '@3';
                 $watchTargets[$id] = $targets;
                 $sets[$id][] = $rel;
             }
 
-            if (isset($this->extraRules['blade']) && BladeReferences::isBladePath($rel)) {
+            if ($bladeActive && BladeReferences::isBladePath($rel)) {
                 $templates[$rel] = true;
             }
 
@@ -433,17 +464,24 @@ final class NonEdgeInputs
                 continue;
             }
 
-            // Laravel\Rules\MigrationRule runs first and consumes every migration.
+            // A file coverage cannot see: additive, whatever else claims it or has an edge to it.
+            if ($this->residue->isUnattributable($rel)) {
+                $sets['unattributable@2'][] = $rel;
+            }
+
+            // Laravel\Rules\MigrationRule runs first and consumes every `.php` migration.
             if ($migrationsActive && MigrationRule::isMigrationPath($rel)) {
                 $tables = $this->migrationTables[$rel] ??= array_map(
                     strtolower(...),
                     MigrationRule::tablesForMigration($rel, $this->projectRoot),
                 );
 
-                if ($narrowByTable && $tables !== []) {
-                    $byTable[$rel] = $tables;
+                if ($testTables === [] || $tables === []) {
+                    $sets['migrations:unnarrowed@1'][] = $rel;
+                } elseif (array_intersect_key(array_flip($tables), $recordedTables) === []) {
+                    $sets['migrations:untouched@1'][] = $rel;
                 } else {
-                    $sets['migrations@2'][] = $rel;
+                    $byTable[$rel] = $tables;
                 }
 
                 continue;
@@ -454,15 +492,24 @@ final class NonEdgeInputs
             }
 
             if ($siblingsActive && SiblingRule::isSiblingCandidate($rel) && isset($dependentDirs[dirname($rel)])) {
-                $sets['sibling:' . dirname($rel) . '@2'][] = $rel;
+                $sets['sibling:' . dirname($rel) . '@3'][] = $rel;
 
                 continue;
             }
 
-            if ($this->residue->isUnattributable($rel)) {
-                $sets['unattributable@1'][] = $rel;
-            } elseif ($this->staticDeclarationEdges && ResiduePatterns::hasResidueShape($rel, $this->testPaths)) {
-                $sets['residue@2'][] = $rel;
+            if ($bladeActive && isset($claimedByBlade[$rel])) {
+                continue;
+            }
+
+            // What no rule claimed: the fallback patterns, and the flag's residue.
+            if ($this->staticDeclarationEdges && ResiduePatterns::hasResidueShape($rel, $this->testPaths)) {
+                $sets['residue@3'][] = $rel;
+            }
+
+            foreach ($this->fallbackMatches($rel) as $pattern => $targets) {
+                $id = 'fallback:' . $pattern . '@1';
+                $watchTargets[$id] = $targets;
+                $sets[$id][] = $rel;
             }
         }
 
@@ -514,10 +561,6 @@ final class NonEdgeInputs
             }
         }
 
-        if ($keptTemplates !== [] && $this->bladeMap === null) {
-            $cache = $this->stateDir !== null ? rtrim($this->stateDir, '/') . '/blade-references.json' : null;
-            $this->bladeMap = BladeReferences::referenceMap($this->projectRoot, $cache);
-        }
 
         return $this->state = [
             'shared' => $shared,
@@ -530,13 +573,38 @@ final class NonEdgeInputs
     }
 
     /**
-     * `Rules\PhpEdgeRule`'s step, for the two scopes that are presumptions about unattributed
-     * files (`SiblingRule`, the flag's residue): a file some test has an edge to is attributed,
-     * and leaves them. The one place a scope looks at the graph's universe.
+     * `Rules\PhpEdgeRule`'s step, for the scopes that are about unattributed files
+     * (`SiblingRule`, the fallback patterns, the flag's residue): a file some test has an edge
+     * to is attributed, and leaves them.
      */
     private function inUniverse(string $rel): bool
     {
         return $this->graph->isDependency($rel);
+    }
+
+    /**
+     * `Laravel\Rules\BladeRule`'s consumption: the templates it finds a test for — those a
+     * template some test depends on references, transitively — never reach the fallbacks.
+     *
+     * @return array<string, true>
+     */
+    private function claimedByBlade(): array
+    {
+        $rendered = [];
+
+        foreach (array_keys($this->bladeMap ?? []) as $template) {
+            if ($this->graph->isDependency((string) $template)) {
+                $rendered[] = (string) $template;
+            }
+        }
+
+        return BladeReferences::descendantsOf($this->bladeMap ?? [], $rendered);
+    }
+
+    /** @return array<string, list<string>> */
+    private function fallbackMatches(string $rel): array
+    {
+        return $this->fallbackMatches[$rel] ??= $this->watch->fallbackMatches($rel);
     }
 
     /**
@@ -552,21 +620,6 @@ final class NonEdgeInputs
         }
 
         return ['acc' => $acc, 'count' => count($paths)];
-    }
-
-    /**
-     * @param array{acc: string, count: int}|null $shared
-     * @param array{acc: string, count: int} $own
-     * @param list<string> $members
-     * @return array{acc: string, count: int, members: list<string>}
-     */
-    private static function merge(?array $shared, array $own, array $members): array
-    {
-        return [
-            'acc' => $shared === null ? $own['acc'] : $shared['acc'] ^ $own['acc'],
-            'count' => ($shared['count'] ?? 0) + $own['count'],
-            'members' => $members,
-        ];
     }
 
     private function element(string $path): string

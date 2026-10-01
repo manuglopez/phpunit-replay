@@ -185,7 +185,8 @@ It does not hand a `Quarantine` to its `GraphUpdater`, so one event is booked on
 Owner request (2026-09-07): teams without S3/MinIO should be able to share the cache through a
 dedicated git repository (not the code repo — its graph churns on every pass and would conflict).
 `GitRemoteCache` keeps a shallow mirror under the state dir, treats `objects/<month>/<k>.json` as
-append-only content-addressed files (no conflicts by construction), publishes `graph/**` only
+content-addressed files (append-only when this was decided; since result stamps they hold a variant
+per non-edge digest, merged with upstream on a rejected push), publishes `graph/**` only
 from CI (`remote_push=all`), and is garbage-collected by `prune --remote` (monthly shards +
 orphan squash). Setup, usage and alternatives (shared folder, HTTP, CI artifacts) are documented
 in the README. Contracts in docs/INTERNALS.md "Phase 3 contracts".

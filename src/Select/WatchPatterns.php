@@ -25,10 +25,18 @@ final class WatchPatterns
     private array $parsed = [];
 
     /**
-     * @var array<string, list<string>> residue patterns ({@see ResiduePatterns}): literal paths
-     *      of changed files nothing attributes, applied only to what no rule claimed
+     * @var array<string, list<string>> patterns applied only to a changed file no rule claimed:
+     *      the `static_declaration_edges` residue ({@see ResiduePatterns}, literal paths), and the
+     *      Laravel defaults the Laravel rules attribute ({@see WatchDefaults\Laravel::fallbacks()})
      */
     private array $fallback = [];
+
+    /**
+     * @var array<string, list<string>> literal paths of changed files coverage cannot see
+     *      ({@see ResiduePatterns::isUnattributable()}): applied to every changed file like a
+     *      configured pattern, and not one of them for {@see self::matches()}
+     */
+    private array $unattributable = [];
 
     /**
      * @param list<string> $testDirectories
@@ -50,6 +58,10 @@ final class WatchPatterns
             }
 
             $this->add($default->defaults($projectRoot, $testDirectories));
+
+            if ($default instanceof WatchDefaults\Laravel) {
+                $this->addFallback($default->fallbacks($testDirectories));
+            }
         }
     }
 
@@ -88,6 +100,20 @@ final class WatchPatterns
     public function fallbackPatterns(): array
     {
         return $this->fallback;
+    }
+
+    /** @param array<string, list<string>> $patterns a literal path → dirs */
+    public function addUnattributable(array $patterns): void
+    {
+        foreach ($patterns as $pattern => $dirs) {
+            $this->unattributable[$pattern] = array_values(array_unique(array_merge($this->unattributable[$pattern] ?? [], $dirs)));
+        }
+    }
+
+    /** @return array<string, list<string>> literal path → dirs, when `$changedFile` is one of them */
+    public function unattributableMatches(string $changedFile): array
+    {
+        return isset($this->unattributable[$changedFile]) ? [$changedFile => $this->unattributable[$changedFile]] : [];
     }
 
     /** @return array<string, list<string>> fallback pattern → dirs, for every one matching $changedFile */
