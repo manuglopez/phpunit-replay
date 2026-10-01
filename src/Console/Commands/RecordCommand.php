@@ -31,6 +31,7 @@ final class RecordCommand extends Command
             ->setName('record')
             ->setDescription('Runs the full suite and records a fresh baseline.')
             ->addOption('fresh', null, InputOption::VALUE_NONE, 'Ignore any cached baseline before recording.')
+            ->addOption('allow-ci-baseline', null, InputOption::VALUE_NONE, 'Allow a CI run to publish a branch baseline (SPEC §12.1).')
             ->addOption('parallel', 'p', InputOption::VALUE_OPTIONAL, 'Run through Paratest. N processes, or Paratest\'s own auto-detected count when omitted (SPEC §13).', false)
             ->addArgument('phpunit-args', InputArgument::IS_ARRAY | InputArgument::OPTIONAL, 'Everything forwarded to vendor/bin/phpunit.')
         ;
@@ -51,7 +52,7 @@ final class RecordCommand extends Command
             explain: false,
             dryRun: false,
             logJunit: null,
-            allowCiBaseline: false,
+            allowCiBaseline: $input->getOption('allow-ci-baseline') === true,
             record: true,
             parallel: RunRequest::parseParallel($input->getOption('parallel')),
         );
