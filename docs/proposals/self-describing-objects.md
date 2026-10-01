@@ -1,7 +1,6 @@
 # Proposal: find a result by what it was computed from, not by where it was recorded
 
-**Status: proposal, not implemented.** Nothing below exists in `src/` yet. Line references are
-to `main` at `0a96cef` (v0.10.0). The measurements come from one real project: a Laravel 13
+**Status: accepted; partly implemented.** The owner's decisions are recorded in "Decisions (2026-10-01)" below. v0.12.0 implemented the local half: every result is stamped with its content key and a digest of its non-edge inputs, and is served only while both match; a remote object holds up to 20 digest variants; the graph is published only from a clean tree. Still pending: the remote `v2/` layout (candidates found by test file and content, verified against the worktree), environment as result metadata with a consumer policy, normalised vendor inputs, `c2` hashes, and `composer.json` sections in the fingerprint. Line references below are to `main` at `0a96cef` (v0.10.0). The measurements come from one real project: a Laravel 13
 application, about 9,000 tests in 726 test files, sharing its cache through a dedicated git
 repository that held 3 branch graphs and 6,257 objects when it was measured. Anything this
 document states without a line reference or a measurement is marked **unverified**.
