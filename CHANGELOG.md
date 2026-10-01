@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.12.1] — 2026-10-01
+
+### Fixed
+
+- **Fix: a single test that errored, rather than failed, kept the whole suite from ever getting a baseline.** PHPUnit exits 2 as soon as one test errors (an uncaught exception, a missing table), against 1 for a failure. The wrapper counted only 0 and 1 as a pass that ran to the end, so a `record` with one erroring test saved its results without a sha. The next pass found no cached baseline and recorded the whole suite again, and so did every pass after it for as long as that test kept erroring. On a real application, three erroring tests in one file were enough to turn a no-change `run` into a full 10,957-test recording. An error is an outcome like a failure: the test ran and its result is recorded, and it re-runs on the next pass like any failure. A pass now counts as complete on exit 0, 1 or 2. Only a run that stopped early (aborted or truncated) or never finished (a crash or a signal) is incomplete. The in-process path never had the problem, because it never looked at the exit code.
+- **Fix: `record` announced a baseline it had not saved.** The summary line printed `baseline <branch>@<HEAD>` whether or not the pass finalized one. A CI run without `--allow-ci-baseline`, or an incomplete pass, saves results but no baseline, and the line now leaves the segment out instead of naming a sha the graph does not hold.
+
 ## [0.12.0] — 2026-10-01
 
 ### Fixed

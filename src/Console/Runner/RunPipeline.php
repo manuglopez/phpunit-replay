@@ -704,7 +704,7 @@ final class RunPipeline
             $partial = LaravelIntegration::augment($partial, $root);
         }
 
-        $complete = ! (bool) ($partial->meta['truncated'] ?? false) && in_array($exitCode, [0, 1], true);
+        $complete = self::ranToTheEnd($partial, $exitCode);
 
         $updater = $this->updater($graph, $this->quarantine);
         $applied = $updater->apply($partial, $this->branch, recordsEdges: true, complete: $complete);
@@ -839,7 +839,7 @@ final class RunPipeline
             return $exitCode;
         }
 
-        $complete = ! (bool) ($partial->meta['truncated'] ?? false) && in_array($exitCode, [0, 1], true);
+        $complete = self::ranToTheEnd($partial, $exitCode);
 
         // No quarantine passed here: divergences are detected explicitly below (reason
         // 'divergence', not the generic 'flip' GraphUpdater's own detection would use).
@@ -1233,7 +1233,7 @@ final class RunPipeline
             $partial = LaravelIntegration::augment($partial, $root);
         }
 
-        $complete = ! (bool) ($partial->meta['truncated'] ?? false) && in_array($exitCode, [0, 1], true);
+        $complete = self::ranToTheEnd($partial, $exitCode);
 
         $updater = $this->updater($graph, $this->quarantine);
         $applied = $updater->apply($partial, $this->branch, recordsEdges: $recordsEdges, complete: $complete);
@@ -1653,6 +1653,21 @@ final class RunPipeline
         return Summary::label(false) . '  ' . $message;
     }
 
+    /**
+     * Whether the PHPUnit process ran the selection to the end, which is what lets a pass
+     * finalize its baseline. Exit codes 0 (success), 1 (a failure or a configured issue) and
+     * 2 all qualify: PHPUnit returns 2 as soon as one test *errors*
+     * (`ShellExitCodeCalculator`: `hasErrors()` → `EXCEPTION_EXIT`), and an error is an
+     * outcome recorded like a failure. Counting only 0 and 1 meant a suite with a single
+     * erroring test never got a baseline and recorded everything again on every pass. What
+     * makes a pass incomplete is that it stopped early (`meta.truncated`, set on
+     * ExecutionAborted) or never finished (a crash or a signal: any other code).
+     */
+    private static function ranToTheEnd(RunPartial $partial, int $exitCode): bool
+    {
+        return ! (bool) ($partial->meta['truncated'] ?? false) && in_array($exitCode, [0, 1, 2], true);
+    }
+
     private function printRecordSummary(RunPartial $partial, int $excludedEdges): void
     {
         $graph = $this->graph;
@@ -1663,6 +1678,10 @@ final class RunPipeline
 
         $stats = $graph->stats();
         $graphBytes = @filesize($this->store->path());
+        // The sha the graph actually holds for this branch, not HEAD: a pass that was not
+        // finalized (CI without --allow-ci-baseline, an aborted run) saved results but no
+        // baseline, and the line must not announce one.
+        $saved = $this->persist ? $graph->ownRecordedSha($this->branch) : null;
 
         $summary = Summary::recorded(
             count($partial->results),
@@ -1672,8 +1691,8 @@ final class RunPipeline
             $excludedEdges,
             $graphBytes !== false ? $graphBytes : 0,
             microtime(true) - $this->startedAt,
-            $this->persist ? $this->branch : null,
-            $this->persist ? $this->head : null,
+            $saved !== null ? $this->branch : null,
+            $saved,
         );
 
         fwrite(STDOUT, $summary->format() . PHP_EOL);
