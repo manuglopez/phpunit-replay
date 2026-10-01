@@ -857,7 +857,22 @@ Each step ships on its own and is useful without the next. None changes what `ru
    because a hint is only worth showing once its findings are trustworthy, and the precision
    check after step 3 is what says so.
 
-## Open questions for the owner
+## Decisions (2026-10-01)
+
+The owner chose the recommended option on every open question below.
+
+| # | Question | Decision |
+|---|---|---|
+| 1 | Schema dump and new sibling subdirectories: rules or suggestions? | **Package rules.** Both are universal in Laravel. `schema:dump` is a framework feature that `RefreshDatabase` loads for every database test, and a new subdirectory of a sibling directory is discovered like its parent. They close false greens for every project; they do not promote one project's choices. |
+| 2 | Initial thresholds (80% dependents → every test; 50% directory density; under-attribution below 50%) | Accepted to start with, then calibrated against the two real cases and user reports. |
+| 3 | Where the ignore list lives | In `phpunit-replay.php`, so it is reviewed and shared. An ignored gap stays visible to the team. |
+| 4 | Does `record` run the detectors? | Yes, within a budget. `record` writes the summary (under 2 s warm) and `status` only reads it, so the hint reaches people who do not know the command exists. |
+| 5 | Recording coverage for excluded paths in a separate scope | Later, as its own proposal. Until then the command advises removing the exclude and states the coverage-percentage trade-off. |
+| 6 | Should `MigrationRule` learn configured paths (`loadMigrationsFrom`, tenant migrations)? | Yes. The rule attributes them table by table, which is more precise than a suggested pattern and covers every project without action. |
+| 7 | Separate command or `explain --watch` | A separate `watch:suggest` command, with its own `--check`. |
+| 8 | Show the one-time adoption cost in seconds | Yes, computed from recorded test durations. |
+
+## Open questions for the owner (answered above)
 
 1. **Should some findings become built-in rules instead of suggestions?** Two are Laravel
    conventions, not one project's choices: the schema dump (`database/schema/**`, which no rule
