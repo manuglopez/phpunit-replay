@@ -117,7 +117,6 @@ final class ConfigTest extends TestCase
                 'valid/string' => 'tests/Feature',
                 'valid/list' => ['tests/A', 'tests/B'],
                 'invalid/list' => ['tests/A', 42],
-                5 => 'ignored-because-key-is-not-a-string',
                 'invalid/value' => 42,
             ],
             'never_cache' => ['tests/A.php', 42, 'tests/B.php'],
@@ -128,6 +127,15 @@ final class ConfigTest extends TestCase
             $config->watch,
         );
         self::assertSame(['tests/A.php', 'tests/B.php'], $config->neverCache);
+        self::assertSame([], Config::fromArray(['watch' => ['config/**', 'routes/**']])->watch, 'a list names no directory');
+    }
+
+    public function testANumericLiteralWatchPatternIsKept(): void
+    {
+        // '404' and '2024' are int keys once in a PHP array, and were dropped as invalid.
+        $config = Config::fromArray(['watch' => ['404' => 'tests/Feature', '2024' => ['tests/A'], 'config/**' => 'tests']]);
+
+        self::assertSame(['404' => 'tests/Feature', '2024' => ['tests/A'], 'config/**' => 'tests'], $config->watch);
     }
 
     public function testLoadReturnsDefaultsWhenThereIsNoConfigFile(): void

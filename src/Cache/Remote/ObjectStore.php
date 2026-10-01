@@ -56,7 +56,7 @@ use Manuglopez\Replay\Support\Json;
  * results ran on. An object without any digest proves only what `k` covers.
  *
  * @phpstan-import-type TestResultArray from Graph
- * @phpstan-type RemoteObject array{k: string, file: string, n: ?string, at: int, results: array<string, TestResultArray>, variants: array<string, array{at: int, results: array<string, TestResultArray>}>, aliases: array<string, array{of: string, at: int}>}
+ * @phpstan-type RemoteObject array{k: string, file: string, n: ?string, at: int, results: array<string, TestResultArray>, variants: array<string, array{at: int, results: array<string, TestResultArray>}>, aliases: array<string, array{of: string, at: int, h: string}>}
  */
 final class ObjectStore
 {
@@ -192,21 +192,24 @@ final class ObjectStore
     }
 
     /**
-     * Whether an object holds results recorded under `$digest` (its top-level `n` or a
-     * variant).
+     * Whether an object holds results recorded under `$digest`: its top-level `n`, a variant,
+     * or an alias whose variant still has the outcome the alias was compared against.
      *
      * @param RemoteObject $object
      */
     public static function holds(array $object, string $digest): bool
     {
-        return $object['n'] === $digest || isset($object['variants'][$digest]) || isset($object['aliases'][$digest]);
+        return $object['n'] === $digest || isset($object['variants'][$digest]) || self::aliasTarget($object, $digest) !== null;
     }
 
     /**
      * The results an object proves for a test file whose current non-edge digest is
-     * `$digest`: the ones recorded under that very digest, top-level or variant. An object
-     * written before digests existed proves only its content key, and serves only a file
-     * selected for reasons the key covers (`Select\Selection::coveredByContentKey()`).
+     * `$digest`: the ones recorded under that very digest, top-level or variant, or, for an
+     * alias, its variant's — only while that variant's outcome is still the one the alias was
+     * compared against (`h`): a variant replaced since (a merge with another machine's newer
+     * run under the same digest) says nothing about the alias's run. An object written before
+     * digests existed proves only its content key, and serves only a file selected for reasons
+     * the key covers (`Select\Selection::coveredByContentKey()`).
      *
      * @param RemoteObject $object
      * @return array<string, TestResultArray>|null
@@ -221,8 +224,44 @@ final class ObjectStore
             return null;
         }
 
-        $digest = $object['aliases'][$digest]['of'] ?? $digest;
+        if ($object['n'] === $digest) {
+            return $object['results'];
+        }
 
+        if (isset($object['variants'][$digest])) {
+            return $object['variants'][$digest]['results'];
+        }
+
+        $target = self::aliasTarget($object, $digest);
+
+        return $target === null ? null : self::variantResults($object, $target);
+    }
+
+    /**
+     * The digest `$digest` is an alias of, while that variant is held with the outcome the
+     * alias recorded; null otherwise.
+     *
+     * @param RemoteObject $object
+     */
+    private static function aliasTarget(array $object, string $digest): ?string
+    {
+        $alias = $object['aliases'][$digest] ?? null;
+
+        if ($alias === null) {
+            return null;
+        }
+
+        $results = self::variantResults($object, $alias['of']);
+
+        return $results !== null && self::outcomeOf($results) === $alias['h'] ? $alias['of'] : null;
+    }
+
+    /**
+     * @param RemoteObject $object
+     * @return array<string, TestResultArray>|null
+     */
+    private static function variantResults(array $object, string $digest): ?array
+    {
         if ($object['n'] === $digest) {
             return $object['results'];
         }
@@ -234,7 +273,9 @@ final class ObjectStore
      * Two bodies of the same object merged: every digest either names, newest first, bounded
      * the way {@see self::putObject()} bounds one. What the git backend replays over upstream
      * after a rejected push (`GitRemoteCache`), so a concurrent publisher's variant survives.
-     * Null when either body is not an object under `$k`.
+     * A digest both name keeps the newer entry, and an alias whose variant the other side
+     * replaced with a different outcome is dropped ({@see self::normalise()}). Null when either
+     * body is not an object under `$k`.
      */
     public static function mergeBodies(string $upstream, string $ours, string $k): ?string
     {
@@ -609,8 +650,8 @@ final class ObjectStore
         $aliases = [];
 
         foreach (is_array($data['aliases'] ?? null) ? $data['aliases'] : [] as $digest => $alias) {
-            if (is_string($digest) && $digest !== '' && is_array($alias) && is_string($alias['of'] ?? null)) {
-                $aliases[$digest] = ['of' => $alias['of'], 'at' => is_int($alias['at'] ?? null) ? $alias['at'] : 0];
+            if (is_string($digest) && $digest !== '' && is_array($alias) && is_string($alias['of'] ?? null) && is_string($alias['h'] ?? null)) {
+                $aliases[$digest] = ['of' => $alias['of'], 'at' => is_int($alias['at'] ?? null) ? $alias['at'] : 0, 'h' => $alias['h']];
             }
         }
 
@@ -626,8 +667,9 @@ final class ObjectStore
     }
 
     /**
-     * `$existing` with `$results` as its newest variant, the one at the top level; the others
-     * move under `variants`, newest first, {@see self::VARIANTS} in all. A top level written
+     * `$existing` with `$results` recorded under `$digest`: a new variant, or, when a variant
+     * it holds has the same outcome, an alias of that variant carrying the outcome's
+     * fingerprint (`h`). Bounded and ordered by {@see self::normalise()}. A top level written
      * without a digest (before digests existed) is not kept as a variant: it names none.
      *
      * @param RemoteObject|null $existing
@@ -640,11 +682,12 @@ final class ObjectStore
             return ['k' => $k, 'file' => $file, 'results' => $results];
         }
 
-        $entries = $existing === null ? [] : self::entriesOf($existing);
+        $entries = $existing === null ? [] : self::latestByDigest(self::entriesOf($existing));
+        $outcome = self::outcomeOf($results);
 
         foreach ($entries as $entry) {
-            if (isset($entry['results']) && self::sameOutcome($entry['results'], $results)) {
-                $entries[] = ['d' => $digest, 'at' => $now, 'of' => $entry['d']];
+            if ($entry['d'] !== $digest && isset($entry['results']) && self::outcomeOf($entry['results']) === $outcome) {
+                $entries[] = ['d' => $digest, 'at' => $now, 'of' => $entry['d'], 'h' => $outcome];
 
                 return self::normalise($entries, $k, $file);
             }
@@ -657,10 +700,11 @@ final class ObjectStore
 
     /**
      * Every digest an object names, as a flat list: variants with results, aliases with the
-     * digest whose results they share. A top level without a digest names none.
+     * digest whose results they share and that outcome's fingerprint. A top level without a
+     * digest names none.
      *
      * @param RemoteObject $object
-     * @return list<array{d: string, at: int, results?: array<string, TestResultArray>, of?: string}>
+     * @return list<array{d: string, at: int, results?: array<string, TestResultArray>, of?: string, h?: string}>
      */
     private static function entriesOf(array $object): array
     {
@@ -675,54 +719,112 @@ final class ObjectStore
         }
 
         foreach ($object['aliases'] as $digest => $alias) {
-            $entries[] = ['d' => (string) $digest, 'at' => $alias['at'], 'of' => $alias['of']];
+            $entries[] = ['d' => (string) $digest, 'at' => $alias['at'], 'of' => $alias['of'], 'h' => $alias['h']];
         }
 
-        return $entries;
+        // A body lists newest first; entries go oldest first, so that within one second the
+        // later index is the later write, as it is for an entry appended to them.
+        return array_reverse($entries);
     }
 
     /**
-     * The body for a set of entries: the newest one with results at the top level, the other
-     * variants and the aliases beside it, {@see self::VARIANTS} digests in all, newest first; an
-     * alias whose variant did not make the cut goes with it. A digest named twice keeps its
-     * newest entry.
+     * One entry per digest, the newest (within one second, the one listed later: the one
+     * being published, or ours over upstream's in a merge).
      *
-     * @param list<array{d: string, at: int, results?: array<string, TestResultArray>, of?: string}> $entries
+     * @param list<array{d: string, at: int, results?: array<string, TestResultArray>, of?: string, h?: string}> $entries
+     * @return list<array{d: string, at: int, results?: array<string, TestResultArray>, of?: string, h?: string}>
+     */
+    private static function latestByDigest(array $entries): array
+    {
+        $latest = [];
+
+        foreach ($entries as $i => $entry) {
+            $current = $latest[$entry['d']] ?? null;
+
+            if ($current === null || [$entry['at'], $i] >= [$current[0]['at'], $current[1]]) {
+                $latest[$entry['d']] = [$entry, $i];
+            }
+        }
+
+        return array_values(array_map(static fn (array $pair): array => $pair[0], $latest));
+    }
+
+    /**
+     * The body for a set of entries. A digest named twice keeps its newest entry. An alias is
+     * kept only with its variant, and only while that variant still has the outcome the alias
+     * recorded (`h`): a merge that replaced the variant with another machine's newer run drops
+     * the alias, since nothing says its own run had that outcome.
+     *
+     * Bounded at {@see self::VARIANTS} digests by GROUP: a variant and its aliases count as
+     * recent as the newest of them, groups are kept most recent first, a variant always before
+     * its aliases, and the oldest aliases are the ones cut. So publishing the same outcome
+     * under one new digest after another keeps the variant they all point at, whose results are
+     * the only copy — trimming by entry dropped it as the oldest, and every alias with it. The
+     * most recent group's variant goes at the top level, where an older reader looks.
+     *
+     * @param list<array{d: string, at: int, results?: array<string, TestResultArray>, of?: string, h?: string}> $entries
      * @return array<string, mixed>
      */
     private static function normalise(array $entries, string $k, string $file): array
     {
-        // Newest first; within one second, the one listed later (the one being published).
-        $order = array_keys($entries);
-        usort($order, static fn (int $a, int $b): int => [$entries[$b]['at'], $b] <=> [$entries[$a]['at'], $a]);
+        $latest = self::latestByDigest($entries);
 
-        $kept = [];
+        /** @var array<string, array{variant: array{d: string, at: int, results: array<string, TestResultArray>}, aliases: list<array{d: string, at: int, of: string, h: string, order: int}>, recent: int, order: int}> $groups */
+        $groups = [];
 
-        foreach (array_map(static fn (int $i): array => $entries[$i], $order) as $entry) {
-            if (! isset($kept[$entry['d']]) && count($kept) < self::VARIANTS) {
-                $kept[$entry['d']] = $entry;
+        foreach ($latest as $order => $entry) {
+            if (isset($entry['results'])) {
+                $groups[$entry['d']] = ['variant' => ['d' => $entry['d'], 'at' => $entry['at'], 'results' => $entry['results']], 'aliases' => [], 'recent' => $entry['at'], 'order' => $order];
             }
         }
+
+        foreach ($latest as $order => $entry) {
+            $of = $entry['of'] ?? null;
+            $h = $entry['h'] ?? null;
+
+            if ($of === null || $h === null || ! isset($groups[$of]) || self::outcomeOf($groups[$of]['variant']['results']) !== $h) {
+                continue;
+            }
+
+            $groups[$of]['aliases'][] = ['d' => $entry['d'], 'at' => $entry['at'], 'of' => $of, 'h' => $h, 'order' => $order];
+
+            if ([$entry['at'], $order] > [$groups[$of]['recent'], $groups[$of]['order']]) {
+                $groups[$of]['recent'] = $entry['at'];
+                $groups[$of]['order'] = $order;
+            }
+        }
+
+        uasort($groups, static fn (array $a, array $b): int => [$b['recent'], $b['order']] <=> [$a['recent'], $a['order']]);
 
         $object = ['k' => $k, 'file' => $file];
         $variants = [];
         $aliases = [];
+        $room = self::VARIANTS;
 
-        foreach ($kept as $digest => $entry) {
-            if (isset($entry['results'])) {
-                if (! isset($object['n'])) {
-                    $object += ['n' => (string) $digest, 'at' => $entry['at'], 'results' => $entry['results']];
-                } else {
-                    $variants[(string) $digest] = ['at' => $entry['at'], 'results' => $entry['results']];
-                }
+        foreach ($groups as $group) {
+            if ($room === 0) {
+                break;
             }
-        }
 
-        foreach ($kept as $digest => $entry) {
-            $of = $entry['of'] ?? null;
+            $variant = $group['variant'];
+            $room--;
 
-            if ($of !== null && (($object['n'] ?? null) === $of || isset($variants[$of]))) {
-                $aliases[(string) $digest] = ['of' => $of, 'at' => $entry['at']];
+            if (! isset($object['n'])) {
+                $object += ['n' => $variant['d'], 'at' => $variant['at'], 'results' => $variant['results']];
+            } else {
+                $variants[$variant['d']] = ['at' => $variant['at'], 'results' => $variant['results']];
+            }
+
+            $groupAliases = $group['aliases'];
+            usort($groupAliases, static fn (array $a, array $b): int => [$b['at'], $b['order']] <=> [$a['at'], $a['order']]);
+
+            foreach ($groupAliases as $alias) {
+                if ($room === 0) {
+                    break;
+                }
+
+                $aliases[$alias['d']] = ['of' => $alias['of'], 'at' => $alias['at'], 'h' => $alias['h']];
+                $room--;
             }
         }
 
@@ -738,27 +840,22 @@ final class ObjectStore
     }
 
     /**
-     * Same test ids with the same status, message and assertion count: what a replay would
-     * report. Times and stamps are not outcome.
+     * A fingerprint of what a replay of these results would report: the test ids with their
+     * status, message and assertion count. Times and stamps are not outcome.
      *
-     * @param array<string, TestResultArray> $a
-     * @param array<string, TestResultArray> $b
+     * @param array<string, TestResultArray> $results
      */
-    private static function sameOutcome(array $a, array $b): bool
+    private static function outcomeOf(array $results): string
     {
-        if (count($a) !== count($b)) {
-            return false;
+        $rows = [];
+
+        foreach ($results as $testId => $result) {
+            $rows[] = $testId . "\0" . $result['status'] . "\0" . $result['assertions'] . "\0" . $result['message'];
         }
 
-        foreach ($a as $testId => $result) {
-            $other = $b[$testId] ?? null;
+        sort($rows);
 
-            if ($other === null || $other['status'] !== $result['status'] || $other['message'] !== $result['message'] || $other['assertions'] !== $result['assertions']) {
-                return false;
-            }
-        }
-
-        return true;
+        return hash('xxh128', implode("\n", $rows));
     }
 
     /** @return array<string, TestResultArray> */

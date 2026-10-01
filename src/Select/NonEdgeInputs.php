@@ -726,11 +726,12 @@ final class NonEdgeInputs
 
     /**
      * What this package itself writes into the tree during a pass: the generated PHPUnit
-     * configuration, and the state directory when it lives inside the project.
+     * configuration, the state directory when it lives inside the project, and a clock probe
+     * a crash left behind (`FileHashes` never writes one in the tree; this is the backstop).
      */
     private function excluded(string $rel): bool
     {
-        if (basename($rel) === ConfigurationWriter::TEMP_BASENAME) {
+        if (basename($rel) === ConfigurationWriter::TEMP_BASENAME || FileHashes::isProbeFile($rel)) {
             return true;
         }
 

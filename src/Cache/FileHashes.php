@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Manuglopez\Replay\Cache;
 
 use Closure;
+use Manuglopez\Replay\Change\Git;
+use Manuglopez\Replay\Console\Runner\Warnings;
 use Manuglopez\Replay\Support\AtomicFile;
 
 /**
@@ -26,25 +28,34 @@ use Manuglopez\Replay\Support\AtomicFile;
  * equals it field for field. It is sound the way git's racy-clean index rule is, adapted to the
  * one-second timestamps PHP's `stat()` returns: an entry is written only when the file's ctime
  * is at least two seconds older than the moment its content was read. On a POSIX file system
- * ctime is set by the kernel on every change and cannot be set by a program, so any later
- * change to the file — including one that forges its mtime — gives it a ctime in a later
- * second than the one recorded, and the entry no longer matches. The second second of margin
- * covers the kernel's coarse clock, which can stamp a change with the previous second. A file
- * changed that recently is simply re-read next time.
+ * ctime is set by the kernel on every change, so any later change to the file — including one
+ * that forges its mtime — gives it a ctime in a later second than the one recorded, and the
+ * entry no longer matches. The second second of margin covers the kernel's coarse clock, which
+ * can stamp a change with the previous second. A file changed that recently is simply re-read
+ * next time.
  *
+ * **What that rests on, checked rather than assumed** ({@see self::probeFileSystem()}).
  * "The moment its content was read" is the FILE SYSTEM's clock, not this process's: a network
- * file system whose server runs behind the client would otherwise make a file changed a
- * second ago look two seconds old. It is measured once per pass by writing a probe file in
- * the project root ({@see self::probeFileSystem()}), which also tests the premise itself: the
- * probe's mtime is set into the past, and if its ctime follows, ctime is not a kernel-owned
- * change time on this file system (FAT and exFAT, some FUSE mounts such as sshfs) and the
- * pass-to-pass cache is not used at all: every file is re-read. So is it on Windows, where
- * `stat()`'s ctime is the creation time, and wherever the probe cannot be written. The version
- * token covers `ContentHash`'s own definition and the PHP version (the tokenizer it relies on).
+ * file system whose server runs behind the client would otherwise make a file changed a second
+ * ago look two seconds old. Once per pass (per instance) a probe file is written beside the project — in
+ * the state directory when it is on the project root's device, else in the git directory when
+ * that is, never in the working tree — and its mtime gives the offset. Once per device, that
+ * probe also tests the premise: its mtime is set into the past, and if its ctime follows, ctime
+ * is not a kernel-owned change time there (FAT and exFAT, some FUSE mounts such as sshfs). The
+ * verdict is persisted per device number in the cache file, so later passes only measure the
+ * clock. Only files on that probed, trusted device are served from or written to the cache,
+ * or judged stable by their `stat()`: a file on another mount (`vendor/` bind-mounted, say), on
+ * a file system whose ctime can be forged, on Windows (where PHP's `ctime` is the creation
+ * time), or with no probe possible at all, is re-read every pass and compared by content. The
+ * version token covers `ContentHash`'s own definition and the PHP version (the tokenizer it
+ * relies on).
  */
 final class FileHashes
 {
     private const VERSION = 'content-hash@1';
+
+    /** Basename prefix of the probe file; never part of a tree this package reasons about. */
+    public const PROBE_PREFIX = '.phpunit-replay-clock-';
 
     /**
      * @var array<string, array{hash: ?string, stat: ?list<int>, readAt: int, afterStart: bool, unstable: bool}>
@@ -54,6 +65,9 @@ final class FileHashes
     /** @var array<string, list<int|string>> path => [size, mtime, ctime, ino, dev, hash] */
     private array $cache = [];
 
+    /** @var array<int|string, bool> device number => whether its ctime is kernel-owned (persisted) */
+    private array $devices = [];
+
     private bool $cacheDirty = false;
 
     private ?int $runStart = null;
@@ -61,8 +75,10 @@ final class FileHashes
     /** @var array<string, bool> this round's answers of {@see self::stable()} */
     private array $stable = [];
 
-    /** @var array{offset: int, trusted: bool}|null the file system's clock and ctime, once probed */
+    /** @var array{offset: int, dev: ?int, trusted: bool}|null the probed device, its clock and its ctime */
     private ?array $fileSystem = null;
+
+    private static bool $noProbeNoted = false;
 
     /**
      * @param string|null $cacheFile where hashes persist across passes; null keeps them in this
@@ -76,7 +92,7 @@ final class FileHashes
         private readonly ?Closure $clock = null,
     ) {
         if ($cacheFile !== null) {
-            $this->cache = self::load($cacheFile);
+            [$this->cache, $this->devices] = self::load($cacheFile);
         }
     }
 
@@ -84,6 +100,12 @@ final class FileHashes
     public static function inStateDir(string $projectRoot, string $stateDir): self
     {
         return new self($projectRoot, rtrim($stateDir, '/') . '/content-hashes.json');
+    }
+
+    /** Whether `$relative` is a probe file this class writes (the backstop for a crash mid-probe). */
+    public static function isProbeFile(string $relative): bool
+    {
+        return str_starts_with(basename($relative), self::PROBE_PREFIX);
     }
 
     /** Now, by the file system's clock, never ahead of it (see the class docblock). */
@@ -97,23 +119,33 @@ final class FileHashes
         return $this->clock !== null ? ($this->clock)() : time();
     }
 
-    /** Whether the pass-to-pass cache may be read and written on this file system. */
-    private function cacheUsable(): bool
+    /** Whether a file on device `$dev` may be judged by its `stat()`: probed, and ctime is kernel-owned there. */
+    private function deviceTrusted(int $dev): bool
     {
-        if ($this->cacheFile === null || PHP_OS_FAMILY === 'Windows') {
+        if (PHP_OS_FAMILY === 'Windows') {
             return false;
         }
 
-        return $this->probeFileSystem()['trusted'];
+        $fileSystem = $this->probeFileSystem();
+
+        return $fileSystem['trusted'] && $fileSystem['dev'] === $dev;
+    }
+
+    /** Whether the pass-to-pass cache may hold a file on device `$dev`. */
+    private function cacheUsable(int $dev): bool
+    {
+        return $this->cacheFile !== null && $this->deviceTrusted($dev);
     }
 
     /**
-     * Writes a probe file in the project root: its mtime is the file system's clock (the
-     * offset kept is never positive, so "now" is never later than that clock), and setting that
-     * mtime into the past shows whether ctime follows it (then it is no kernel-owned change time
-     * and the cache is off). A probe that cannot be written leaves the cache off.
+     * Writes a probe file where it may ({@see self::probeDirectory()}): its mtime is the file
+     * system's clock (the offset kept is never positive, so "now" is never later than that
+     * clock). For a device with no persisted verdict, setting that mtime into the past shows
+     * whether ctime follows it (then it is no kernel-owned change time and nothing on it is
+     * judged by `stat()`). No place to probe, or a probe that cannot be written, leaves every
+     * device untrusted and the process clock as it is.
      *
-     * @return array{offset: int, trusted: bool}
+     * @return array{offset: int, dev: ?int, trusted: bool}
      */
     private function probeFileSystem(): array
     {
@@ -121,37 +153,98 @@ final class FileHashes
             return $this->fileSystem;
         }
 
-        $probe = rtrim($this->projectRoot, '/') . '/.phpunit-replay-clock-' . bin2hex(random_bytes(4));
+        $untrusted = ['offset' => 0, 'dev' => null, 'trusted' => false];
+        $directory = PHP_OS_FAMILY === 'Windows' ? null : $this->probeDirectory();
+
+        if ($directory === null) {
+            if (! self::$noProbeNoted) {
+                self::$noProbeNoted = true;
+                Warnings::debug('content hashes: no state or git directory on the project\'s device to probe its clock in; every file is re-read each pass');
+            }
+
+            return $this->fileSystem = $untrusted;
+        }
+
+        $probe = $directory . '/' . self::PROBE_PREFIX . bin2hex(random_bytes(4));
         $before = $this->processTime();
 
         if (@file_put_contents($probe, '') === false) {
-            return $this->fileSystem = ['offset' => 0, 'trusted' => false];
+            return $this->fileSystem = $untrusted;
         }
 
         try {
             $written = self::rawStat($probe);
-            $forged = $written !== null && @touch($probe, $written['mtime'] - 3600) ? self::rawStat($probe) : null;
 
-            if ($written === null || $forged === null) {
-                return $this->fileSystem = ['offset' => 0, 'trusted' => false];
+            if ($written === null) {
+                return $this->fileSystem = $untrusted;
             }
 
-            return $this->fileSystem = [
-                'offset' => min(0, $written['mtime'] - $before),
-                'trusted' => $forged['ctime'] >= $written['mtime'] - 1,
-            ];
+            $dev = $written['dev'];
+            $trusted = $this->devices[(string) $dev] ?? null;
+
+            if ($trusted === null) {
+                $forged = @touch($probe, $written['mtime'] - 3600) ? self::rawStat($probe) : null;
+
+                if ($forged === null) {
+                    return $this->fileSystem = $untrusted;
+                }
+
+                $trusted = $forged['ctime'] >= $written['mtime'] - 1;
+                $this->devices[(string) $dev] = $trusted;
+                $this->cacheDirty = true;
+            }
+
+            return $this->fileSystem = ['offset' => min(0, $written['mtime'] - $before), 'dev' => $dev, 'trusted' => $trusted];
         } finally {
             @unlink($probe);
         }
     }
 
-    /** @return array{mtime: int, ctime: int}|null */
+    /**
+     * Where a probe may be written: a directory this package owns, on the project root's own
+     * device (the clock and the ctime semantics measured must be the tree's), never the working
+     * tree itself. The state directory first, then the git directory.
+     */
+    private function probeDirectory(): ?string
+    {
+        $rootDev = self::deviceOf($this->projectRoot);
+
+        if ($rootDev === null) {
+            return null;
+        }
+
+        if ($this->cacheFile !== null) {
+            $stateDir = dirname($this->cacheFile);
+
+            if (! is_dir($stateDir)) {
+                @mkdir($stateDir, 0o775, true);
+            }
+
+            if (self::deviceOf($stateDir) === $rootDev) {
+                return $stateDir;
+            }
+        }
+
+        $gitDir = (new Git($this->projectRoot))->output(['rev-parse', '--absolute-git-dir']);
+
+        return $gitDir !== null && self::deviceOf($gitDir) === $rootDev ? $gitDir : null;
+    }
+
+    private static function deviceOf(string $directory): ?int
+    {
+        clearstatcache(true, $directory);
+        $stat = @stat($directory);
+
+        return $stat === false || ! is_dir($directory) ? null : (int) $stat['dev'];
+    }
+
+    /** @return array{mtime: int, ctime: int, dev: int}|null */
     private static function rawStat(string $absolute): ?array
     {
         clearstatcache(true, $absolute);
         $stat = @stat($absolute);
 
-        return $stat === false ? null : ['mtime' => (int) $stat['mtime'], 'ctime' => (int) $stat['ctime']];
+        return $stat === false ? null : ['mtime' => (int) $stat['mtime'], 'ctime' => (int) $stat['ctime'], 'dev' => (int) $stat['dev']];
     }
 
     /** Null when the file does not exist or cannot be read. */
@@ -171,7 +264,8 @@ final class FileHashes
             return null;
         }
 
-        $cached = $this->cacheUsable() ? ($this->cache[$relative] ?? null) : null;
+        $cacheUsable = $this->cacheUsable($before[4]);
+        $cached = $cacheUsable ? ($this->cache[$relative] ?? null) : null;
 
         if ($cached !== null && array_slice($cached, 0, 5) === $before && is_string($cached[5])) {
             $this->files[$relative] = ['hash' => $cached[5], 'stat' => $before, 'readAt' => $readAt, 'afterStart' => $this->runStart !== null, 'unstable' => false];
@@ -186,7 +280,7 @@ final class FileHashes
         $this->files[$relative] = ['hash' => $hash, 'stat' => $before, 'readAt' => $readAt, 'afterStart' => $this->runStart !== null, 'unstable' => $unstable];
 
         // Racy-clean rule: only a file whose last change is safely in the past is remembered.
-        if (! $unstable && $hash !== null && $before[2] <= $readAt - 2 && $this->cacheUsable()) {
+        if (! $unstable && $hash !== null && $before[2] <= $readAt - 2 && $cacheUsable) {
             $this->cache[$relative] = [...$before, $hash];
             $this->cacheDirty = true;
         } elseif (isset($this->cache[$relative])) {
@@ -230,15 +324,16 @@ final class FileHashes
      * so that a stamp may carry it. Decided by CONTENT: a file whose bytes after the run hash
      * as they did when the pass read them is stable, whatever its mtime or ctime say — a test
      * that rewrites a watched fixture with the same bytes must not unstamp every test under
-     * the pattern on every pass. The stat() only saves the re-read: unchanged, and not changed
-     * within a second of the read, the content cannot have moved.
+     * the pattern on every pass. The stat() only saves the re-read, on a trusted device:
+     * unchanged, and not changed within a second of the read, the content cannot have moved.
      *
      * Two cases are refused. A file first read after the tests started, and changed since
-     * shortly before they did: there is no earlier content to compare with. A file whose
-     * content really differs now, since the tests may have read either version. The case this
-     * cannot see: content changed during the run and changed back to the same bytes before it
-     * ended (an A → B → A rewrite); the stamp then says A although some test may have read B.
-     * A file that never existed is stable while it still does not.
+     * shortly before they did, or on a device whose clock and ctime were not checked: there is
+     * no earlier content to compare with. A file whose content really differs now, since the
+     * tests may have read either version. The case this cannot see: content changed during
+     * the run and changed back to the same bytes before it ended (an A → B → A rewrite); the
+     * stamp then says A although some test may have read B. A file that never existed is stable
+     * while it still does not.
      */
     public function stable(string $relative): bool
     {
@@ -259,11 +354,13 @@ final class FileHashes
             return $this->stable[$relative] = $now === $entry['stat'];
         }
 
+        $trusted = $this->deviceTrusted($entry['stat'][4]);
+
         if ($entry['afterStart'] && $this->runStart !== null) {
-            return $this->stable[$relative] = $now === $entry['stat'] && $now[2] < $this->runStart - 1;
+            return $this->stable[$relative] = $trusted && $now === $entry['stat'] && $now[2] < $this->runStart - 1;
         }
 
-        if ($now === $entry['stat'] && $now[2] < $entry['readAt'] - 1) {
+        if ($trusted && $now === $entry['stat'] && $now[2] < $entry['readAt'] - 1) {
             return $this->stable[$relative] = true;
         }
 
@@ -277,37 +374,45 @@ final class FileHashes
             return;
         }
 
-        $json = json_encode(['v' => self::version(), 'entries' => $this->cache], JSON_UNESCAPED_SLASHES);
+        $json = json_encode(['v' => self::version(), 'devices' => (object) $this->devices, 'entries' => (object) $this->cache], JSON_UNESCAPED_SLASHES);
 
         if ($json !== false && AtomicFile::write($this->cacheFile, $json)) {
             $this->cacheDirty = false;
         }
     }
 
-    /** @return array<string, list<int|string>> */
+    /** @return array{array<string, list<int|string>>, array<int|string, bool>} entries, device verdicts */
     private static function load(string $cacheFile): array
     {
         $data = json_decode((string) @file_get_contents($cacheFile), true);
 
         if (! is_array($data) || ($data['v'] ?? null) !== self::version() || ! is_array($data['entries'] ?? null)) {
-            return [];
+            return [[], []];
         }
 
         $entries = [];
 
         foreach ($data['entries'] as $path => $entry) {
-            if (! is_string($path) || ! is_array($entry) || count($entry) !== 6 || ! array_is_list($entry)) {
+            if (! is_array($entry) || count($entry) !== 6 || ! array_is_list($entry)) {
                 continue;
             }
 
             [$size, $mtime, $ctime, $ino, $dev, $hash] = $entry;
 
             if (is_int($size) && is_int($mtime) && is_int($ctime) && is_int($ino) && is_int($dev) && is_string($hash)) {
-                $entries[$path] = [$size, $mtime, $ctime, $ino, $dev, $hash];
+                $entries[(string) $path] = [$size, $mtime, $ctime, $ino, $dev, $hash];
             }
         }
 
-        return $entries;
+        $devices = [];
+
+        foreach (is_array($data['devices'] ?? null) ? $data['devices'] : [] as $dev => $trusted) {
+            if (is_bool($trusted)) {
+                $devices[(string) $dev] = $trusted;
+            }
+        }
+
+        return [$entries, $devices];
     }
 
     private static function version(): string

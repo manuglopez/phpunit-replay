@@ -223,8 +223,11 @@ constantly with real commits.
    (`phpunit-replay prune --remote --keep-months=3 --squash`), monthly by default.
 8. **Rebase / force-push behaviour.** `objects/**` entries are addressed by content key and hold
    one variant per non-edge digest; when two machines write the same key at the same time, the one
-   whose push is rejected merges its variant into upstream's copy and retries — never a conflict,
-   and neither loses its results. `graph/**`
+   whose push is rejected merges its variant into upstream's copy and retries — never a conflict.
+   (On the `file://` and HTTP backends there is no rejected push: each publisher reads the object,
+   merges and writes it back, and of two writes in the same instant the last one wins, so one
+   machine's variant can be lost. The guarantee is the same on every backend: a lost variant costs
+   a miss, that machine runs the test file again, never a result served for another digest.) `graph/**`
    writes use "keep ours" on a rebase (the objects underneath are unaffected either way). When the
    GC job squashes the branch into a single orphan commit and force-pushes it, every client
    notices on its next `begin()` (the start of the next push or pull): a fetch reporting

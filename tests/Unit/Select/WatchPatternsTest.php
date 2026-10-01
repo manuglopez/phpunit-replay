@@ -88,6 +88,20 @@ final class WatchPatternsTest extends TestCase
         self::assertSame([], $watch->matches('README.md'));
     }
 
+    public function test_a_numeric_literal_pattern_matches_its_file(): void
+    {
+        $watch = new WatchPatterns();
+        $watch->add(['404' => ['tests'], '2024' => 'tests/Feature']);
+
+        self::assertSame(['404' => ['tests']], $watch->matches('404'));
+        self::assertSame(['2024' => ['tests/Feature']], $watch->matches('2024'));
+        self::assertSame([], $watch->matches('405'));
+        self::assertSame(['tests/Feature'], $watch->matchedDirectories($this->root, ['2024']));
+
+        $watch->addFallback(['7' => ['tests']]);
+        self::assertSame(['7' => ['tests']], $watch->fallbackMatches('7'));
+    }
+
     public function test_matches_supports_double_star_globbing(): void
     {
         $watch = new WatchPatterns();

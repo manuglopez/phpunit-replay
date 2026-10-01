@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Manuglopez\Replay\Change;
 
 use Manuglopez\Replay\Cache\ContentHash;
+use Manuglopez\Replay\Cache\FileHashes;
 
 /**
  * Derived from Pest (© Nuno Maduro, MIT). @see https://github.com/pestphp/pest/blob/17d709e/src/Plugins/Tia/ChangedFiles.php
@@ -174,11 +175,20 @@ final readonly class ChangedFiles
     }
 
     /**
+     * What git ignores, dropped; and a clock probe a crash left behind (`FileHashes` never
+     * writes one in the tree; this is the backstop), which is no change of the project's.
+     *
      * @param array<string, true> $candidates
      * @return array<string, true>|null
      */
     private function filterIgnored(array $candidates): ?array
     {
+        foreach (array_keys($candidates) as $path) {
+            if (FileHashes::isProbeFile((string) $path)) {
+                unset($candidates[$path]);
+            }
+        }
+
         if ($candidates === []) {
             return $candidates;
         }

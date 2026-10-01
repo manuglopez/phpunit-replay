@@ -73,7 +73,11 @@ final class MigrationRule implements Rule
 
             // Tables no test records (a new `widgets` table): nobody queries them yet, and the
             // migration still runs for every test that migrates a database — a migration that
-            // throws breaks all of them. Those are the tests with any recorded table.
+            // throws breaks all of them. Those are the tests with any recorded table, which is
+            // narrower than "every test that uses the database": `TableTracker` is armed on
+            // `Test\Prepared`, after `setUp()`, so a test whose only queries run in `setUp()`
+            // or a factory there, through raw PDO, or from a result cached statically by an
+            // earlier test records no table and is not selected (a known gap, as on 0.11.0).
             if (! $matched) {
                 foreach (array_keys($testTables) as $testFile) {
                     $context->selection->add((string) $testFile, new Reason($this->name(), $rel, 'tables no test records: every database test'));

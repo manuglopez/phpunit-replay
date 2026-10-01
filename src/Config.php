@@ -479,9 +479,13 @@ final readonly class Config
         $result = [];
 
         foreach ($value as $key => $entry) {
-            if (! is_string($key)) {
+            // A literal pattern such as '404' or '2024' is an int key once in a PHP array:
+            // still a pattern. (A list entry, `['config/**']`, is a mistake and stays skipped.)
+            if (! is_string($key) && array_is_list($value)) {
                 continue;
             }
+
+            $key = (string) $key;
 
             if (is_string($entry)) {
                 $result[$key] = $entry;

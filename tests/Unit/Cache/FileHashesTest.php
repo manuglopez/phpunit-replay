@@ -38,7 +38,7 @@ final class FileHashesTest extends TestCase
         $first->of('src/A.php');
         $first->save();
 
-        self::assertFileDoesNotExist($this->cache, 'its ctime is this second: racily clean, never cached');
+        self::assertSame([], $this->remembered(), 'its ctime is this second: racily clean, never cached');
     }
 
     public function test_a_remembered_hash_is_reused_only_while_the_stat_is_unchanged(): void
@@ -82,7 +82,7 @@ final class FileHashesTest extends TestCase
         $hashes->of('src/A.php');
         $hashes->save();
 
-        self::assertFileDoesNotExist($this->cache, 'racily clean by the file system\'s clock: not remembered');
+        self::assertSame([], $this->remembered(), 'racily clean by the file system\'s clock: not remembered');
         self::assertSame([], glob($this->root . '/.phpunit-replay-clock-*') ?: [], 'the clock probe leaves nothing behind');
     }
 
@@ -145,5 +145,74 @@ final class FileHashesTest extends TestCase
 
         self::assertTrue($hashes->stable('src/Old.php'), 'read before the tests ran, unchanged since');
         self::assertFalse($hashes->stable('src/New.php'), 'changed in the second the tests started: cannot tell');
+    }
+
+    public function test_the_clock_probe_never_writes_into_the_project_root(): void
+    {
+        $project = TempDir::make('file-hashes-project');
+        $stateDir = $this->root . '/state';
+
+        try {
+            TempDir::write($project . '/src/A.php', "<?php\nfinal class A {}\n");
+            // Any entry created or removed in the root would move its mtime to now.
+            touch($project, time() - 100);
+            clearstatcache();
+            $listing = scandir($project);
+            $mtime = filemtime($project);
+
+            foreach ([new FileHashes($project, $stateDir . '/content-hashes.json'), new FileHashes($project)] as $hashes) {
+                $hashes->of('src/A.php');
+                $hashes->markRunStart(['src/A.php']);
+                $hashes->stable('src/A.php');
+                $hashes->save();
+            }
+
+            clearstatcache();
+            self::assertSame($listing, scandir($project), 'nothing left in the root');
+            self::assertSame($mtime, filemtime($project), 'nothing even created and removed in the root');
+
+            // It probed in the state directory, on the same device, and kept the verdict.
+            $data = json_decode((string) file_get_contents($stateDir . '/content-hashes.json'), true);
+            self::assertIsArray($data);
+            self::assertSame([(string) stat($project)['dev'] => true], (array) ($data['devices'] ?? []));
+            self::assertSame([], glob($stateDir . '/' . FileHashes::PROBE_PREFIX . '*') ?: []);
+        } finally {
+            TempDir::remove($project);
+        }
+    }
+
+    public function test_an_entry_on_a_device_whose_ctime_can_be_forged_is_never_served(): void
+    {
+        TempDir::write($this->root . '/src/A.php', "<?php\nfinal class A {}\n");
+        sleep(3);
+
+        $first = new FileHashes($this->root, $this->cache);
+        $first->of('src/A.php');
+        $first->save();
+
+        $data = json_decode((string) file_get_contents($this->cache), true);
+        self::assertIsArray($data);
+        self::assertArrayHasKey('src/A.php', $data['entries']);
+        $data['entries']['src/A.php'][5] = 'forged';
+        // As a FAT, exFAT or sshfs mount would have been judged on its first probe.
+        $data['devices'] = [(string) stat($this->root)['dev'] => false];
+        file_put_contents($this->cache, json_encode($data));
+
+        self::assertSame(ContentHash::of($this->root . '/src/A.php'), (new FileHashes($this->root, $this->cache))->of('src/A.php'));
+    }
+
+    public function test_probe_files_are_recognised_wherever_they_are(): void
+    {
+        self::assertTrue(FileHashes::isProbeFile('.phpunit-replay-clock-0a1b2c3d'));
+        self::assertTrue(FileHashes::isProbeFile('sub/.phpunit-replay-clock-0a1b2c3d'));
+        self::assertFalse(FileHashes::isProbeFile('.phpunit-replay.xml'));
+    }
+
+    /** @return array<string, mixed> the entries the cache file holds, none when there is none */
+    private function remembered(): array
+    {
+        $data = json_decode((string) @file_get_contents($this->cache), true);
+
+        return is_array($data) && is_array($data['entries'] ?? null) ? $data['entries'] : [];
     }
 }

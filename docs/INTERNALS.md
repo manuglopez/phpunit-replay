@@ -1052,12 +1052,18 @@ would still serve, both values are recomputed on the current tree and must be eq
   (`<stateDir>/content-hashes.json`: size, mtime, ctime, inode, device; an entry is written only for a
   file whose ctime is at least two seconds older than the read, so any later change — which sets ctime
   in a later second, even one that forges mtime — misses it). "The read" is on the file system's
-  clock: `FileHashes::probeFileSystem()` writes `.phpunit-replay-clock-<rand>` in the project root once
-  per process and takes `min(0, its mtime − time())` as the offset, so a lagging mount cannot make a
-  fresh file look old. The same probe forges its mtime an hour back and checks ctime followed; where
-  it did not (FAT/exFAT, FUSE mounts like sshfs that pass the forged time through), on Windows (PHP's
-  `ctime` is the creation time there), or where the probe cannot be written, the persistent cache is
-  off and every file is read each pass. `FileHashes::stable()` is content-based: a file whose `stat()`
+  clock: once per pass (per `FileHashes` instance) `FileHashes::probeFileSystem()` writes
+  `.phpunit-replay-clock-<rand>` in the state directory when it is on the project root's device, else
+  in the repository's git directory (`rev-parse --absolute-git-dir`) when that is, never in the working
+  tree, and takes `min(0, its mtime − time())` as the offset, so a lagging mount cannot make a fresh
+  file look old. Once per device it also forges the probe's mtime an hour back and checks ctime
+  followed; the verdict is persisted per device number under `devices` in `content-hashes.json`. Only
+  a file on that probed, trusted device is served from or written to the cache, or judged stable by
+  its `stat()`; one on another mount, on a device whose ctime followed (FAT/exFAT, FUSE mounts like
+  sshfs that pass the forged time through), on Windows (PHP's `ctime` is the creation time there), or
+  with nowhere to probe (a debug note, once) is re-read each pass and compared by content. A probe a
+  crash left behind is dropped from the tree by `NonEdgeInputs` and `ChangedFiles`
+  (`FileHashes::isProbeFile()`). `FileHashes::stable()` is content-based: a file whose `stat()`
   moved during the run but whose content hashes the same is stable (so an A → B → A edit inside the run
   counts as stable — a documented limit, the window being the run). Template references persist in
   `<stateDir>/blade-references.json`, keyed by each template's raw content hash and the hash of the
@@ -1068,8 +1074,10 @@ would still serve, both values are recomputed on the current tree and must be eq
   serves a file only with the results it holds under the file's current key and digest
   (`ObjectStore::resultsFor()`; an object without any digest keeps the key-covered rule), for a file
   selected or stale; objects hold up to 20 digests, newest at the top level, a digest with the same
-  outcome as a held variant as an alias (`aliases`), merged with the remote's copy fetched before each
-  publish of a new digest and, on a rejected git push, with the fetched history; only results
+  outcome as a held variant as an alias (`aliases`, carrying the outcome fingerprint `h` it was compared
+  against and served only while the variant still hashes to it; trimmed by group so a variant is never
+  cut before its aliases), merged with the remote's current-shard copy fetched before each publish of a
+  new digest and, on a rejected git push, with the fetched history; only results
   stamped with the current key and digest are published; a published graph carries only the branch's
   results stamped for the tree, and only from a tree `Cache\GraphPublication` finds clean.
 - **Quarantine**: a flip is a status change under an unchanged key AND digest (`GraphUpdater::detectFlip()`):

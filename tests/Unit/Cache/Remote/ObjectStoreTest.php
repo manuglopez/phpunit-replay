@@ -167,6 +167,54 @@ final class ObjectStoreTest extends TestCase
         self::assertTrue($again->putObject('kkk', 'tests/MoneyTest.php', $this->results(), 'n1:b'), 'asked of the remote, not the mirror');
     }
 
+    public function testTheSameOutcomeUnderMoreDigestsThanTheCapNeverDropsTheVariantTheyAllPointAt(): void
+    {
+        // Every alias points at n1:0, the only copy of the results; trimmed as the oldest
+        // entry, it took every alias with it and left a body without results.
+        for ($i = 0; $i <= ObjectStore::VARIANTS + 1; $i++) {
+            $store = $this->store();
+            self::assertTrue($store->putObject('kkk', 'tests/MoneyTest.php', $this->results(), 'n1:' . $i), 'publish #' . $i);
+            $store->confirmPublished();
+
+            $object = (new ObjectStore($this->backend(), $this->tmp . '/fresh-' . $i, 'shop-abc'))->object('kkk');
+            self::assertNotNull($object, 'decodes after publish #' . $i);
+            self::assertSame('n1:0', $object['n']);
+            self::assertSame($this->results(), ObjectStore::resultsFor($object, 'n1:' . $i, false), 'serves its own digest after publish #' . $i);
+            self::assertLessThanOrEqual(ObjectStore::VARIANTS, 1 + count($object['variants']) + count($object['aliases']));
+        }
+
+        self::assertNull(ObjectStore::resultsFor($object, 'n1:1', false), 'the oldest alias is the one cut');
+    }
+
+    public function testAMergeNeverLetsAnAliasServeAVariantTheOtherSideReplaced(): void
+    {
+        // This machine: n1:a failed, n1:b had the same outcome. Another: n1:a passed, later.
+        $store = $this->store();
+        self::assertTrue($store->putObject('kkk', 'tests/MoneyTest.php', $this->resultsWith('boom'), 'n1:a'));
+        self::assertTrue($store->putObject('kkk', 'tests/MoneyTest.php', $this->resultsWith('boom'), 'n1:b'));
+        $path = $this->remoteRoot . '/' . ObjectStore::objectKey(ObjectStore::currentShard(), 'kkk');
+        $withAlias = (string) file_get_contents($path);
+        self::assertArrayHasKey('n1:b', Json::decodeArray($withAlias)['aliases'] ?? []);
+
+        $upstream = (string) json_encode(['k' => 'kkk', 'file' => 'tests/MoneyTest.php', 'n' => 'n1:a', 'at' => time() + 60, 'results' => $this->results()]);
+        $merged = ObjectStore::mergeBodies($upstream, $withAlias, 'kkk');
+        self::assertNotNull($merged);
+        file_put_contents($path, $merged);
+
+        $object = (new ObjectStore($this->backend(), $this->tmp . '/state2', 'shop-abc'))->object('kkk');
+        self::assertNotNull($object);
+        self::assertSame($this->results(), ObjectStore::resultsFor($object, 'n1:a', false), 'the newer run of n1:a');
+        self::assertNull(ObjectStore::resultsFor($object, 'n1:b', false), 'n1:b failed: it must not be served a pass');
+
+        // Even an alias that survived some other way is checked at lookup against its outcome.
+        $forged = Json::decodeArray($merged) ?? [];
+        $forged['aliases'] = ['n1:b' => ['of' => 'n1:a', 'at' => 1, 'h' => 'not-the-outcome']];
+        file_put_contents($path, (string) json_encode($forged));
+        $object = (new ObjectStore($this->backend(), $this->tmp . '/state3', 'shop-abc'))->object('kkk');
+        self::assertNotNull($object);
+        self::assertNull(ObjectStore::resultsFor($object, 'n1:b', false));
+    }
+
     public function testAnObjectKeepsTheNewestVariantsOnly(): void
     {
         $store = $this->store();

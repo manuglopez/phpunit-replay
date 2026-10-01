@@ -122,7 +122,7 @@ final class WatchPatterns
         $matched = [];
 
         foreach ($this->fallback as $pattern => $dirs) {
-            if ($this->keyMatches($pattern, $changedFile)) {
+            if ($this->keyMatches((string) $pattern, $changedFile)) {
                 $matched[$pattern] = $dirs;
             }
         }
@@ -136,7 +136,7 @@ final class WatchPatterns
         $matched = [];
 
         foreach ($this->patterns as $pattern => $dirs) {
-            if ($this->keyMatches($pattern, $changedFile)) {
+            if ($this->keyMatches((string) $pattern, $changedFile)) {
                 $matched[$pattern] = $dirs;
             }
         }
@@ -165,7 +165,7 @@ final class WatchPatterns
             }
         }
 
-        return array_keys($matched);
+        return array_map(strval(...), array_keys($matched));
     }
 
     /**
