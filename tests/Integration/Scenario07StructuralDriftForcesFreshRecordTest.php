@@ -11,7 +11,7 @@ use PHPUnit\Framework\TestCase;
 /**
  * SPEC.md §15 scenario 7 / §16 acceptance criterion 5: a tracked structural file
  * (`composer.lock`) changing forces a fresh full record, with a clear warning
- * (docs/INTERNALS.md step 6: "structural change (<keys>): recording a fresh baseline").
+ * (docs/INTERNALS.md step 6: "structural change (<keys>): <what> cannot be used", then "recording a fresh baseline" once the remote has had its say).
  */
 final class Scenario07StructuralDriftForcesFreshRecordTest extends TestCase
 {

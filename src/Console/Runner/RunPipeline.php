@@ -157,6 +157,9 @@ final class RunPipeline
     /** @var array<string, true> test ids whose cached result came from the remote, not from this machine */
     private array $remoteTestIds = [];
 
+    /** A remote baseline was found but is structurally drifted too: loadGraph() says what happens next. */
+    private bool $remoteDrifted = false;
+
     /** @var array{branch: string, sha: string, source: string, distance: int}|null */
     private ?array $baseline = null;
 
@@ -375,18 +378,27 @@ final class RunPipeline
         $this->store = new GraphStore($this->stateDir, $this->root ?? '');
         $this->graph = $request->fresh ? null : $this->store->load();
 
+        $drifted = false;
+
         if ($this->graph !== null && ! $this->reconcile($this->graph, 'the cached baseline')) {
             $this->graph = null;
+            $drifted = true;
         }
 
         // Nothing cached locally (first run on this machine, or a structural change just
         // invalidated what was there): a remote may already hold a baseline for this
         // branch, or for the nearest one (SPEC.md §9, docs/INTERNALS.md "Pipeline changes").
         if ($this->graph === null && ! $request->fresh) {
-            $this->graph = $this->pullStartingGraph();
+            $this->graph = $this->pullStartingGraph($drifted);
         }
 
         if ($this->graph === null) {
+            // Only a structural change says anything here: a first run with nothing cached
+            // has never promised a baseline. The decision is made now, so the line is true.
+            if ($drifted || $this->remoteDrifted) {
+                Warnings::warn('recording a fresh baseline');
+            }
+
             return;
         }
 
@@ -405,7 +417,7 @@ final class RunPipeline
 
         if ($structuralDrift !== []) {
             Warnings::warn(sprintf(
-                'structural change (%s): %s cannot be used, recording a fresh baseline',
+                'structural change (%s): %s cannot be used',
                 implode(', ', $structuralDrift),
                 $what,
             ));
@@ -434,7 +446,7 @@ final class RunPipeline
      * carries is remembered as remote-sourced, so the summary can say how much of the pass
      * came from somebody else's machine.
      */
-    private function pullStartingGraph(): ?Graph
+    private function pullStartingGraph(bool $afterStructuralChange): ?Graph
     {
         $objects = $this->objects;
 
@@ -447,7 +459,13 @@ final class RunPipeline
         foreach ($this->baselineCandidates() as $branch) {
             $graph = $objects->graphOf($branch, $root);
 
-            if ($graph === null || ! $this->reconcile($graph, 'the remote baseline for ' . $branch)) {
+            if ($graph === null) {
+                continue;
+            }
+
+            if (! $this->reconcile($graph, 'the remote baseline for ' . $branch)) {
+                $this->remoteDrifted = true;
+
                 continue;
             }
 
@@ -458,7 +476,16 @@ final class RunPipeline
             }
 
             $this->store->save($graph);
-            Warnings::debug('remote: adopted the ' . $branch . ' baseline as the local graph');
+            $sha = $graph->recordedSha($branch);
+            $line = 'adopted the ' . $branch . ' baseline' . ($sha === null ? '' : ' (' . substr($sha, 0, 7) . ')') . ' from the remote';
+
+            // After a structural change the line is what tells the developer nothing is
+            // being recorded; otherwise it stays a debug detail.
+            if ($afterStructuralChange || $this->remoteDrifted) {
+                Warnings::warn($line);
+            } else {
+                Warnings::debug('remote: ' . $line . ' as the local graph');
+            }
 
             return $graph;
         }

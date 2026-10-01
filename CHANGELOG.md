@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.12.2] — 2026-10-01
+
+### Fixed
+
+- **Fix: a structural change announced a recording that never happened.** After `phpunit-replay.php` changed, a developer's `run` printed `phpunit-replay: structural change (replay_config): the cached baseline cannot be used, recording a fresh baseline`, and then replayed all 11,029 tests from the remote (`0 executed … 11029 replayed (11029 from remote)`). The first line was false. The warning was written as soon as the local graph drifted, before the pipeline had looked at the remote; the remote held a baseline recorded with the new configuration, which was adopted, and nothing was recorded. The warning now states only the fact (`structural change (replay_config): the cached baseline cannot be used`), and the decision is printed once it is known: `adopted the develop baseline (a4416e2) from the remote` when a remote baseline was adopted (this line used to be visible only under `PHPUNIT_REPLAY_DEBUG=1`), or `recording a fresh baseline` when there is no remote, the remote holds none of the candidates, or the remote baseline is structurally drifted too. `--dry-run` prints the same lines as the real run. Behaviour is unchanged: the same baselines are adopted or recorded in the same cases, only the messages differ. The in-process extension is untouched: it pulls from the remote only when it has no local graph, so on a structural change it does record.
+
 ## [0.12.1] — 2026-10-01
 
 ### Fixed
