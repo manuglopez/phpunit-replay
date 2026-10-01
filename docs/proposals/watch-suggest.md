@@ -1,6 +1,6 @@
 # Proposal: tell a project which `watch` patterns it needs (`watch:suggest`)
 
-**Status: proposal, not implemented.** Nothing below exists in `src/` yet. Line references are
+**Status: accepted; not yet implemented.** The owner's decisions are recorded in "Decisions (2026-10-01)" below. Nothing below exists in `src/` yet. Line references are
 to `main` at `4f4f30e` (v0.12.1). The evidence comes from two real Laravel applications, both
 anonymous here:
 
