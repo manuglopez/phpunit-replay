@@ -38,14 +38,15 @@ final class LaravelIntegration
      *         order: Migration first, Sibling/Blade after TestFile and before Watch. `$graph`
      *         and `$projectRoot` are part of the contract for symmetry with the rest of the
      *         chain, but unused here — these rules read both from the `Context` each
-     *         `apply()` call carries, not at construction time.
+     *         `apply()` call carries, not at construction time. `$stateDir` is where
+     *         `BladeRule` keeps its template references across runs.
      */
-    public static function rules(Graph $graph, string $projectRoot): array
+    public static function rules(Graph $graph, string $projectRoot, ?string $stateDir = null): array
     {
         return [
             'migration' => new MigrationRule(),
             'sibling' => new SiblingRule(),
-            'blade' => new BladeRule(),
+            'blade' => new BladeRule(BladeRule::cacheFileIn($stateDir)),
         ];
     }
 
@@ -57,9 +58,9 @@ final class LaravelIntegration
      *
      * @return array{migration: Rule, sibling: Rule, blade: Rule}|array{}
      */
-    public static function rulesFor(Graph $graph, string $projectRoot, Config $config): array
+    public static function rulesFor(Graph $graph, string $projectRoot, Config $config, ?string $stateDir = null): array
     {
-        return LaravelDetector::enabled($projectRoot, $config) ? self::rules($graph, $projectRoot) : [];
+        return LaravelDetector::enabled($projectRoot, $config) ? self::rules($graph, $projectRoot, $stateDir) : [];
     }
 
     /** @return list<Subscriber> */

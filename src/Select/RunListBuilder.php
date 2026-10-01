@@ -8,6 +8,7 @@ use FilesystemIterator;
 use Manuglopez\Replay\Cache\Graph;
 use Manuglopez\Replay\Hermeticity\Policy;
 use Manuglopez\Replay\PHPUnit\ConfigurationReader;
+use Manuglopez\Replay\Record\SourceScope;
 use Manuglopez\Replay\Support\Paths;
 use RecursiveDirectoryIterator;
 use RecursiveIteratorIterator;
@@ -28,7 +29,10 @@ final class RunListBuilder
     /**
      * @param array{migration?: Rule, sibling?: Rule, blade?: Rule} $extraRules Laravel-only rules, docs/INTERNALS.md "Laravel"
      * @param bool $staticDeclarationEdges the `static_declaration_edges` opt-in (SPEC.md §4.3.1);
-     *        turns on the {@see ResiduePatterns} fallback, and nothing else here
+     *        turns on the unattributed half of the {@see ResiduePatterns} fallback, and nothing
+     *        else here
+     * @param SourceScope|null $scope the coverage scope: a `.php` file its configured excludes
+     *        keep out of coverage is residue whatever the flag
      */
     public function __construct(
         private readonly Graph $graph,
@@ -39,7 +43,13 @@ final class RunListBuilder
         private readonly string $projectRoot,
         private readonly array $extraRules = [],
         private readonly bool $staticDeclarationEdges = false,
+        private readonly ?SourceScope $scope = null,
     ) {
+    }
+
+    private function residue(): ResiduePatterns
+    {
+        return new ResiduePatterns($this->graph, $this->testPaths, $this->staticDeclarationEdges, $this->scope);
     }
 
     /**
@@ -50,12 +60,14 @@ final class RunListBuilder
      */
     public function build(array $changed, string $branch, array $stale = []): RunList
     {
-        if ($this->staticDeclarationEdges) {
-            // SPEC.md §4.3.1: whatever neither technique could attribute is covered
-            // conservatively rather than dropped. Added before the rule chain runs so
-            // Rules\WatchRule sees it.
-            $this->watch->add((new ResiduePatterns($this->graph, $this->testPaths))->for($changed));
-        }
+        // SPEC.md §4.3.1: whatever nothing could attribute is covered conservatively rather
+        // than dropped — with the flag, any `.php` file without an edge; always, a `.php`
+        // file `<source><exclude>` keeps out of coverage. Added before the rule chain runs so
+        // Rules\WatchRule sees it: the first as a fallback, for what no rule claimed; the second
+        // on every changed file, since coverage cannot say who executes it.
+        $residue = $this->residue();
+        $this->watch->addFallback($residue->for($changed));
+        $this->watch->addUnattributable($residue->unattributableFor($changed));
 
         $selection = Selector::default($this->graph, $this->testPaths, $this->watch, $this->projectRoot, $this->extraRules)
             ->affected($changed);
@@ -168,10 +180,9 @@ final class RunListBuilder
     public function select(array $changed): Selection
     {
         $watch = clone $this->watch;
-
-        if ($this->staticDeclarationEdges) {
-            $watch->add((new ResiduePatterns($this->graph, $this->testPaths))->for($changed));
-        }
+        $residue = $this->residue();
+        $watch->addFallback($residue->for($changed));
+        $watch->addUnattributable($residue->unattributableFor($changed));
 
         return Selector::default($this->graph, $this->testPaths, $watch, $this->projectRoot, $this->extraRules)
             ->affected($changed);

@@ -773,11 +773,11 @@ final class Laravel\TableExtractor  // port of Pest TableExtractor: fromSql(stri
 final class Laravel\TableTracker    // arm(object $app, Recorder $recorder): void — $app['db']->listen(fn (QueryExecuted $q) => foreach TableExtractor::fromSql($q->sql) as $t → $recorder->linkTable($t))
 final class Laravel\BladeTracker    // arm(object $app, Recorder $recorder, string $projectRoot): void — $app['view']->composer('*', fn ($view) => ...) links $view->getPath() UNLESS it is inside config('view.compiled') (read fresh per render, never cached at arm() time) or, as a fallback, SourceScope::isNestedNoisePath($projectRoot, $path) — see "No edges to files git ignores" below
 final class Laravel\MigrationTables // tablesOf(string $projectRoot): list<string> (all tables of database/migrations/**/*.php via TableExtractor::fromMigrationSource); usesDatabase(string $className): bool (RefreshDatabase|DatabaseMigrations|DatabaseTransactions traits, recursively)
-final class Laravel\BladeReferences // ancestorsOf(string $bladeRel, string $projectRoot): list<string> — static @include/@extends/@component/view('x')/<x-name> walk (port of Pest Graph::bladeAncestorsFor and helpers)
+final class Laravel\BladeReferences // referenceMap(root, ?cacheFile): template => templates it references (static @include/@includeFirst/@extends/@component/view('x')/<x-name>; resolved once per process, persisted by template content), ancestorsOf(rel, root, ?cacheFile), ancestorsOfEach(rels, root, ?cacheFile) (one resolution for many) and descendantsOf(map, roots) over it (port of Pest Graph::bladeAncestorsFor and helpers)
 final readonly class Laravel\Subscribers\ArmLaravelTrackersOnPrepared implements PreparedSubscriber  // once per Container instance: binding marker 'phpunit-replay.armed'
-final class Laravel\Rules\MigrationRule  // database/migrations/**/*.php changed → TableExtractor::fromMigrationSource → tests whose graph->testTables() intersect (Reason 'Migration', detail table names); unparseable → left for WatchRule
+final class Laravel\Rules\MigrationRule  // database/migrations/**/*.php changed → TableExtractor::fromMigrationSource → tests whose graph->testTables() intersect (Reason 'Migration', detail table names); tables no test records → every test with any table; no table to narrow by (unparseable, deleted, a graph with no tables) → every test. Consumes every .php migration; any other file under database/migrations/ is left for the database/migrations/** fallback
 final class Laravel\Rules\SiblingRule    // new/unknown .php under app/Providers|Listeners|Events|Observers|Policies|Console/Commands, database/factories|seeders → tests with edges to files in the same directory (Reason 'Sibling')
-final class Laravel\Rules\BladeRule      // unknown .blade.php → BladeReferences::ancestorsOf → tests with edges to an ancestor (Reason 'Blade')
+final class Laravel\Rules\BladeRule      // any changed .blade.php, known or deleted included (additive) → BladeReferences::ancestorsOfEach (once per pass) → tests with edges to an ancestor (Reason 'Blade'); consumes it only when it found one, else it falls to the resources/views/** fallback
 final class Laravel\LaravelIntegration  // rules(...): list<Rule> in SPEC order (Migration first, Sibling/Blade after TestFile, before Watch); subscribers(Recorder): list<Subscriber>; augment(RunPartial, root): RunPartial (MigrationTables for database-using test files → tables ∪ all migration tables)
 ```
 `Selector::default()` gains an optional `array $extraRules` inserted per the SPEC order. Recorder tables flow: `Recorder::perTestTables()` → `RunWriter` `tables.json` → `GraphUpdater::replaceTestTables`.
@@ -794,7 +794,7 @@ Wrapper: `--parallel|-p[=N]` → launches `vendor/bin/paratest -c <xml> --proces
 
 Keys: `graph/<project-key>/<branch>.json` (full graph of a branch baseline) and `objects/<yyyy-mm>/<k>.json`
 (results of one test file by content key; the month shard is the write month; lookups try every shard, newest first).
-`objects/*` are append-only and content-addressed: writing the same key twice is a no-op.
+`objects/*` are addressed by content key and merged on publish: a body holds up to 20 non-edge digests (the newest's results at the top level, which is all an older reader reads, older ones under `variants`, identical outcomes as `aliases`), and publishing a digest the remote's copy already names is skipped (`ObjectStore::putObject()`); the git backend merges again with upstream when a push is rejected.
 
 ```php
 interface Cache\Remote\RemoteCache
@@ -836,7 +836,7 @@ skipped object even by forgetting the check. `RunPipeline::closeRemote()`,
 
 - Mirror: `<stateDir>/remote/git/` = shallow clone (`--depth 1`, single branch, default `main`, configurable `remote_branch`).
 - `begin()`: create the mirror if missing; otherwise `git fetch --depth 1 origin <branch>` + `git reset --hard FETCH_HEAD` when the mirror is older than `remote_refresh_seconds` (default 300). If fetch reports unrelated/rewritten history → wipe and re-clone. Any failure → warning, continue with what the mirror has (offline mode).
-- `put()`: writes into the mirror working tree (AtomicFile) and remembers the path (buffer). `delete()`: unlinks it and remembers the key too (tombstone) — even when the key was already absent locally, since this mirror can be stale relative to upstream; `put()`/`delete()` of the same key on the same instance cancel each other's entry, so whichever happened last wins. `end()`: `git add` + one commit `replay: <project-key> <branch> <sha7> +N objects` + `git push origin HEAD:<branch>`; on rejection: **never a rebase** — a `--depth 1` fetch severs the parent link of what it retrieves, so two mirrors that really are descendants of one history can look unrelated to `git rebase` purely from that truncation, observed as a flaky "unresolved rebase conflict outside graph/**" on CI. Instead `adoptFetchedHistory()` takes upstream wholesale (`git reset --hard FETCH_HEAD`) and replays this run's own buffer and tombstones on top of it — a reset would otherwise silently restore a file this run deleted, exactly as it restores a write — then commits and retries; no path-by-path reconciliation, because objects are content-addressed and append-only and `graph/**` is ours-wins by construction → retry up to 3 times; still failing → warning, objects stay committed locally and go with the next push. Push is skipped when nothing was written. Total time budget: `remote_timeout` (default 60 s) — beyond it the push is abandoned with a warning.
+- `put()`: writes into the mirror working tree (AtomicFile) and remembers the path (buffer). `delete()`: unlinks it and remembers the key too (tombstone) — even when the key was already absent locally, since this mirror can be stale relative to upstream; `put()`/`delete()` of the same key on the same instance cancel each other's entry, so whichever happened last wins. `end()`: `git add` + one commit `replay: <project-key> <branch> <sha7> +N objects` + `git push origin HEAD:<branch>`; on rejection: **never a rebase** — a `--depth 1` fetch severs the parent link of what it retrieves, so two mirrors that really are descendants of one history can look unrelated to `git rebase` purely from that truncation, observed as a flaky "unresolved rebase conflict outside graph/**" on CI. Instead `adoptFetchedHistory()` takes upstream wholesale (`git reset --hard FETCH_HEAD`) and replays this run's own buffer and tombstones on top of it — a reset would otherwise silently restore a file this run deleted, exactly as it restores a write — then commits and retries; the only path-by-path reconciliation is for `objects/**`, whose buffered body is merged with upstream's copy (`ObjectStore::mergeBodies()`: every digest variant of both, bounded) and replaces the buffered one; `graph/**` is ours-wins by construction → retry up to 3 times; still failing → warning, objects stay committed locally and go with the next push. Push is skipped when nothing was written. Total time budget: `remote_timeout` (default 60 s) — beyond it the push is abandoned with a warning.
 - Locking: `flock` on `<stateDir>/remote/git.lock` around begin/end (Paratest workers do not touch the remote; only the wrapper does).
 - Policy `remote_push`: `objects` (default for developers: only `objects/**`), `all` (CI baseline job: objects + `graph/**`), `off` (pull only).
 - Auth: whatever git already has (SSH agent, credential helper, deploy key in CI). No token handling in the package.
@@ -845,8 +845,8 @@ skipped object even by forgetting the check. `RunPipeline::closeRemote()`,
 ### Pipeline changes
 
 - Startup without local graph: `ObjectStore::graph(branch) ?? graph(defaultBranch)` (the project key is fixed on the `ObjectStore` instance, not passed to `graph()`/`graphOf()` — see above) → fingerprint reconcile (structural must match; environmental drift clears results) → sha must be an ancestor of HEAD, else use it only as a source of `objects` by key (edges still useful) — record fresh but replay-remote by `k` still applies.
-- Replay: for every test file in the run list that is `affected` (not unknown/rerun/quarantined/not-cacheable) **and whose every selection reason is one `k` covers** — `Select\Selection::coveredByContentKey()`, a whitelist of `PhpEdge` and `TestFile`: `k` hashes the test file and the files it executed, so those are the only triggers an object under `k` can vouch for. A file also selected by `Watch` (which includes the `ResiduePatterns` fallback), `Migration`, `Blade`, `Sibling` or any rule added later has a trigger outside `k`, `k` did not move, and the object would replay a pass the change may have broken — it executes. Same check in `RunPipeline::replayFromRemote()` and `ReplayState::replayAffectedFromRemote()`. For a file that passes: compute `k_now`; `ObjectStore::object(k_now)` hit → mark file **replayed-remote**, drop from the run list, merge its results with `key = k_now` (Summary: `M replayed (R from remote)`).
-- After the run: `put objects/<shard>/<k>.json` for each executed test file (results of that file, with `k`); `put graph/<key>/<branch>.json` when `remote_push === 'all'` and the pass was complete. `CI=true`: objects only unless `--allow-ci-baseline`. The per-object local publish marker is confirmed later, not here — see "publish markers vs. the read-through cache" above.
+- Replay (`Cache\Remote\Exchange::served()`): for every test file in the run list that is `affected` or `stale` (not unknown/rerun/quarantined/not-cacheable): compute `k_now` and the file's digest, `ObjectStore::object(k_now, digest)` (a mirrored copy without that digest is fetched again once per pass), then `ObjectStore::resultsFor()`. An object carrying `n` (the non-edge input digest, beside `k`, the newest of up to 20 digest variants; path and `k` unchanged) serves the results it holds under the file's current digest — whatever selected it: `k` proves the test file and what it executed, `n` every other input the rule chain sees. An object without `n` proves only `k`, and serves only a file **whose every selection reason is one `k` covers** — `Select\Selection::coveredByContentKey()`, a whitelist of `PhpEdge` and `TestFile`; a file also selected by `Watch` (the `ResiduePatterns` fallback included), `Migration`, `Blade`, `Sibling` or any rule added later executes. Same check in `RunPipeline::replayFromRemote()` and `ReplayState::replayAffectedFromRemote()`. A hit → mark file **replayed-remote**, drop from the run list, merge its results with `key = k_now` and the digest the object answered by (none for an object without `n`, so the next pass re-runs it once: `StaleResult unstamped`; in-process too, since a replayed result keeps the stamp it was served with) (Summary: `M replayed (R from remote)`).
+- After the run: `put objects/<shard>/<k>.json` for each executed test file (results of that file recorded under both its current `k` and digest, merged as a variant into the copy of the object this machine knows) — objects are always publishable, dirty tree or not, because they describe what actually ran. `put graph/<key>/<branch>.json` when `remote_push === 'all'` and the pass was complete **and the working tree is clean of what results depend on** (`Cache\GraphPublication`: no changed path, tracked or untracked, that is a test file, in the graph's universe or a path a non-edge scope would hold; git-ignored paths and the fingerprint's structural files do not count; git failing counts as dirty), carrying only the branch's results stamped for that tree — a graph is a baseline at its sha, and results recorded on a dirty tree are not what that sha holds. A dirty tree skips it with one warning line naming the paths. `push --graph` applies the same rule, still pushes the objects, and exits 1; it recomputes digests from the PHPUnit configuration the graph records (`Graph::configuration()`). `CI=true`: objects only unless `--allow-ci-baseline`. The per-object local publish marker is confirmed later, not here — see "publish markers vs. the read-through cache" above.
 - Commands: `push [--graph]` (force a push of the current graph and all objects derivable from it), `pull` (fetch graph for the current branch/default and store locally as baseline), `prune --remote`.
 - `--no-remote` disables all of the above for one run; `remote => null` disables permanently.
 - Deviation: `verify` and `results-only` (a partial CLI selection: `--filter`/`--group`/`--testsuite`/an explicit path) never publish — they persist the local graph the same way a full pass does, but never reach the `putObject`/`putGraph` step above. Only `record` and a full/replay `run` (`RunPipeline::pushAfterRun()`) publish; `verify`'s whole point is comparing against what is already cached, and a partial selection has nothing complete enough to be worth sharing.
@@ -967,12 +967,12 @@ exactly one layer — the one whose sha it was taken from — so before anything
 `Select\LayerAudit` walks `Graph::layersOf(branch)` (own → nearest → default), highest priority first:
 
 - the layer whose sha IS the diff base: TRUSTED as its sha's tree — the pass's own diff is exactly the
-  rule above applied to it, provided its results were recorded on that tree. The audit does not check
-  that premise, and it has known exceptions, tracked separately (to be closed by stamping each result
-  with the inputs it ran against): results written into a layer without its sha moving (a CI pass
-  without `--allow-ci-baseline`, an incomplete pass) and then served after a revert to that sha; and
-  results recorded on a dirty working tree, read from another branch or published with
-  `remote_push: all` and adopted by another machine;
+  rule above applied to it, provided its results were recorded on that tree. The layer audit does not
+  check that premise; the stamp audit below does, result by result, and that is what closes its
+  exceptions: results written into a layer without its sha moving (a CI pass without
+  `--allow-ci-baseline`, an incomplete pass) and then served after a revert to that sha; and results
+  recorded on a dirty working tree, read from another branch or published with `remote_push: all` and
+  adopted by another machine;
 - every layer BELOW it: no check of its own, on the same premise. The base layer is a delta its own
   passes wrote, so a test it lacks is one its last complete pass served from further down as valid on
   its tree, and the diff says nothing the test depends on moved since. Whatever a lower layer now holds
@@ -999,6 +999,92 @@ change and merges a branch that breaks the same code; the merged tree is 0 files
 baseline, which wins with an empty diff, and the branch's stale passes used to override the failures
 underneath. The in-process path applies the same audit (its diff base is the branch's own sha, or the
 default branch's while it has none).
+
+#### Result stamps: what a result proves about the tree it ran on
+
+Every result is stamped when `GraphUpdater::mergeResults()` records it with two values computed on the
+tree it ran on: `key`, its test file's content key (`Cache\ContentKey`, unchanged), and `digest`, its
+test file's **non-edge input digest** (`Select\NonEdgeInputs`, encoded `n`). The key covers the test file
+and every file it executed; the digest covers every file a non-edge rule (Watch and its residue
+fallback, Migration, Blade, Sibling) would select it for, **minus the test file's own dependencies**
+(the key's). A stamp is written only for what the tests provably ran on: the pass's `Cache\FileHashes`
+reads each file once (before the tests, for everything the audit looked at, and for every file changed
+in the two seconds before they start), and `FileHashes::stable()` refuses a file changed since it was
+read, or first read after the tests started and changed around then; such a result gets no stamp and
+runs again. A result the in-process extension replayed is recorded with the stamp it was served with
+(`GraphUpdater::apply()`'s `$replayed`), never this pass's. `Select\StampAudit` runs right after
+`LayerAudit` and before `RunListBuilder::build()`, in both paths (`RunPipeline::auditLayers()`,
+`ReplayState::prepareReplay()`, and so also `verify`'s would-replay figure): for every result any layer
+would still serve, both values are recomputed on the current tree and must be equal. A result without a
+`digest` — every result written before stamps existed — is `unstamped` and not served either.
+
+- **Masked, never deleted**, by test id and in every layer, the own one included
+  (`Graph::withholdTestIds()`, per pass, never encoded). The id is served from the next layer holding a
+  valid result for it; a file with an id nothing valid covers joins the `stale` bucket and executes, shown
+  as `StaleResult content key changed|non-edge inputs changed|unstamped (<layer>@<sha7>)`. A fresh result
+  written over a masked one (`setResult()`) is served at once; one the pass does not replace (incomplete
+  pass, renamed method) fails the audit again on every later pass until a complete pass replaces or
+  prunes it — deleting it would leave a file with results for only some of its tests. `LayerAudit`'s
+  reason wins for a file both audits drop.
+- **Digest definition** (`NonEdgeInputs`, version token `n3`; its class docblock holds the table):
+  scopes over the working tree (`git ls-files -co --exclude-standard`, minus git-ignored, minus missing,
+  minus the generated `.phpunit-replay.xml` and an in-project state dir). For test file T:
+  `watch:<pattern>@3` (every file the configured pattern matches, T under its targets — watch is
+  additive), `unattributable@3` (`.php` files `<source><exclude>` keeps out of coverage, whatever watch
+  pattern also names them; additive, whoever has an edge to them), `blade@3` (templates the templates
+  T depends on reference, transitively: `BladeReferences::referenceMap()`), `migrations@3` (migrations
+  whose tables intersect T's), `migrations:untouched@1` (migrations for tables no test records, when T
+  records any), `migrations:unnarrowed@1` (no table to narrow by, or a graph with none),
+  `sibling:<dir>@3` (sibling candidates no test has an edge to, T depending on the directory),
+  `fallback:<pattern>@1` (the Laravel `resources/views/**` and `database/migrations/**` fallbacks: files
+  matching them that no rule claims — no edge, not a `.php` migration, not a template some template in
+  the universe references), and with `static_declaration_edges` `residue@3`. Every member set minus T's
+  own dependencies and T itself.
+  `digest = "n3:" . xxh128("nonedge@3\n" . Σ sorted "<scope>=<xor>:<count>\n")` over the non-empty
+  scopes T carries, where `<xor>` is the XOR of `xxh128(path . "\0" . ContentHash(path))` over the
+  members: a scope shared by hundreds of test files is hashed once and each one's dependencies are
+  taken out of it per dependency. Null when git cannot list the tree: nothing is stamped with it and
+  nothing validates against it. Only `sibling`, `fallback` and `residue` look at the graph's universe
+  (they are presumptions about unattributed files, `NonEdgeInputs::inUniverse()` and
+  `claimedByBlade()`), and `migrations:untouched` at the tables tests record, so another test gaining
+  or losing an edge moves no digest but, at most, those scopes' when a file in them gains its first.
+- **Cost**: each file is hashed once per pass, and across passes only when its `stat()` moved
+  (`<stateDir>/content-hashes.json`: size, mtime, ctime, inode, device; an entry is written only for a
+  file whose ctime is at least two seconds older than the read, so any later change — which sets ctime
+  in a later second, even one that forges mtime — misses it). "The read" is on the file system's
+  clock: once per pass (per `FileHashes` instance) `FileHashes::probeFileSystem()` writes
+  `.phpunit-replay-clock-<rand>` in the state directory when it is on the project root's device, else
+  in the repository's git directory (`rev-parse --absolute-git-dir`) when that is, never in the working
+  tree, and takes `min(0, its mtime − time())` as the offset, so a lagging mount cannot make a fresh
+  file look old. Once per device it also forges the probe's mtime an hour back and checks ctime
+  followed; the verdict is persisted per device number under `devices` in `content-hashes.json`. Only
+  a file on that probed, trusted device is served from or written to the cache, or judged stable by
+  its `stat()`; one on another mount, on a device whose ctime followed (FAT/exFAT, FUSE mounts like
+  sshfs that pass the forged time through), on Windows (PHP's `ctime` is the creation time there), or
+  with nowhere to probe (a debug note, once) is re-read each pass and compared by content. A probe a
+  crash left behind is dropped from the tree by `NonEdgeInputs` and `ChangedFiles`
+  (`FileHashes::isProbeFile()`). `FileHashes::stable()` is content-based: a file whose `stat()`
+  moved during the run but whose content hashes the same is stable (so an A → B → A edit inside the run
+  counts as stable — a documented limit, the window being the run). Template references persist in
+  `<stateDir>/blade-references.json`, keyed by each template's raw content hash and the hash of the
+  template path list; `BladeRule` resolves them once per pass for all changed templates
+  (`BladeReferences::ancestorsOfEach()`). Measured on a real project (726 test files, 6,446 tree
+  files): 0.34–0.38 s per pass warm, 0.76 s cold.
+- **Remote** (`Cache\Remote\Exchange`, shared by the wrapper, the in-process path and `push`): an object
+  serves a file only with the results it holds under the file's current key and digest
+  (`ObjectStore::resultsFor()`; an object without any digest keeps the key-covered rule), for a file
+  selected or stale; objects hold up to 20 digests, newest at the top level, a digest with the same
+  outcome as a held variant as an alias (`aliases`, carrying the outcome fingerprint `h` it was compared
+  against and served only while the variant still hashes to it; trimmed by group so a variant is never
+  cut before its aliases), merged with the remote's current-shard copy fetched before each publish of a
+  new digest and, on a rejected git push, with the fetched history; only results
+  stamped with the current key and digest are published; a published graph carries only the branch's
+  results stamped for the tree, and only from a tree `Cache\GraphPublication` finds clean.
+- **Quarantine**: a flip is a status change under an unchanged key AND digest (`GraphUpdater::detectFlip()`):
+  a test flipping because a watched file it reads changed is its input changing, not flakiness.
+- **Legacy**: no sound way was found to validate a result without a digest from its key alone — the
+  key does not see a watched file, and the diff-from-sha premise is exactly what failed — so the first
+  pass after upgrading re-runs every cached test file once and stamps it.
 
 Deviation: `status` resolves the nearest baseline locally only — `StatusCommand::execute()` builds its
 `BaselineResolver` with `$remote = null`, so `shaFor()` never reaches the `graph/<key>/<branch>.json`

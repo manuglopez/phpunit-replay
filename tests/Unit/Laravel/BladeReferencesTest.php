@@ -101,6 +101,56 @@ final class BladeReferencesTest extends TestCase
         self::assertFalse(BladeReferences::isBladePath('app/View/welcome.blade.php'));
     }
 
+    public function test_recognises_include_first_candidates(): void
+    {
+        $this->write('resources/views/custom/header.blade.php', '<div>custom</div>');
+        $this->write('resources/views/header.blade.php', '<div>default</div>');
+        $this->write('resources/views/page.blade.php', "@includeFirst(['custom.header', 'header'])");
+
+        self::assertSame(['resources/views/page.blade.php'], BladeReferences::ancestorsOf('resources/views/custom/header.blade.php', $this->root));
+        self::assertSame(['resources/views/page.blade.php'], BladeReferences::ancestorsOf('resources/views/header.blade.php', $this->root));
+    }
+
+    public function test_finds_the_ancestors_of_a_template_that_no_longer_exists(): void
+    {
+        $this->write('resources/views/layout.blade.php', "@include('partials.gone')");
+        $this->write('resources/views/page.blade.php', "@extends('layout')");
+
+        self::assertSame(
+            ['resources/views/layout.blade.php', 'resources/views/page.blade.php'],
+            BladeReferences::ancestorsOf('resources/views/partials/gone.blade.php', $this->root),
+        );
+    }
+
+    public function test_an_edited_template_is_resolved_again(): void
+    {
+        $this->write('resources/views/partials/x.blade.php', '<div>x</div>');
+        $this->write('resources/views/layout.blade.php', '<div>nothing yet</div>');
+        self::assertSame([], BladeReferences::ancestorsOf('resources/views/partials/x.blade.php', $this->root));
+
+        $this->write('resources/views/layout.blade.php', "@include('partials.x')");
+        self::assertSame(['resources/views/layout.blade.php'], BladeReferences::ancestorsOf('resources/views/partials/x.blade.php', $this->root));
+    }
+
+    public function test_the_ancestors_of_many_templates_are_those_of_each(): void
+    {
+        $this->write('resources/views/partials/x.blade.php', '<div>x</div>');
+        $this->write('resources/views/layout.blade.php', "@include('partials.x')");
+        $this->write('resources/views/page.blade.php', "@extends('layout')");
+        $this->write('resources/views/orphan.blade.php', '<div>orphan</div>');
+        $cache = $this->root . '/state/blade-references.json';
+
+        $templates = ['resources/views/partials/x.blade.php', 'resources/views/layout.blade.php', 'resources/views/orphan.blade.php', 'resources/views/partials/gone.blade.php'];
+        $each = BladeReferences::ancestorsOfEach($templates, $this->root, $cache);
+
+        self::assertSame($templates, array_keys($each));
+        foreach ($templates as $template) {
+            self::assertSame(BladeReferences::ancestorsOf($template, $this->root), $each[$template], $template);
+        }
+        self::assertSame(['resources/views/layout.blade.php', 'resources/views/page.blade.php'], $each['resources/views/partials/x.blade.php']);
+        self::assertFileExists($cache);
+    }
+
     private function write(string $relative, string $content): void
     {
         TempDir::write($this->root . '/' . $relative, $content);

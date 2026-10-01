@@ -104,6 +104,29 @@ final class BladeRuleTest extends TestCase
         self::assertSame(['resources/views/layout.blade.php'], $context->remaining);
     }
 
+    public function test_a_known_partial_also_selects_the_tests_rendering_a_page_that_includes_it(): void
+    {
+        // Additive: one test rendered the partial (it has an edge to it); another rendered the
+        // page without meeting the condition the partial sits under. A change to the partial
+        // can reach both, whoever else claimed it.
+        $this->write('resources/views/partials/banner.blade.php', '<div>banner</div>');
+        $this->write('resources/views/page.blade.php', "@if(\$admin) @include('partials.banner') @endif");
+
+        $graph = new Graph($this->root);
+        $graph->unionEdges([
+            'tests/AdminTest.php' => ['resources/views/page.blade.php', 'resources/views/partials/banner.blade.php'],
+            'tests/GuestTest.php' => ['resources/views/page.blade.php'],
+        ]);
+
+        $selection = new Selection();
+        $context = $this->makeContext($graph, ['resources/views/partials/banner.blade.php'], $selection);
+        $context->consume('resources/views/partials/banner.blade.php');
+
+        (new BladeRule())->apply($context);
+
+        self::assertSame(['tests/AdminTest.php', 'tests/GuestTest.php'], $selection->testFiles());
+    }
+
     public function test_ignores_a_non_blade_file(): void
     {
         $graph = new Graph($this->root);

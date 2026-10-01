@@ -17,8 +17,10 @@ namespace Manuglopez\Replay\Cache\Remote;
  * these four verbs (S3 needs its own ListObjects API, WebDAV needs PROPFIND), so
  * {@see self::keys()} always returns `[]` and reports `listing not supported` — which
  * means `phpunit-replay prune --remote` needs the `file` or `git` backend to garbage
- * collect. Objects are content-addressed and append-only, so nothing else in the package
- * ever needs to list.
+ * collect. Objects are found by their content key and merged on publish by reading the one
+ * key they live at (`ObjectStore::putObject()`), so nothing else in the package ever needs to
+ * list. Two HTTP writers racing on the same object's key: the last `PUT` wins, and the
+ * other's variant is published again the next time it runs that file.
  */
 final class HttpRemoteCache implements RemoteCache
 {

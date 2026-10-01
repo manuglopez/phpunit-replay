@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Manuglopez\Replay\Select;
 
 use Manuglopez\Replay\Cache\Graph;
+use Manuglopez\Replay\Record\SourceScope;
+use Manuglopez\Replay\Support\Paths;
 
 /**
  * The conservative half of `static_declaration_edges` (SPEC.md §4.3.1): a watch pattern per
@@ -45,9 +47,9 @@ use Manuglopez\Replay\Cache\Graph;
  * a glob: `WatchPatterns::parse()` splits a key on whitespace and reads a leading `!` as an
  * exclude token, so `lang/es MX/messages.php` would otherwise never match its own file.
  *
- * `.blade.php` is excluded: {@see \Manuglopez\Replay\Laravel\Rules\BladeRule} and the Laravel `resources/views/**`
- * default already own that path, and its own unmatched files already fall through to
- * `WatchRule` anyway.
+ * `.blade.php` is excluded: {@see \Manuglopez\Replay\Laravel\Rules\BladeRule} and the Laravel
+ * `resources/views/**` pattern (a default, or with the Laravel rules on a fallback) cover that
+ * path, and a template nothing claims already falls through to `WatchRule` anyway.
  *
  * Shared by {@see RunListBuilder::build()} and `Console\Commands\ExplainCommand` on purpose:
  * `explain` has to show the plan a real pass would produce, not a rosier one, and a second
@@ -55,9 +57,17 @@ use Manuglopez\Replay\Cache\Graph;
  */
 final readonly class ResiduePatterns
 {
+    /**
+     * @param bool $unattributed the `static_declaration_edges` half: a `.php` file the graph has
+     *        no edge for
+     * @param SourceScope|null $scope with it, the half that holds whatever the flag: a `.php`
+     *        file `<source><exclude>` keeps out of coverage ({@see self::isUnattributable()})
+     */
     public function __construct(
         private Graph $graph,
         private TestPaths $testPaths,
+        private bool $unattributed = true,
+        private ?SourceScope $scope = null,
     ) {
     }
 
@@ -76,17 +86,52 @@ final readonly class ResiduePatterns
      */
     private function targets(): array
     {
+        return self::targetsFor($this->testPaths);
+    }
+
+    /**
+     * {@see self::targets()}, for {@see NonEdgeInputs}' `residue@3` and `unattributable@3` scopes.
+     *
+     * @return list<string>
+     */
+    public static function targetsFor(TestPaths $testPaths): array
+    {
         return array_values(array_unique([
-            ...$this->testPaths->directories(),
-            ...$this->testPaths->files(),
+            ...$testPaths->directories(),
+            ...$testPaths->files(),
         ]));
     }
 
     /**
+     * The `static_declaration_edges` residue among `$changed`: a `.php` file without an edge.
+     * A fallback (`WatchPatterns::addFallback()`), for what no rule claimed.
+     *
      * @param list<string> $changed project-relative
      * @return array<string, list<string>> pattern (a literal path) => test directories/files
      */
     public function for(array $changed): array
+    {
+        return $this->patternsFor($changed, fn (string $rel): bool => $this->isResidue($rel));
+    }
+
+    /**
+     * The files among `$changed` coverage cannot see ({@see self::isUnattributable()}).
+     * Additive (`WatchPatterns::addUnattributable()`), like a configured pattern.
+     *
+     * @param list<string> $changed project-relative
+     * @return array<string, list<string>> pattern (a literal path) => test directories/files
+     */
+    public function unattributableFor(array $changed): array
+    {
+        return $this->patternsFor($changed, fn (string $rel): bool => $this->isUnattributable($rel));
+    }
+
+    /**
+     * @param list<string> $changed
+     * @param \Closure(string): bool $claims
+     * @return array<string, list<string>>
+     */
+    private function patternsFor(array $changed, \Closure $claims): array
     {
         $targets = $this->targets();
 
@@ -97,7 +142,7 @@ final readonly class ResiduePatterns
         $patterns = [];
 
         foreach ($changed as $rel) {
-            if ($this->isResidue($rel)) {
+            if ($claims($rel)) {
                 $patterns[$rel] = $targets;
             }
         }
@@ -107,12 +152,45 @@ final readonly class ResiduePatterns
 
     public function isResidue(string $rel): bool
     {
+        return $this->unattributed && self::hasResidueShape($rel, $this->testPaths) && $this->graph->fileId($rel) === null;
+    }
+
+    /**
+     * The half of the residue that does not depend on `static_declaration_edges` (F5): a
+     * `.php` file the project's own `<source><exclude>` keeps out of coverage can never be
+     * attributed to the tests that execute it, whether they do or not. It ALWAYS runs
+     * everything: a configured watch pattern naming it adds its targets to that and never
+     * narrows it (watch patterns only ever add), since a project's `'app/**' => [three tests]`
+     * says those three depend on `app/`, not that nothing else boots its providers. A project
+     * that wants narrower selection for such a file takes it out of `<source><exclude>`, so that
+     * coverage records who executes it. A function of the path and the configuration only,
+     * never of the graph: an edge such a file has anyway (a name another file mentions) does not
+     * say which tests execute it, so the rule applies whatever edges it has
+     * ({@see Rules\WatchRule}), and `NonEdgeInputs`' `unattributable@3` scope, not relative to
+     * the universe either, is its claim.
+     */
+    public function isUnattributable(string $rel): bool
+    {
+        if ($this->scope === null || ! self::hasResidueShape($rel, $this->testPaths)) {
+            return false;
+        }
+
+        return $this->scope->excludedByConfiguration(Paths::join($this->graph->projectRoot(), $rel));
+    }
+
+    /**
+     * The half of {@see self::isResidue()} that does not ask the graph: a `.php` file that is
+     * neither a Blade template nor a test file. Shared with {@see NonEdgeInputs}, whose
+     * `residue@3` scope is this fallback's claim.
+     */
+    public static function hasResidueShape(string $rel, TestPaths $testPaths): bool
+    {
         $lower = strtolower($rel);
 
         if (! str_ends_with($lower, '.php') || str_ends_with($lower, '.blade.php')) {
             return false;
         }
 
-        return ! $this->testPaths->isTestFile($rel) && $this->graph->fileId($rel) === null;
+        return ! $testPaths->isTestFile($rel);
     }
 }

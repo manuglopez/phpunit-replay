@@ -26,11 +26,12 @@ use Manuglopez\Replay\Change\LastRunTree;
  *
  * - the layer whose sha is the diff base is TRUSTED as its sha's tree: the pass's own diff
  *   is exactly this rule applied to it, provided its results really were recorded on that
- *   tree. That premise is not audited here and has known exceptions — results written into
- *   a layer without its sha moving (a CI pass without `--allow-ci-baseline`, an incomplete
- *   pass) and results recorded on a dirty working tree (then read on another branch, or
- *   published with `remote_push: all` and adopted elsewhere). Those are tracked separately,
- *   to be closed by stamping each result with the inputs it ran against;
+ *   tree. That premise is not audited here; {@see StampAudit}, which runs next, checks every
+ *   result against the inputs it was stamped with, and is what closes its exceptions —
+ *   results written into a layer without its sha moving (a CI pass without
+ *   `--allow-ci-baseline`, an incomplete pass) and results recorded on a dirty working tree
+ *   (then read on another branch, or published with `remote_push: all` and adopted
+ *   elsewhere);
  * - a layer BELOW it needs no check of its own (`Graph::fallbackChain()` argues why, on the
  *   same premise: the base layer is a delta its own passes wrote, so anything it lacks was
  *   served from below as valid on its tree, and the diff says nothing the test depends on

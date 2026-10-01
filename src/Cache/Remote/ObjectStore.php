@@ -17,15 +17,19 @@ use Manuglopez\Replay\Support\Json;
  *  - `objects/<yyyy-mm>/<k>.json` — the results of ONE test file under ONE content key,
  *    body = `{"k": …, "file": <project-relative test file>, "results": {testId: result}}`.
  *
- * Objects are content-addressed and append-only, so the month in the key is only a shard
- * (the month the object was first written), never part of its identity. Lookups therefore
- * try the current month and the previous five by name — six cheap `get`s, no listing —
- * and only fall back to a full `keys()` scan on backends that support one.
+ * An object is addressed by content (`k`), and its body grows: it holds the results recorded
+ * under each non-edge input digest it has been published with (the newest at the top level,
+ * older ones under `variants`, identical outcomes under `aliases`), merged on publish and
+ * bounded ({@see self::VARIANTS}). So the month in the key is only a shard (the month the
+ * object was last written to), never part of its identity. Lookups try the current month and
+ * the previous five by name — six cheap `get`s, no listing — and only fall back to a full
+ * `keys()` scan on backends that support one.
  *
  * Everything read is mirrored under `<stateDir>/remote/cache/objects/<k>.json`, flat: `k`
  * is already unique, so the local mirror needs no shard and a second lookup for the same
- * key costs one `is_file()`. That mirror is also what makes a re-`put` of an object this
- * machine already knows about a no-op. Graphs are mutable and are never mirrored.
+ * key costs one `is_file()`. Whether a digest is already published is asked of the remote's
+ * own copy, not of that mirror ({@see self::putObject()}). Graphs are mutable and are never
+ * mirrored.
  *
  * Bug fix: that mirror file doubles as {@see self::putObject()}'s "already published"
  * marker, so it must mean the object is durably in the remote — never merely that `put()`
@@ -44,13 +48,29 @@ use Manuglopez\Replay\Support\Json;
  * precisely so it never has to touch the marker invariant above — see
  * {@see self::collectMirror()}'s own docblock.
  *
+ * An object written from this release on also carries `n`, the non-edge input digest its
+ * top-level results were recorded under (`Select\NonEdgeInputs`), beside `k` in the body: its
+ * path and `k` are unchanged, and a reader that predates it ignores the field (and reads the
+ * top-level results, as it always did). A consumer whose own digest for the test file equals
+ * `n`, a variant's or an alias's knows every input the rule chain can see is the one those
+ * results ran on. An object without any digest proves only what `k` covers.
+ *
  * @phpstan-import-type TestResultArray from Graph
- * @phpstan-type RemoteObject array{k: string, file: string, results: array<string, TestResultArray>}
+ * @phpstan-type RemoteObject array{k: string, file: string, n: ?string, at: int, results: array<string, TestResultArray>, variants: array<string, array{at: int, results: array<string, TestResultArray>}>, aliases: array<string, array{of: string, at: int, h: string}>}
  */
 final class ObjectStore
 {
     /** @var int months before the current one an object lookup probes by name */
     private const SHARD_LOOKBACK = 5;
+
+    /**
+     * @var int digests one object names, newest first ({@see self::putObject()}): variants
+     *      with their own results and aliases of one, together
+     */
+    public const VARIANTS = 20;
+
+    /** @var array<string, true> keys {@see self::object()} already asked the remote for again this pass */
+    private array $refetched = [];
 
     /** @var list<string>|null memoised `keys('objects/')` for the fallback scan */
     private ?array $listing = null;
@@ -146,7 +166,7 @@ final class ObjectStore
      *
      * @return RemoteObject|null
      */
-    public function object(string $k): ?array
+    public function object(string $k, ?string $digest = null): ?array
     {
         if ($k === '') {
             return null;
@@ -154,16 +174,129 @@ final class ObjectStore
 
         $local = $this->mirrorPath($k);
         $cached = AtomicFile::read($local);
+        $mirrored = $cached !== null ? self::decodeObject($cached, $k) : null;
 
-        if ($cached !== null) {
-            $decoded = self::decodeObject($cached, $k);
-
-            if ($decoded !== null) {
+        if ($mirrored !== null) {
+            // Objects grow a variant per digest, so a mirrored copy without the one asked for
+            // may just be older than the remote's: asked again once per key and pass.
+            if ($digest === null || self::holds($mirrored, $digest) || isset($this->refetched[$k])) {
                 $this->debug('hit (local mirror) objects/*/' . $k . '.json');
 
-                return $decoded;
+                return $mirrored;
             }
+
+            $this->refetched[$k] = true;
         }
+
+        return $this->fetch($k) ?? $mirrored;
+    }
+
+    /**
+     * Whether an object holds results recorded under `$digest`: its top-level `n`, a variant,
+     * or an alias whose variant still has the outcome the alias was compared against.
+     *
+     * @param RemoteObject $object
+     */
+    public static function holds(array $object, string $digest): bool
+    {
+        return $object['n'] === $digest || isset($object['variants'][$digest]) || self::aliasTarget($object, $digest) !== null;
+    }
+
+    /**
+     * The results an object proves for a test file whose current non-edge digest is
+     * `$digest`: the ones recorded under that very digest, top-level or variant, or, for an
+     * alias, its variant's — only while that variant's outcome is still the one the alias was
+     * compared against (`h`): a variant replaced since (a merge with another machine's newer
+     * run under the same digest) says nothing about the alias's run. An object written before
+     * digests existed proves only its content key, and serves only a file selected for reasons
+     * the key covers (`Select\Selection::coveredByContentKey()`).
+     *
+     * @param RemoteObject $object
+     * @return array<string, TestResultArray>|null
+     */
+    public static function resultsFor(array $object, ?string $digest, bool $coveredByContentKey): ?array
+    {
+        if ($object['n'] === null && $object['variants'] === [] && $object['aliases'] === []) {
+            return $coveredByContentKey ? $object['results'] : null;
+        }
+
+        if ($digest === null) {
+            return null;
+        }
+
+        if ($object['n'] === $digest) {
+            return $object['results'];
+        }
+
+        if (isset($object['variants'][$digest])) {
+            return $object['variants'][$digest]['results'];
+        }
+
+        $target = self::aliasTarget($object, $digest);
+
+        return $target === null ? null : self::variantResults($object, $target);
+    }
+
+    /**
+     * The digest `$digest` is an alias of, while that variant is held with the outcome the
+     * alias recorded; null otherwise.
+     *
+     * @param RemoteObject $object
+     */
+    private static function aliasTarget(array $object, string $digest): ?string
+    {
+        $alias = $object['aliases'][$digest] ?? null;
+
+        if ($alias === null) {
+            return null;
+        }
+
+        $results = self::variantResults($object, $alias['of']);
+
+        return $results !== null && self::outcomeOf($results) === $alias['h'] ? $alias['of'] : null;
+    }
+
+    /**
+     * @param RemoteObject $object
+     * @return array<string, TestResultArray>|null
+     */
+    private static function variantResults(array $object, string $digest): ?array
+    {
+        if ($object['n'] === $digest) {
+            return $object['results'];
+        }
+
+        return $object['variants'][$digest]['results'] ?? null;
+    }
+
+    /**
+     * Two bodies of the same object merged: every digest either names, newest first, bounded
+     * the way {@see self::putObject()} bounds one. What the git backend replays over upstream
+     * after a rejected push (`GitRemoteCache`), so a concurrent publisher's variant survives.
+     * A digest both name keeps the newer entry, and an alias whose variant the other side
+     * replaced with a different outcome is dropped ({@see self::normalise()}). Null when either
+     * body is not an object under `$k`.
+     */
+    public static function mergeBodies(string $upstream, string $ours, string $k): ?string
+    {
+        $a = self::decodeObject($upstream, $k);
+        $b = self::decodeObject($ours, $k);
+
+        if ($a === null || $b === null) {
+            return null;
+        }
+
+        if ($b['n'] === null) {
+            return $upstream;
+        }
+
+        return Json::encode(self::normalise([...self::entriesOf($a), ...self::entriesOf($b)], $k, $b['file']));
+    }
+
+    /** @return RemoteObject|null the remote's copy, mirrored locally when found */
+    private function fetch(string $k): ?array
+    {
+        $local = $this->mirrorPath($k);
 
         foreach ($this->shards() as $shard) {
             $body = $this->remote->get(self::objectKey($shard, $k));
@@ -207,32 +340,70 @@ final class ObjectStore
     }
 
     /**
-     * Publishes the results of one test file under its content key. A key this machine
-     * already has mirrored locally (durably confirmed, {@see self::confirmPublished()}) or
-     * already staged this very session is skipped: objects are immutable, so re-uploading one
-     * only costs bandwidth (and, on the git backend, a pointless commit).
+     * Publishes the results of one test file under its content key and non-edge digest.
+     *
+     * One object per `k`, holding a variant per digest its results were recorded under: the
+     * newest at the top level (`n`, `results`, which is all a reader that predates variants
+     * reads) and up to {@see self::VARIANTS} − 1 older ones under `variants`, merged on
+     * publish. So a digest another machine published first does not stop this one's from
+     * being served. Whether the digest is already there is asked of the remote's own copy in
+     * the shard this writes to (one `get`), or of what this pass staged, never of the local
+     * mirror alone: a variant this machine published and a concurrent writer later dropped is
+     * then published again. The merge is with that copy, or with the mirrored one when the
+     * current shard has none (an older shard's object); the git backend merges again with
+     * upstream when its push is rejected. What remains possible: two writers of the same `k`
+     * racing on a file or HTTP remote, where the last `put` wins and the other's variant is
+     * lost until it publishes again — a miss for it, never a result served for another digest.
+     *
+     * Results identical in outcome to a variant already there (same test ids, statuses,
+     * messages and assertion counts: a digest-only change, such as a translation file every
+     * test watches) are recorded as an alias of that variant, one short entry, instead of a
+     * copy. The number of writes stays what it always was — one per test file a pass
+     * executed — and the object's size grows by the alias only. An object published without a
+     * digest (by a caller that has none) is skipped whenever the key is already known, as
+     * before digests existed.
      *
      * @param array<string, TestResultArray> $results
+     * @param string|null $digest the non-edge input digest every one of `$results` was
+     *        recorded under
      */
-    public function putObject(string $k, string $testFileRel, array $results): bool
+    public function putObject(string $k, string $testFileRel, array $results, ?string $digest = null): bool
     {
         if ($k === '' || $results === []) {
             return false;
         }
 
-        if (isset($this->pending[$k]) || is_file($this->mirrorPath($k))) {
-            $this->debug('skip (already published) objects/*/' . $k . '.json');
+        $key = self::objectKey(self::currentShard(), $k);
 
-            return false;
+        if ($digest === null) {
+            // As before digests: the key known anywhere, the mirror marker included, is enough.
+            if (isset($this->pending[$k]) || is_file($this->mirrorPath($k))) {
+                $this->debug('skip (already published) objects/*/' . $k . '.json');
+
+                return false;
+            }
+
+            $known = null;
+        } else {
+            $staged = isset($this->pending[$k]) ? self::decodeObject($this->pending[$k], $k) : null;
+            $upstreamBody = $staged === null ? $this->remote->get($key) : null;
+            $upstream = $upstreamBody !== null ? self::decodeObject($upstreamBody, $k) : null;
+            $authoritative = $staged ?? $upstream;
+
+            if ($authoritative !== null && self::holds($authoritative, $digest)) {
+                $this->debug('skip (already published) ' . $key);
+
+                return false;
+            }
+
+            $known = $authoritative ?? self::decodeObject((string) AtomicFile::read($this->mirrorPath($k)), $k);
         }
 
-        $body = Json::encode(['k' => $k, 'file' => $testFileRel, 'results' => $results]);
+        $body = Json::encode(self::withVariant($known, $k, $testFileRel, $results, $digest, time()));
 
         if ($body === null) {
             return false;
         }
-
-        $key = self::objectKey(self::currentShard(), $k);
         $ok = $this->remote->put($key, $body);
 
         $this->debug(($ok ? 'put' : 'put-failed') . ' ' . $key);
@@ -255,8 +426,8 @@ final class ObjectStore
 
     /**
      * Marks every object {@see self::putObject()} staged this session as durably published,
-     * by writing each one's local "already published" marker — the very file
-     * {@see self::putObject()}'s own skip check reads. Call this once, right after the
+     * by writing each one's local "already published" marker, which is also the mirrored copy
+     * a later merge starts from when the remote's current shard has none. Call this once, right after the
      * remote's `end()`, never before: `end()` is the one call that actually confirms a git
      * push landed (`put()` alone never does, see {@see self::putObject()}'s docblock).
      *
@@ -264,12 +435,10 @@ final class ObjectStore
      * an error. Checked here, inside ObjectStore, rather than left to the caller: a caller
      * that forgets the check can then never turn a failed push into permanent data loss.
      * This is the deliberately safe direction, and it is asymmetric on purpose — skipping a
-     * marker here costs one redundant `put` of the same key on the next run, a documented
-     * no-op because objects are content-addressed and append-only
-     * (docs/sharing-the-cache.md: "two machines writing the same key at the same time is a
-     * no-op, never a conflict"); writing one for a push that silently failed costs that
-     * object forever, because {@see self::putObject()} never puts a key its marker already
-     * exists for. When in doubt, this method does not write the marker.
+     * marker here costs at most one `put` of the same key on the next run, which merges
+     * with what the remote holds and changes nothing a reader sees; writing one for a push that
+     * silently failed would make it the merge base of a later publish of the same key without
+     * the remote ever having had it. When in doubt, this method does not write the marker.
      *
      * @return int how many markers were actually written this call
      */
@@ -358,9 +527,9 @@ final class ObjectStore
      * `is_file()` stays true, only the now-empty body makes {@see self::object()} fail
      * {@see self::decodeObject()} and fall through to the remote, refilling the file exactly
      * as a first read would have. `$forgetPublished` unlinks instead, reclaiming the inode at
-     * the cost of one redundant, harmless `put` if this machine ever addresses that key again
-     * (objects are content-addressed and append-only) — never data loss, since the marker
-     * this drops is a re-publish optimisation, never the only copy of the object.
+     * the cost of one `put` if this machine ever addresses that key again (merged with the
+     * remote's copy, so it adds nothing a reader would not already find) — never data loss,
+     * since the mirror is a copy, never the only one.
      *
      * @param array<string, true> $reachable content keys the local graph can still address
      * @return array{objects: int, reachable: int, evicted: int, reclaimedBytes: int}
@@ -462,7 +631,231 @@ final class ObjectStore
             return null;
         }
 
-        return ['k' => $k, 'file' => $file, 'results' => $results];
+        $n = $data['n'] ?? null;
+        $at = $data['at'] ?? null;
+        $variants = [];
+
+        foreach (is_array($data['variants'] ?? null) ? $data['variants'] : [] as $digest => $variant) {
+            if (! is_string($digest) || $digest === '' || ! is_array($variant)) {
+                continue;
+            }
+
+            $variantResults = self::decodeResults($variant['results'] ?? null);
+
+            if ($variantResults !== []) {
+                $variants[$digest] = ['at' => is_int($variant['at'] ?? null) ? $variant['at'] : 0, 'results' => $variantResults];
+            }
+        }
+
+        $aliases = [];
+
+        foreach (is_array($data['aliases'] ?? null) ? $data['aliases'] : [] as $digest => $alias) {
+            if (is_string($digest) && $digest !== '' && is_array($alias) && is_string($alias['of'] ?? null) && is_string($alias['h'] ?? null)) {
+                $aliases[$digest] = ['of' => $alias['of'], 'at' => is_int($alias['at'] ?? null) ? $alias['at'] : 0, 'h' => $alias['h']];
+            }
+        }
+
+        return [
+            'k' => $k,
+            'file' => $file,
+            'n' => is_string($n) && $n !== '' ? $n : null,
+            'at' => is_int($at) ? $at : 0,
+            'results' => $results,
+            'variants' => $variants,
+            'aliases' => $aliases,
+        ];
+    }
+
+    /**
+     * `$existing` with `$results` recorded under `$digest`: a new variant, or, when a variant
+     * it holds has the same outcome, an alias of that variant carrying the outcome's
+     * fingerprint (`h`). Bounded and ordered by {@see self::normalise()}. A top level written
+     * without a digest (before digests existed) is not kept as a variant: it names none.
+     *
+     * @param RemoteObject|null $existing
+     * @param array<string, TestResultArray> $results
+     * @return array<string, mixed>
+     */
+    private static function withVariant(?array $existing, string $k, string $file, array $results, ?string $digest, int $now): array
+    {
+        if ($digest === null) {
+            return ['k' => $k, 'file' => $file, 'results' => $results];
+        }
+
+        $entries = $existing === null ? [] : self::latestByDigest(self::entriesOf($existing));
+        $outcome = self::outcomeOf($results);
+
+        foreach ($entries as $entry) {
+            if ($entry['d'] !== $digest && isset($entry['results']) && self::outcomeOf($entry['results']) === $outcome) {
+                $entries[] = ['d' => $digest, 'at' => $now, 'of' => $entry['d'], 'h' => $outcome];
+
+                return self::normalise($entries, $k, $file);
+            }
+        }
+
+        $entries[] = ['d' => $digest, 'at' => $now, 'results' => $results];
+
+        return self::normalise($entries, $k, $file);
+    }
+
+    /**
+     * Every digest an object names, as a flat list: variants with results, aliases with the
+     * digest whose results they share and that outcome's fingerprint. A top level without a
+     * digest names none.
+     *
+     * @param RemoteObject $object
+     * @return list<array{d: string, at: int, results?: array<string, TestResultArray>, of?: string, h?: string}>
+     */
+    private static function entriesOf(array $object): array
+    {
+        $entries = [];
+
+        if ($object['n'] !== null) {
+            $entries[] = ['d' => $object['n'], 'at' => $object['at'], 'results' => $object['results']];
+        }
+
+        foreach ($object['variants'] as $digest => $variant) {
+            $entries[] = ['d' => (string) $digest, 'at' => $variant['at'], 'results' => $variant['results']];
+        }
+
+        foreach ($object['aliases'] as $digest => $alias) {
+            $entries[] = ['d' => (string) $digest, 'at' => $alias['at'], 'of' => $alias['of'], 'h' => $alias['h']];
+        }
+
+        // A body lists newest first; entries go oldest first, so that within one second the
+        // later index is the later write, as it is for an entry appended to them.
+        return array_reverse($entries);
+    }
+
+    /**
+     * One entry per digest, the newest (within one second, the one listed later: the one
+     * being published, or ours over upstream's in a merge).
+     *
+     * @param list<array{d: string, at: int, results?: array<string, TestResultArray>, of?: string, h?: string}> $entries
+     * @return list<array{d: string, at: int, results?: array<string, TestResultArray>, of?: string, h?: string}>
+     */
+    private static function latestByDigest(array $entries): array
+    {
+        $latest = [];
+
+        foreach ($entries as $i => $entry) {
+            $current = $latest[$entry['d']] ?? null;
+
+            if ($current === null || [$entry['at'], $i] >= [$current[0]['at'], $current[1]]) {
+                $latest[$entry['d']] = [$entry, $i];
+            }
+        }
+
+        return array_values(array_map(static fn (array $pair): array => $pair[0], $latest));
+    }
+
+    /**
+     * The body for a set of entries. A digest named twice keeps its newest entry. An alias is
+     * kept only with its variant, and only while that variant still has the outcome the alias
+     * recorded (`h`): a merge that replaced the variant with another machine's newer run drops
+     * the alias, since nothing says its own run had that outcome.
+     *
+     * Bounded at {@see self::VARIANTS} digests by GROUP: a variant and its aliases count as
+     * recent as the newest of them, groups are kept most recent first, a variant always before
+     * its aliases, and the oldest aliases are the ones cut. So publishing the same outcome
+     * under one new digest after another keeps the variant they all point at, whose results are
+     * the only copy — trimming by entry dropped it as the oldest, and every alias with it. The
+     * most recent group's variant goes at the top level, where an older reader looks.
+     *
+     * @param list<array{d: string, at: int, results?: array<string, TestResultArray>, of?: string, h?: string}> $entries
+     * @return array<string, mixed>
+     */
+    private static function normalise(array $entries, string $k, string $file): array
+    {
+        $latest = self::latestByDigest($entries);
+
+        /** @var array<string, array{variant: array{d: string, at: int, results: array<string, TestResultArray>}, aliases: list<array{d: string, at: int, of: string, h: string, order: int}>, recent: int, order: int}> $groups */
+        $groups = [];
+
+        foreach ($latest as $order => $entry) {
+            if (isset($entry['results'])) {
+                $groups[$entry['d']] = ['variant' => ['d' => $entry['d'], 'at' => $entry['at'], 'results' => $entry['results']], 'aliases' => [], 'recent' => $entry['at'], 'order' => $order];
+            }
+        }
+
+        foreach ($latest as $order => $entry) {
+            $of = $entry['of'] ?? null;
+            $h = $entry['h'] ?? null;
+
+            if ($of === null || $h === null || ! isset($groups[$of]) || self::outcomeOf($groups[$of]['variant']['results']) !== $h) {
+                continue;
+            }
+
+            $groups[$of]['aliases'][] = ['d' => $entry['d'], 'at' => $entry['at'], 'of' => $of, 'h' => $h, 'order' => $order];
+
+            if ([$entry['at'], $order] > [$groups[$of]['recent'], $groups[$of]['order']]) {
+                $groups[$of]['recent'] = $entry['at'];
+                $groups[$of]['order'] = $order;
+            }
+        }
+
+        uasort($groups, static fn (array $a, array $b): int => [$b['recent'], $b['order']] <=> [$a['recent'], $a['order']]);
+
+        $object = ['k' => $k, 'file' => $file];
+        $variants = [];
+        $aliases = [];
+        $room = self::VARIANTS;
+
+        foreach ($groups as $group) {
+            if ($room === 0) {
+                break;
+            }
+
+            $variant = $group['variant'];
+            $room--;
+
+            if (! isset($object['n'])) {
+                $object += ['n' => $variant['d'], 'at' => $variant['at'], 'results' => $variant['results']];
+            } else {
+                $variants[$variant['d']] = ['at' => $variant['at'], 'results' => $variant['results']];
+            }
+
+            $groupAliases = $group['aliases'];
+            usort($groupAliases, static fn (array $a, array $b): int => [$b['at'], $b['order']] <=> [$a['at'], $a['order']]);
+
+            foreach ($groupAliases as $alias) {
+                if ($room === 0) {
+                    break;
+                }
+
+                $aliases[$alias['d']] = ['of' => $alias['of'], 'at' => $alias['at'], 'h' => $alias['h']];
+                $room--;
+            }
+        }
+
+        if ($variants !== []) {
+            $object['variants'] = $variants;
+        }
+
+        if ($aliases !== []) {
+            $object['aliases'] = $aliases;
+        }
+
+        return $object;
+    }
+
+    /**
+     * A fingerprint of what a replay of these results would report: the test ids with their
+     * status, message and assertion count. Times and stamps are not outcome.
+     *
+     * @param array<string, TestResultArray> $results
+     */
+    private static function outcomeOf(array $results): string
+    {
+        $rows = [];
+
+        foreach ($results as $testId => $result) {
+            $rows[] = $testId . "\0" . $result['status'] . "\0" . $result['assertions'] . "\0" . $result['message'];
+        }
+
+        sort($rows);
+
+        return hash('xxh128', implode("\n", $rows));
     }
 
     /** @return array<string, TestResultArray> */
@@ -497,6 +890,10 @@ final class ObjectStore
 
             if (is_string($entry['key'] ?? null) && $entry['key'] !== '') {
                 $result['key'] = $entry['key'];
+            }
+
+            if (is_string($entry['digest'] ?? null) && $entry['digest'] !== '') {
+                $result['digest'] = $entry['digest'];
             }
 
             $out[$id] = $result;

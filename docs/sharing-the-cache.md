@@ -38,7 +38,7 @@ instead — a config with `baseline_branches` already tuned must not be clobbere
 command.
 
 **Why a dedicated repository is the default.** No infrastructure to run, the same on any forge,
-and the object store is append-only and content-addressed, so concurrent writers cannot conflict.
+and objects are addressed by content and merged with upstream on a rejected push, so concurrent writers do not lose each other's results.
 `remote:init --same-repo` configures the other supported shape instead — an orphan branch of the
 repository you already have, with nothing to create and no access to grant — and prints the cost
 that keeps it from being the default: a plain `git clone` of your project fetches every branch, so
@@ -221,8 +221,13 @@ constantly with real commits.
    `--explain` marks the files served from the cache with `[served from remote]` and lists the rest.
 7. **Maintenance** runs on a schedule via `.github/workflows/examples/tia-gc.yml`
    (`phpunit-replay prune --remote --keep-months=3 --squash`), monthly by default.
-8. **Rebase / force-push behaviour.** `objects/**` entries are append-only and content-addressed —
-   two machines writing the same key at the same time is a no-op, never a conflict. `graph/**`
+8. **Rebase / force-push behaviour.** `objects/**` entries are addressed by content key and hold
+   one variant per non-edge digest; when two machines write the same key at the same time, the one
+   whose push is rejected merges its variant into upstream's copy and retries — never a conflict.
+   (On the `file://` and HTTP backends there is no rejected push: each publisher reads the object,
+   merges and writes it back, and of two writes in the same instant the last one wins, so one
+   machine's variant can be lost. The guarantee is the same on every backend: a lost variant costs
+   a miss, that machine runs the test file again, never a result served for another digest.) `graph/**`
    writes use "keep ours" on a rebase (the objects underneath are unaffected either way). When the
    GC job squashes the branch into a single orphan commit and force-pushes it, every client
    notices on its next `begin()` (the start of the next push or pull): a fetch reporting
@@ -232,8 +237,8 @@ constantly with real commits.
    it in the local mirror, then `push` it. If the push itself fails — a network blip, an expired
    credential, a rejected fast-forward that could not be resolved after retrying — the object is
    never marked as published locally, regardless of how the staging step went. The next `run` (or
-   `phpunit-replay push`) simply tries again; retrying an already-published, content-addressed
-   object is the no-op described above, so nothing is ever pushed twice for real, and nothing is
+   `phpunit-replay push`) simply tries again; publishing a digest the remote's copy already names
+   is skipped, so nothing is ever pushed twice for real, and nothing is
    ever silently dropped because of a failure that looked like it belonged to a different object.
 10. **Sizes.** Each object is small — roughly 1–20 KB per test file per distinct content version
     (bigger test files or ones with more source dependencies land at the high end). Objects are

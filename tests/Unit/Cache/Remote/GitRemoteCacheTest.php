@@ -135,6 +135,30 @@ final class GitRemoteCacheTest extends TestCase
      * rejected push's `git reset --hard FETCH_HEAD` restored the file exactly as upstream
      * still had it. `end()` must not report success while quietly leaving the object upstream.
      */
+    public function test_a_rejected_push_merges_an_objects_variants_with_upstream_instead_of_overwriting_them(): void
+    {
+        $bare = $this->bareRepo();
+        $result = static fn (string $message): array => ['T::a' => ['status' => 1, 'message' => $message, 'time' => 0.1, 'assertions' => 0, 'file' => 'tests/ATest.php']];
+        $object = static fn (string $digest, string $message): string => (string) json_encode(['k' => 'kkk', 'file' => 'tests/ATest.php', 'n' => $digest, 'at' => 1, 'results' => $result($message)]);
+        $this->seedUpstream($bare, 'objects/2026-09/seed.json', '{}');
+
+        $client = $this->cacheFor($bare);
+        $client->begin();
+        self::assertTrue($client->put('objects/2026-09/kkk.json', $object('n1:ours', 'ours')));
+
+        // Another machine publishes the same object with its own digest first.
+        $this->extendUpstream($bare, 'objects/2026-09/kkk.json', $object('n1:theirs', 'theirs'));
+
+        $client->end();
+        self::assertNull($client->lastError());
+
+        $merged = json_decode((string) $this->showUpstream($bare, 'objects/2026-09/kkk.json'), true);
+        self::assertIsArray($merged);
+        $digests = [$merged['n'] ?? null, ...array_keys($merged['variants'] ?? [])];
+        sort($digests);
+        self::assertSame(['n1:ours', 'n1:theirs'], $digests, 'both variants upstream');
+    }
+
     public function test_a_deletion_survives_a_rejected_push_and_is_gone_upstream(): void
     {
         $bare = $this->bareRepo();

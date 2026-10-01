@@ -145,16 +145,16 @@ One rule is worth internalising: **a file no test ever executed affects nothing.
 
 ### The rules, in order
 
-Each rule consumes what earlier ones didn't claim. The Laravel ones do nothing on a non-Laravel project.
+Each rule consumes what earlier ones didn't claim, except `BladeRule` and your watch patterns, which see every changed file: another rule claiming a file says nothing about who else depends on it. The Laravel ones do nothing on a non-Laravel project.
 
 | # | Rule | Triggers on | Picks |
 |---|---|---|---|
-| 1 | `MigrationRule` *(Laravel)* | a changed `database/migrations/**/*.php` | tests whose recorded tables intersect the ones it touches |
+| 1 | `MigrationRule` *(Laravel)* | a changed `database/migrations/**/*.php` | tests whose recorded tables intersect the ones it touches; every test when it has no table to narrow by |
 | 2 | `PhpEdgeRule` | a changed or deleted file the graph knows | every test file with an edge to it |
 | 3 | `TestFileRule` | a changed file that is itself a test | itself |
 | 4 | `SiblingRule` *(Laravel)* | a new `.php` in a provider/listener/policy/command/factory/seeder directory | tests with an edge to a neighbour in that directory |
-| 5 | `BladeRule` *(Laravel)* | a changed `.blade.php` the graph doesn't know | walks `@include`/`@extends`/`view()`/`<x-…>` up to a Blade file it does know, then that file's tests |
-| 6 | `WatchRule` | everything left over | glob → test-directory patterns: built-in defaults, framework defaults when detected, plus your own `watch` config |
+| 5 | `BladeRule` *(Laravel)* | any changed `.blade.php` | walks `@include`/`@extends`/`view()`/`<x-…>` up to the Blade files tests render, then those files' tests |
+| 6 | `WatchRule` | every changed file | glob → test-directory patterns: built-in defaults, framework defaults when detected, plus your own `watch` config; and, for what nothing claimed, the residue: a `.php` file `<source><exclude>` keeps out of coverage (or, with `static_declaration_edges`, any `.php` file without an edge) runs every test |
 
 Two more categories always run, regardless of rules: **test files new to the graph**, and any cached result that **must be re-checked** — a failure or error always re-runs; a risky, incomplete or skipped result re-runs only if your PHPUnit config would actually surface it.
 
@@ -165,7 +165,7 @@ Two more categories always run, regardless of rules: **test files new to the gra
 | Framework | Detected by | Patterns |
 |---|---|---|
 | Generic | always on | `.env*`, `phpunit.xml*`, `docker-compose*.y*ml`, `tests/**/Fixtures/**`, `tests/**/__snapshots__/**` |
-| Laravel | `artisan` exists | `config/**`, `routes/**`, `database/migrations/**`, `resources/views/**`, `lang/**`, `resources/lang/**`, `app/** !*.php`, `bootstrap/*.php` |
+| Laravel | `artisan` exists | `config/**`, `routes/**`, `lang/**`, `resources/lang/**`, `app/** !*.php`, `bootstrap/*.php`; `database/migrations/**` and `resources/views/**` only with `laravel => 'off'` (otherwise the Migration and Blade rules cover them) |
 | Symfony | `config/bundles.php` exists | `config/**`, `migrations/**`, `templates/**`, `translations/**` |
 
 On a project that is neither, the generic row is all that applies — and the graph does the rest of the work, since a recorded edge doesn't care what framework produced it.

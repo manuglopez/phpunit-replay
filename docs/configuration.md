@@ -128,7 +128,7 @@ Built-in `WatchRule` defaults, by detected framework:
 | Framework | Detected by | Patterns |
 |---|---|---|
 | Generic | always | `.env*`, `phpunit.xml*`, `docker-compose*.y*ml`, `tests/**/Fixtures/**`, `tests/**/__snapshots__/**` |
-| Laravel | `artisan` exists | `config/**`, `routes/**`, `database/migrations/**`, `resources/views/**`, `lang/**`, `resources/lang/**`, `app/** !*.php`, `bootstrap/*.php` |
+| Laravel | `artisan` exists | `config/**`, `routes/**`, `lang/**`, `resources/lang/**`, `app/** !*.php`, `bootstrap/*.php`; `database/migrations/**` and `resources/views/**` only with `laravel => 'off'` (otherwise the Migration and Blade rules cover them) |
 | Symfony | `config/bundles.php` exists | `config/**`, `migrations/**`, `templates/**`, `translations/**` |
 
 ### Cache honesty

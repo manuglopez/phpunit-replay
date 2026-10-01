@@ -9,12 +9,14 @@ use Manuglopez\Replay\Analysis\FactsCache;
 use Manuglopez\Replay\Analysis\StaticEdges;
 use Manuglopez\Replay\Cache\BaselineWriter;
 use Manuglopez\Replay\Cache\ContentKey;
+use Manuglopez\Replay\Cache\FileHashes;
 use Manuglopez\Replay\Cache\Fingerprint;
 use Manuglopez\Replay\Cache\Graph;
 use Manuglopez\Replay\Cache\GraphStore;
 use Manuglopez\Replay\Cache\GraphUpdater;
 use Manuglopez\Replay\Cache\OnceProcessClassifier;
 use Manuglopez\Replay\Cache\ProjectKey;
+use Manuglopez\Replay\Cache\Remote\Exchange;
 use Manuglopez\Replay\Cache\Remote\ObjectStore;
 use Manuglopez\Replay\Cache\Remote\RemoteCacheFactory;
 use Manuglopez\Replay\Cache\RunContext;
@@ -44,8 +46,10 @@ use Manuglopez\Replay\Record\RunWriter;
 use Manuglopez\Replay\Record\SourceScope;
 use Manuglopez\Replay\Report\Summary;
 use Manuglopez\Replay\Select\LayerAudit;
+use Manuglopez\Replay\Select\NonEdgeInputs;
 use Manuglopez\Replay\Select\RunList;
 use Manuglopez\Replay\Select\RunListBuilder;
+use Manuglopez\Replay\Select\StampAudit;
 use Manuglopez\Replay\Select\TestPaths;
 use Manuglopez\Replay\Select\WatchPatterns;
 use Manuglopez\Replay\Support\Paths;
@@ -160,6 +164,22 @@ final class ReplayState
 
     /** @var array<string, true> classes whose method metadata has already been scanned */
     private static array $scannedForDepends = [];
+
+    /** Every file this process hashes, hashed once (`Cache\FileHashes`). */
+    private static ?FileHashes $hashes = null;
+
+    /** The project's test paths, for {@see self::nonEdgeInputs()}. */
+    private static ?TestPaths $testPaths = null;
+
+    /** The coverage scope: what `<source><exclude>` keeps out of coverage is residue (F5). */
+    private static ?SourceScope $sourceScope = null;
+
+    /** Project-relative PHPUnit configuration this process read, recorded on the graph. */
+    private static ?string $configurationFile = null;
+
+    private static ?NonEdgeInputs $inputs = null;
+
+    private static ?Graph $inputsGraph = null;
 
     /**
      * `$facts` is the SPEC.md §4.3.1 opt-in, already built: with it, the Recorder only
@@ -276,12 +296,20 @@ final class ReplayState
         self::$config = $config;
         self::$quarantine = Quarantine::load($stateDir);
         self::$quarantine->setReleaseAfter($config->quarantineReleaseAfter);
+        self::$hashes = FileHashes::inStateDir($root, $stateDir);
+        self::$testPaths = TestPaths::fromConfiguration($configuration, $root);
+        self::$sourceScope = $scope;
+        self::$configurationFile = $configuration->hasConfigurationFile() ? Paths::relative($root, $configuration->configurationFile()) : null;
 
         if ($mode === Mode::Replay && $graph !== null) {
             self::prepareReplay($config, $configuration, $graph, $root, $stateDir, $branch, $git);
         }
 
         $settled = self::$mode ?? $mode;
+
+        // What runs from here on are the tests: a file first read after this may have been
+        // read after they used it (Cache\FileHashes::stable()).
+        self::$hashes?->markRunStart($git->workingTreeFiles() ?? []);
 
         Warnings::debug(sprintf(
             'in-process: mode=%s driver=%s root=%s branch=%s baseline=%s runList=%d',
@@ -542,9 +570,12 @@ final class ReplayState
         }
 
         $git = self::$git ?? new Git($root);
-        $updater = new GraphUpdater($graph, $root, new ContentKey($root), self::$quarantine, self::$staticEdges, $git, self::$onceProcessPaths);
-        $applied = $updater->apply($partial, self::$branch, recordsEdges: $recordsEdges, complete: $complete);
+        $updater = new GraphUpdater($graph, $root, self::contentKey($root), self::$quarantine, self::$staticEdges, $git, self::$onceProcessPaths, self::nonEdgeInputs($graph, $root));
+        // Replayed results are recorded with the stamp they were served with, never this
+        // pass's: GraphUpdater::apply()'s `$replayed`.
+        $applied = $updater->apply($partial, self::$branch, recordsEdges: $recordsEdges, complete: $complete, replayed: self::$replayed);
         self::$excludedEdges = $applied['excludedEdges'];
+        $graph->setConfiguration(self::$configurationFile);
 
         $context = new RunContext(
             $root,
@@ -593,28 +624,16 @@ final class ReplayState
         }
 
         $branch = self::$branch;
-        $contentKey = new ContentKey(self::root());
-        $own = $graph->ownResults($branch);
+        $root = self::root();
+        $inputs = self::nonEdgeInputs($graph, $root);
 
-        foreach ($executedTestFiles as $file) {
-            if ($graph->isNotCacheable($file)) {
-                continue;
-            }
-
-            $key = $contentKey->forTestFile($graph, $file);
-
-            if ($key === null) {
-                continue;
-            }
-
-            // Only what ran under this key: after an incomplete pass pruneStaleResults()
-            // has not dropped an id this file no longer holds.
-            $results = ContentKey::resultsRecordedAt($own, $file, $key);
-
-            if ($results !== []) {
-                $objects->putObject($key, $file, $results);
-            }
+        if ($inputs === null) {
+            return;
         }
+
+        // Only what ran under the current key and digest (Cache\Remote\Exchange).
+        $exchange = new Exchange($objects, $graph, self::contentKey($root), $inputs);
+        $exchange->publishObjects($executedTestFiles, $graph->ownResults($branch));
 
         if ($config->remotePush !== 'all' || ! $complete || ! self::$persist) {
             return;
@@ -626,10 +645,12 @@ final class ReplayState
             return;
         }
 
-        $body = $graph->encode();
+        // Objects describe themselves; a graph recorded on a dirty tree does not describe the
+        // sha it is published at (Cache\GraphPublication).
+        $refusal = $exchange->publishGraph($branch, new ChangedFiles($root, self::$git ?? new Git($root)), 'remote: the ' . $branch . ' graph')['refusal'];
 
-        if ($body !== null) {
-            $objects->putGraph($branch, $body);
+        if ($refusal !== null) {
+            Warnings::warn($refusal);
         }
     }
 
@@ -716,6 +737,12 @@ final class ReplayState
         self::$savedSeconds = 0.0;
         self::$dependedUpon = [];
         self::$scannedForDepends = [];
+        self::$hashes = null;
+        self::$sourceScope = null;
+        self::$configurationFile = null;
+        self::$testPaths = null;
+        self::$inputs = null;
+        self::$inputsGraph = null;
     }
 
     private static function decideFresh(string $testFileAbsolute, string $testId): Decision
@@ -825,7 +852,7 @@ final class ReplayState
         $testPaths = TestPaths::fromConfiguration($configuration, $root);
 
         $watch = new WatchPatterns();
-        $watch->useDefaults($root, $testPaths->directories());
+        $watch->useDefaults($root, $testPaths->directories(), LaravelDetector::enabled($root, $config));
 
         if ($config->watch !== []) {
             $watch->add($config->watch);
@@ -842,8 +869,9 @@ final class ReplayState
             $reader,
             $policy,
             $root,
-            LaravelIntegration::rulesFor($graph, $root, $config),
+            LaravelIntegration::rulesFor($graph, $root, $config, $stateDir),
             $config->staticDeclarationEdges,
+            self::$sourceScope,
         );
 
         // The diff above only speaks for the layer whose sha it was taken from (the
@@ -851,6 +879,16 @@ final class ReplayState
         // layer `decideFresh()` would read a cached result from is checked against its own
         // (Select\LayerAudit) — here, own results recorded with no sha to check them by.
         $stale = (new LayerAudit($graph, $changedFiles, $builder->select(...)))->apply($branch, $sha, $lastRun);
+
+        // And every result left must carry the stamp of this tree (Select\StampAudit).
+        $contentKey = self::contentKey($root);
+        $inputs = self::nonEdgeInputs($graph, $root);
+        $stale = (new StampAudit(
+            $graph,
+            static fn (string $file): ?string => $contentKey->forTestFile($graph, $file),
+            static fn (string $file): ?string => $inputs?->digestFor($file),
+        ))->apply($branch, $stale);
+
         $runList = $builder->build($changed, $branch, $stale);
         self::$runList = self::replayAffectedFromRemote($graph, $runList, $branch, $root);
 
@@ -878,39 +916,42 @@ final class ReplayState
             return $runList;
         }
 
-        $contentKey = new ContentKey($root);
+        $inputs = self::nonEdgeInputs($graph, $root);
+
+        if ($inputs === null) {
+            return $runList;
+        }
+
+        $exchange = new Exchange($objects, $graph, self::contentKey($root), $inputs);
         $skip = array_fill_keys(
             [...$runList->unknown, ...$runList->rerun, ...$runList->quarantined, ...$runList->notCacheable],
             true,
         );
         $hit = [];
 
-        foreach ($runList->selection->testFiles() as $file) {
-            // Selected for a reason the content key does not contain (a watched file, a
-            // migration, a sibling...): the object under `k` cannot vouch for that trigger.
-            if (isset($skip[$file]) || $graph->isNotCacheable($file) || ! $runList->selection->coveredByContentKey($file)) {
+        // Selected, or stale: a file in the run list only because no layer holds a valid result
+        // for it is served from an object whose key and digest both match (Exchange::served()).
+        foreach (array_values(array_unique([...$runList->selection->testFiles(), ...$runList->stale])) as $file) {
+            if (isset($skip[$file]) || $graph->isNotCacheable($file)) {
                 continue;
             }
 
-            $key = $contentKey->forTestFile($graph, $file);
-            $object = $key === null ? null : $objects->object($key);
+            $results = $exchange->served($file, $runList->selection->coveredByContentKey($file), self::holdsARerun(...));
 
-            if ($key === null || $object === null || self::holdsARerun($object['results'])) {
+            if ($results === null) {
                 continue;
             }
 
-            foreach ($object['results'] as $testId => $result) {
-                $result['file'] = $file;
-                $result['key'] = $key;
+            foreach ($results as $testId => $result) {
                 $graph->setResult($branch, $testId, $result);
                 self::$remoteTestIds[$testId] = true;
             }
 
             $hit[] = $file;
-            Warnings::debug('remote: replayed ' . $file . ' from objects/*/' . $key . '.json');
+            Warnings::debug('remote: replayed ' . $file . ' from the remote');
         }
 
-        return $hit === [] ? $runList : $runList->withoutFromSelection($hit);
+        return $hit === [] ? $runList : $runList->withoutServed($hit);
     }
 
     /**
@@ -1041,6 +1082,7 @@ final class ReplayState
         self::$remoteOpen = false;
         $objects = self::$objects;
         $objects?->remote()->end();
+        self::$hashes?->save();
 
         // Bug fix (mirrored from Console\Runner\RunPipeline::closeRemote()): the local
         // "already published" markers are written only now, after end() —
@@ -1100,6 +1142,42 @@ final class ReplayState
         }
 
         return null;
+    }
+
+    /** The process's content keys, over its shared {@see FileHashes}. */
+    private static function contentKey(string $root): ContentKey
+    {
+        return new ContentKey($root, self::$hashes ??= new FileHashes($root));
+    }
+
+    /**
+     * The non-edge inputs of `$graph`, one instance per graph this process works on; null
+     * outside an in-process pass (no configuration to read the test paths from).
+     */
+    private static function nonEdgeInputs(Graph $graph, string $root): ?NonEdgeInputs
+    {
+        $config = self::$config;
+        $testPaths = self::$testPaths;
+
+        if ($config === null || $testPaths === null) {
+            return null;
+        }
+
+        if (self::$inputs === null || self::$inputsGraph !== $graph) {
+            self::$inputs = NonEdgeInputs::forProject(
+                $graph,
+                $root,
+                $config,
+                $testPaths,
+                self::$hashes ??= new FileHashes($root),
+                self::$git ?? new Git($root),
+                self::$stateDir,
+                self::$sourceScope,
+            );
+            self::$inputsGraph = $graph;
+        }
+
+        return self::$inputs;
     }
 
     private static function freshGraph(string $root, Graph $previous): Graph

@@ -88,6 +88,164 @@ final class ObjectStoreTest extends TestCase
         self::assertSame($this->results(), $object['results']);
     }
 
+    public function testAnObjectCarriesItsNonEdgeDigestBesideKAndOneWithoutItStillReads(): void
+    {
+        $store = $this->store();
+
+        self::assertTrue($store->putObject('deadbeef', 'tests/MoneyTest.php', $this->results(), 'n1:abc'));
+        self::assertTrue($store->putObject('cafebabe', 'tests/MoneyTest.php', $this->results()));
+
+        $body = Json::decodeArray((string) file_get_contents($this->remoteRoot . '/' . ObjectStore::objectKey(ObjectStore::currentShard(), 'deadbeef')));
+        self::assertIsArray($body);
+        self::assertSame(['k', 'file', 'n', 'at', 'results'], array_keys($body), 'the path and k are unchanged, n is additive');
+
+        $reader = new ObjectStore($this->backend(), $this->tmp . '/state2', 'shop-abc');
+        self::assertSame('n1:abc', $reader->object('deadbeef')['n'] ?? null);
+        $legacy = $reader->object('cafebabe');
+        self::assertNotNull($legacy);
+        self::assertNull($legacy['n'], 'an object written without a digest has none');
+        self::assertSame($this->results(), ObjectStore::resultsFor($legacy, 'n1:any', true), 'it serves a key-covered file');
+        self::assertNull(ObjectStore::resultsFor($legacy, 'n1:any', false), 'and nothing else');
+    }
+
+    public function testAnObjectHoldsAVariantPerDigestAndTheFirstPublisherNoLongerSquatsTheKey(): void
+    {
+        // Machine 1 publishes k under its digest; machine 2 read it (and mirrored it), ran the
+        // same k under another digest, and must still be able to publish, and be served.
+        $b1 = $this->backend();
+        $b1->begin();
+        $m1 = new ObjectStore($b1, $this->tmp . '/m1', 'shop-abc');
+        self::assertTrue($m1->putObject('kkk', 'tests/MoneyTest.php', $this->resultsWith('dirty'), 'n1:dirty'));
+        $b1->end();
+        $m1->confirmPublished();
+
+        $b2 = $this->backend();
+        $b2->begin();
+        $m2 = new ObjectStore($b2, $this->tmp . '/m2', 'shop-abc');
+        $first = $m2->object('kkk');
+        self::assertNotNull($first);
+        self::assertNull(ObjectStore::resultsFor($first, 'n1:clean', true), 'a miss by digest');
+        self::assertTrue($m2->putObject('kkk', 'tests/MoneyTest.php', $this->results(), 'n1:clean'));
+        self::assertFalse($m2->putObject('kkk', 'tests/MoneyTest.php', $this->results(), 'n1:clean'), 'already published');
+        $b2->end();
+        $m2->confirmPublished();
+
+        $m3 = new ObjectStore($this->backend(), $this->tmp . '/m3', 'shop-abc');
+        $merged = $m3->object('kkk');
+        self::assertNotNull($merged);
+        self::assertSame('n1:clean', $merged['n'], 'the newest at the top level, which is all an older reader reads');
+        self::assertSame(['n1:dirty'], array_keys($merged['variants']));
+        self::assertSame($this->resultsWith('dirty'), ObjectStore::resultsFor($merged, 'n1:dirty', false));
+        self::assertSame($this->results(), ObjectStore::resultsFor($merged, 'n1:clean', false));
+        self::assertNull(ObjectStore::resultsFor($merged, 'n1:other', true));
+    }
+
+    public function testTheSameOutcomeUnderAnotherDigestIsAnAliasAndAVariantLostUpstreamIsPublishedAgain(): void
+    {
+        $store = $this->store();
+        self::assertTrue($store->putObject('kkk', 'tests/MoneyTest.php', $this->results(), 'n1:a'));
+        // A digest-only change (a translation file every test watches): same outcome.
+        self::assertTrue($store->putObject('kkk', 'tests/MoneyTest.php', $this->results(), 'n1:b'));
+
+        $path = $this->remoteRoot . '/' . ObjectStore::objectKey(ObjectStore::currentShard(), 'kkk');
+        $body = Json::decodeArray((string) file_get_contents($path));
+        self::assertIsArray($body);
+        self::assertSame('n1:a', $body['n'] ?? null);
+        self::assertSame(['n1:b' => 'n1:a'], array_map(static fn (array $alias): mixed => $alias['of'], $body['aliases'] ?? []));
+        self::assertArrayNotHasKey('variants', $body, 'no second copy of the results');
+
+        $reader = new ObjectStore($this->backend(), $this->tmp . '/state2', 'shop-abc');
+        $object = $reader->object('kkk');
+        self::assertNotNull($object);
+        self::assertSame($this->results(), ObjectStore::resultsFor($object, 'n1:b', false));
+
+        // A concurrent writer drops n1:b upstream; this machine's mirror still names it.
+        $store->confirmPublished();
+        file_put_contents($path, (string) json_encode(['k' => 'kkk', 'file' => 'tests/MoneyTest.php', 'n' => 'n1:x', 'at' => 1, 'results' => $this->resultsWith('x')]));
+
+        $again = new ObjectStore($this->backend(), $this->stateDir, 'shop-abc');
+        self::assertTrue($again->putObject('kkk', 'tests/MoneyTest.php', $this->results(), 'n1:b'), 'asked of the remote, not the mirror');
+    }
+
+    public function testTheSameOutcomeUnderMoreDigestsThanTheCapNeverDropsTheVariantTheyAllPointAt(): void
+    {
+        // Every alias points at n1:0, the only copy of the results; trimmed as the oldest
+        // entry, it took every alias with it and left a body without results.
+        for ($i = 0; $i <= ObjectStore::VARIANTS + 1; $i++) {
+            $store = $this->store();
+            self::assertTrue($store->putObject('kkk', 'tests/MoneyTest.php', $this->results(), 'n1:' . $i), 'publish #' . $i);
+            $store->confirmPublished();
+
+            $object = (new ObjectStore($this->backend(), $this->tmp . '/fresh-' . $i, 'shop-abc'))->object('kkk');
+            self::assertNotNull($object, 'decodes after publish #' . $i);
+            self::assertSame('n1:0', $object['n']);
+            self::assertSame($this->results(), ObjectStore::resultsFor($object, 'n1:' . $i, false), 'serves its own digest after publish #' . $i);
+            self::assertLessThanOrEqual(ObjectStore::VARIANTS, 1 + count($object['variants']) + count($object['aliases']));
+        }
+
+        self::assertNull(ObjectStore::resultsFor($object, 'n1:1', false), 'the oldest alias is the one cut');
+    }
+
+    public function testAMergeNeverLetsAnAliasServeAVariantTheOtherSideReplaced(): void
+    {
+        // This machine: n1:a failed, n1:b had the same outcome. Another: n1:a passed, later.
+        $store = $this->store();
+        self::assertTrue($store->putObject('kkk', 'tests/MoneyTest.php', $this->resultsWith('boom'), 'n1:a'));
+        self::assertTrue($store->putObject('kkk', 'tests/MoneyTest.php', $this->resultsWith('boom'), 'n1:b'));
+        $path = $this->remoteRoot . '/' . ObjectStore::objectKey(ObjectStore::currentShard(), 'kkk');
+        $withAlias = (string) file_get_contents($path);
+        self::assertArrayHasKey('n1:b', Json::decodeArray($withAlias)['aliases'] ?? []);
+
+        $upstream = (string) json_encode(['k' => 'kkk', 'file' => 'tests/MoneyTest.php', 'n' => 'n1:a', 'at' => time() + 60, 'results' => $this->results()]);
+        $merged = ObjectStore::mergeBodies($upstream, $withAlias, 'kkk');
+        self::assertNotNull($merged);
+        file_put_contents($path, $merged);
+
+        $object = (new ObjectStore($this->backend(), $this->tmp . '/state2', 'shop-abc'))->object('kkk');
+        self::assertNotNull($object);
+        self::assertSame($this->results(), ObjectStore::resultsFor($object, 'n1:a', false), 'the newer run of n1:a');
+        self::assertNull(ObjectStore::resultsFor($object, 'n1:b', false), 'n1:b failed: it must not be served a pass');
+
+        // Even an alias that survived some other way is checked at lookup against its outcome.
+        $forged = Json::decodeArray($merged) ?? [];
+        $forged['aliases'] = ['n1:b' => ['of' => 'n1:a', 'at' => 1, 'h' => 'not-the-outcome']];
+        file_put_contents($path, (string) json_encode($forged));
+        $object = (new ObjectStore($this->backend(), $this->tmp . '/state3', 'shop-abc'))->object('kkk');
+        self::assertNotNull($object);
+        self::assertNull(ObjectStore::resultsFor($object, 'n1:b', false));
+    }
+
+    public function testAnObjectKeepsTheNewestVariantsOnly(): void
+    {
+        $store = $this->store();
+
+        for ($i = 0; $i < ObjectStore::VARIANTS + 5; $i++) {
+            self::assertTrue($store->putObject('kkk', 'tests/MoneyTest.php', $this->resultsWith('run ' . $i), 'n1:' . $i));
+        }
+
+        $object = (new ObjectStore($this->backend(), $this->tmp . '/state2', 'shop-abc'))->object('kkk');
+        self::assertNotNull($object);
+        self::assertSame('n1:' . (ObjectStore::VARIANTS + 4), $object['n']);
+        self::assertCount(ObjectStore::VARIANTS - 1, $object['variants']);
+    }
+
+    public function testAMirroredCopyWithoutTheDigestAskedForIsFetchedAgainOnce(): void
+    {
+        $writer = $this->store();
+        $writer->putObject('kkk', 'tests/MoneyTest.php', $this->results(), 'n1:a');
+
+        $reader = new ObjectStore($this->backend(), $this->tmp . '/state2', 'shop-abc');
+        self::assertNotNull($reader->object('kkk'));
+
+        $writer2 = new ObjectStore($this->backend(), $this->tmp . '/state3', 'shop-abc');
+        $writer2->object('kkk');
+        $writer2->putObject('kkk', 'tests/MoneyTest.php', $this->results(), 'n1:b');
+
+        $again = $reader->object('kkk', 'n1:b');
+        self::assertNotNull($again);
+        self::assertTrue(ObjectStore::holds($again, 'n1:b'), 'the stale mirror was refreshed');
+    }
+
     public function testAReadIsMirroredLocallyAndSurvivesTheRemoteGoingAway(): void
     {
         $this->store()->putObject('deadbeef', 'tests/MoneyTest.php', $this->results());
@@ -479,6 +637,12 @@ final class ObjectStoreTest extends TestCase
                 'file' => 'tests/MoneyTest.php',
             ],
         ];
+    }
+
+    /** @return array<string, array{status: int, message: string, time: float, assertions: int, file: string}> */
+    private function resultsWith(string $message): array
+    {
+        return ['App\\Tests\\MoneyTest::test_adds' => ['status' => 1, 'message' => $message, 'time' => 0.5, 'assertions' => 0, 'file' => 'tests/MoneyTest.php']];
     }
 
     private function store(): ObjectStore

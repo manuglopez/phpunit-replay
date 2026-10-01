@@ -131,6 +131,72 @@ final readonly class Git
         return $ignored;
     }
 
+    /**
+     * Every path git considers part of the working tree: tracked (`--cached`, which still
+     * lists a tracked file deleted from disk) and untracked but not ignored (`--others
+     * --exclude-standard`), relative to the directory. Null when git failed. One process
+     * whatever the size of the tree (`Select\NonEdgeInputs`).
+     *
+     * @return list<string>|null
+     */
+    public function workingTreeFiles(): ?array
+    {
+        $output = $this->withTimeout(60.0)->raw(['ls-files', '-z', '--cached', '--others', '--exclude-standard']);
+
+        if ($output === null) {
+            return null;
+        }
+
+        $files = [];
+
+        foreach (explode("\x00", $output) as $path) {
+            if ($path !== '') {
+                $files[$path] = true;
+            }
+        }
+
+        // A path like `2024` is an int array key: every key goes back out as the string it was.
+        return array_map(strval(...), array_keys($files));
+    }
+
+    /**
+     * `git status --porcelain=v1 -z --untracked-files=all`, one entry per path: the two
+     * status letters (`??` for untracked) and the path. Both sides of a rename or copy are
+     * listed, with the same status. Null when git failed.
+     *
+     * @return list<array{status: string, path: string}>|null
+     */
+    public function statusEntries(): ?array
+    {
+        $output = $this->withTimeout(60.0)->raw(['status', '--porcelain=v1', '-z', '--untracked-files=all']);
+
+        if ($output === null) {
+            return null;
+        }
+
+        $records = $output === '' ? [] : explode("\x00", rtrim($output, "\x00"));
+        $entries = [];
+        $count = count($records);
+
+        for ($i = 0; $i < $count; $i++) {
+            $record = $records[$i];
+
+            if (strlen($record) < 4) {
+                continue;
+            }
+
+            $status = substr($record, 0, 2);
+            $entries[] = ['status' => $status, 'path' => substr($record, 3)];
+
+            if (($status[0] === 'R' || $status[0] === 'C') && isset($records[$i + 1]) && $records[$i + 1] !== '') {
+                $entries[] = ['status' => $status, 'path' => $records[$i + 1]];
+                $i++;
+            }
+        }
+
+        return $entries;
+    }
+
     public static function available(): bool
     {
         /** @var bool|null $cached */

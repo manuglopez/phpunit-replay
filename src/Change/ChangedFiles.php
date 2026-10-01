@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Manuglopez\Replay\Change;
 
 use Manuglopez\Replay\Cache\ContentHash;
+use Manuglopez\Replay\Cache\FileHashes;
 
 /**
  * Derived from Pest (© Nuno Maduro, MIT). @see https://github.com/pestphp/pest/blob/17d709e/src/Plugins/Tia/ChangedFiles.php
@@ -69,7 +70,7 @@ final readonly class ChangedFiles
             return null;
         }
 
-        $candidates = array_keys($filtered);
+        $candidates = array_map(strval(...), array_keys($filtered));
 
         if ($sha !== null && $sha !== '') {
             $candidates = $this->filterContentUnchanged($candidates, $sha);
@@ -134,58 +135,65 @@ final readonly class ChangedFiles
      */
     private function workingTreeChanges(): ?array
     {
-        $output = $this->git->withTimeout(self::SCAN_TIMEOUT)->raw(['status', '--porcelain=v1', '-z', '--untracked-files=all']);
+        $entries = $this->git->withTimeout(self::SCAN_TIMEOUT)->statusEntries();
 
-        if ($output === null) {
+        if ($entries === null) {
             return null;
         }
 
-        if ($output === '') {
-            return [];
-        }
-
-        $records = explode("\x00", rtrim($output, "\x00"));
-        $files = [];
-        $count = count($records);
-
-        for ($i = 0; $i < $count; $i++) {
-            $record = $records[$i];
-
-            if (strlen($record) < 4) {
-                continue;
-            }
-
-            $status = substr($record, 0, 2);
-            $path = substr($record, 3);
-
-            if ($status[0] === 'R' || $status[0] === 'C') {
-                $files[] = $path;
-
-                if (isset($records[$i + 1]) && $records[$i + 1] !== '') {
-                    $files[] = $records[$i + 1];
-                    $i++;
-                }
-
-                continue;
-            }
-
-            $files[] = $path;
-        }
-
-        return $files;
+        return array_map(static fn (array $entry): string => $entry['path'], $entries);
     }
 
     /**
+     * The working tree's changes as `git status` reports them, git-ignored paths dropped the
+     * way {@see self::since()} drops them (a tracked file matching an ignore pattern is not
+     * something the rule chain ever sees). Null when git failed.
+     *
+     * @return list<array{status: string, path: string}>|null
+     */
+    public function workingTreeStatus(): ?array
+    {
+        $entries = $this->git->withTimeout(self::SCAN_TIMEOUT)->statusEntries();
+
+        if ($entries === null) {
+            return null;
+        }
+
+        $paths = [];
+
+        foreach ($entries as $entry) {
+            $paths[$entry['path']] = true;
+        }
+
+        $kept = $this->filterIgnored($paths);
+
+        if ($kept === null) {
+            return null;
+        }
+
+        return array_values(array_filter($entries, static fn (array $entry): bool => isset($kept[$entry['path']])));
+    }
+
+    /**
+     * What git ignores, dropped; and a clock probe a crash left behind (`FileHashes` never
+     * writes one in the tree; this is the backstop), which is no change of the project's.
+     *
      * @param array<string, true> $candidates
      * @return array<string, true>|null
      */
     private function filterIgnored(array $candidates): ?array
     {
+        foreach (array_keys($candidates) as $path) {
+            if (FileHashes::isProbeFile((string) $path)) {
+                unset($candidates[$path]);
+            }
+        }
+
         if ($candidates === []) {
             return $candidates;
         }
 
-        $ignored = $this->git->ignored(array_keys($candidates));
+        $ignored = $this->git->ignored(array_map(strval(...), array_keys($candidates)));
 
         if ($ignored === null) {
             return null;

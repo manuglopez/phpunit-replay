@@ -30,9 +30,11 @@ use SplFileInfo;
  * (`git reset --hard FETCH_HEAD`) and replays THIS run's own changes on top of it: every key
  * {@see self::put()} buffered is re-written, and every key {@see self::delete()} tombstoned
  * is re-removed — the reset would otherwise silently restore a file this run deleted, right
- * back to whatever upstream still had, exactly as it restores a write. This never needs to
- * reconcile anything path-by-path: objects are content-addressed and append-only (writing
- * one again is a harmless no-op, and removing one already gone is too) and `graph/**` is
+ * back to whatever upstream still had, exactly as it restores a write. Objects are the one
+ * kind of key reconciled path by path: an object's body holds a variant per non-edge digest
+ * (`ObjectStore::putObject()`), so a buffered object is merged with the copy upstream now has
+ * (`ObjectStore::mergeBodies()`) rather than written over it, and a variant a concurrent
+ * publisher pushed first survives. Removing a key already gone is a no-op, and `graph/**` is
  * "ours wins" by construction, since our own buffered write simply overwrites it again after
  * adopting upstream.
  *
@@ -439,18 +441,32 @@ final class GitRemoteCache implements RemoteCache
      * whatever this mirror had committed or staged for the same paths), then replays this
      * run's own changes on top of it: every key {@see self::put()} buffered is re-written,
      * and every key {@see self::delete()} tombstoned is re-removed. A key is never in both
-     * ({@see self::$tombstones}'s docblock), so the two loops cannot fight over it — objects
-     * are content-addressed and append-only (re-writing one is a no-op, re-removing an
-     * already-gone one is too) and `graph/**` is "ours wins" by construction, since our own
-     * write simply overwrites it again. The caller commits the result
-     * ({@see self::commitStagedChanges()}) and retries the push.
+     * ({@see self::$tombstones}'s docblock), so the two loops cannot fight over it. A buffered
+     * `objects/**` body is merged with upstream's copy of the same key, variants from both
+     * kept (`ObjectStore::mergeBodies()`), and the merge replaces the buffered body, so a second
+     * retry merges again with whatever upstream has by then; re-removing an already-gone key is
+     * a no-op, and `graph/**` is "ours wins" by construction, since our own write simply
+     * overwrites it again. The caller commits the result ({@see self::commitStagedChanges()})
+     * and retries the push.
      */
     private function adoptFetchedHistory(Git $git): void
     {
         $git->result(['reset', '--hard', 'FETCH_HEAD']);
 
         foreach ($this->buffer as $key => $body) {
-            AtomicFile::write($this->pathFor($key), $body);
+            $path = $this->pathFor((string) $key);
+
+            if (str_starts_with((string) $key, 'objects/') && is_file($path)) {
+                $upstream = AtomicFile::read($path);
+                $k = basename((string) $key, '.json');
+                $merged = $upstream !== null ? ObjectStore::mergeBodies($upstream, $body, $k) : null;
+
+                if ($merged !== null) {
+                    $this->buffer[$key] = $body = $merged;
+                }
+            }
+
+            AtomicFile::write($path, $body);
         }
 
         foreach (array_keys($this->tombstones) as $key) {

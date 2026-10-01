@@ -5,10 +5,15 @@ declare(strict_types=1);
 namespace Manuglopez\Replay\Tests\Unit\Cache;
 
 use Manuglopez\Replay\Cache\ContentKey;
+use Manuglopez\Replay\Cache\FileHashes;
 use Manuglopez\Replay\Cache\Graph;
 use Manuglopez\Replay\Cache\GraphUpdater;
+use Manuglopez\Replay\Change\Git;
 use Manuglopez\Replay\Hermeticity\Quarantine;
 use Manuglopez\Replay\Record\RunPartial;
+use Manuglopez\Replay\Select\NonEdgeInputs;
+use Manuglopez\Replay\Select\TestPaths;
+use Manuglopez\Replay\Select\WatchPatterns;
 use Manuglopez\Replay\Tests\Support\GitRepo;
 use Manuglopez\Replay\Tests\Support\TempDir;
 use PHPUnit\Framework\TestCase;
@@ -702,5 +707,107 @@ final class GraphUpdaterTest extends TestCase
         self::assertSame(0, $summary['excludedEdges']);
 
         $repo->destroy();
+    }
+
+    public function test_every_merged_result_is_stamped_with_this_pass_s_key_and_digest(): void
+    {
+        $repo = GitRepo::init();
+        $repo->write('tests/FooTest.php', "<?php\n");
+        $repo->write('tests/Fixtures/data.txt', "one\n");
+        $repo->commitAll('initial');
+
+        $graph = new Graph($repo->root);
+        $inputs = $this->inputsFor($graph, $repo->root);
+        $partial = new RunPartial(
+            edges: ['tests/FooTest.php' => []],
+            // An in-process replayed result carries the stamp it was recorded with.
+            results: ['Foo::test_it' => [...$this->makeResult(file: 'tests/FooTest.php'), 'key' => 'old', 'digest' => 'n1:old']],
+            tables: [],
+            meta: [],
+        );
+
+        (new GraphUpdater($graph, $repo->root, new ContentKey($repo->root), null, null, null, null, $inputs))
+            ->apply($partial, 'main', recordsEdges: true, complete: false);
+
+        $result = $graph->result('main', 'Foo::test_it');
+        self::assertNotNull($result);
+        self::assertSame((new ContentKey($repo->root))->forTestFile($graph, 'tests/FooTest.php'), $result['key'] ?? null);
+        self::assertSame($inputs->digestFor('tests/FooTest.php'), $result['digest'] ?? null);
+
+        $repo->destroy();
+    }
+
+    public function test_a_replayed_result_keeps_the_stamp_it_was_served_with_or_none(): void
+    {
+        $repo = GitRepo::init();
+        $repo->write('tests/FooTest.php', "<?php\n");
+        $repo->write('tests/Fixtures/data.txt', "one\n");
+        $repo->commitAll('initial');
+
+        $graph = new Graph($repo->root);
+        $graph->markKnownTestFiles(['tests/FooTest.php']);
+        // Served from a remote object written before digests: a key, no digest.
+        $served = [...$this->makeResult(file: 'tests/FooTest.php'), 'key' => 'k-from-the-object'];
+        $partial = new RunPartial(
+            edges: [],
+            results: ['Foo::test_it' => $this->makeResult(file: 'tests/FooTest.php')],
+            tables: [],
+            meta: [],
+        );
+
+        (new GraphUpdater($graph, $repo->root, new ContentKey($repo->root), null, null, null, null, $this->inputsFor($graph, $repo->root)))
+            ->apply($partial, 'main', recordsEdges: true, complete: false, replayed: ['Foo::test_it' => $served]);
+
+        $result = $graph->ownResults('main')['Foo::test_it'] ?? null;
+        self::assertNotNull($result);
+        self::assertSame('k-from-the-object', $result['key'] ?? null);
+        self::assertArrayNotHasKey('digest', $result, 'not run here, so not validated here');
+
+        $repo->destroy();
+    }
+
+    public function test_a_status_change_under_the_same_key_but_other_non_edge_inputs_is_not_a_flip(): void
+    {
+        $repo = GitRepo::init();
+        $repo->write('tests/FooTest.php', "<?php\n");
+        $repo->write('tests/Fixtures/data.txt', "one\n");
+        $repo->commitAll('initial');
+
+        $graph = new Graph($repo->root);
+        $quarantine = new Quarantine();
+        $apply = function (int $status) use ($graph, $repo, $quarantine): void {
+            $partial = new RunPartial(
+                edges: ['tests/FooTest.php' => []],
+                results: ['Foo::test_it' => $this->makeResult(status: $status, file: 'tests/FooTest.php')],
+                tables: [],
+                meta: [],
+            );
+
+            (new GraphUpdater($graph, $repo->root, new ContentKey($repo->root), $quarantine, null, null, null, $this->inputsFor($graph, $repo->root)))
+                ->apply($partial, 'main', recordsEdges: true, complete: false);
+        };
+
+        $apply(0);
+        // The data file the test reads changes, and with it the outcome: the input moved.
+        $repo->write('tests/Fixtures/data.txt', "two\n");
+        $apply(7);
+        self::assertFalse($quarantine->isQuarantined('Foo::test_it'));
+
+        // Nothing moves and a pass turns into a failure: that is a flip (recovering from a
+        // failure never is, whatever the inputs).
+        $apply(0);
+        self::assertFalse($quarantine->isQuarantined('Foo::test_it'));
+        $apply(7);
+        self::assertTrue($quarantine->isQuarantined('Foo::test_it'));
+
+        $repo->destroy();
+    }
+
+    private function inputsFor(Graph $graph, string $root): NonEdgeInputs
+    {
+        $watch = new WatchPatterns();
+        $watch->add(['tests/**/Fixtures/**' => ['tests']]);
+
+        return new NonEdgeInputs($graph, new TestPaths(['tests'], [], ['Test.php']), $watch, $root, new FileHashes($root), new Git($root));
     }
 }
