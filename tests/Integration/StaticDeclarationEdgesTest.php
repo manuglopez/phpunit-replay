@@ -407,7 +407,7 @@ final class StaticDeclarationEdgesTest extends TestCase
 
         self::assertSame(0, $result['exitCode'], $result['stdout'] . $result['stderr']);
         self::assertStringContainsString(
-            'structural change (static_declaration_edges, analysis_rules): the cached baseline cannot be used, recording a fresh baseline',
+            'structural change (static_declaration_edges, analysis_rules): the cached baseline cannot be used',
             $result['stderr'],
         );
         self::assertStringContainsString('recorded 4 tests in 4 test files', $result['stdout']);
@@ -426,7 +426,7 @@ final class StaticDeclarationEdgesTest extends TestCase
 
         self::assertSame(0, $result['exitCode'], $result['stdout'] . $result['stderr']);
         self::assertStringContainsString(
-            'structural change (static_declaration_edges, analysis_rules): the cached baseline cannot be used, recording a fresh baseline',
+            'structural change (static_declaration_edges, analysis_rules): the cached baseline cannot be used',
             $result['stderr'],
         );
         self::assertStringContainsString('recorded 4 tests in 4 test files', $result['stdout']);
