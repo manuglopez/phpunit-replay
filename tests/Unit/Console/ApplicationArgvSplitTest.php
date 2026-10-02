@@ -429,4 +429,27 @@ final class ApplicationArgvSplitTest extends TestCase
             ['run', '-p-weird'],
         ];
     }
+
+    #[Test]
+    public function an_option_of_another_subcommand_fails_fast_naming_its_owners(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('--allow-ci-baseline is an option of "run" and "record", not of "verify"');
+
+        self::split(['verify', '--allow-ci-baseline']);
+    }
+
+    #[Test]
+    public function a_misplaced_wrapper_option_is_fine_after_the_double_dash_or_once_passthrough_began(): void
+    {
+        self::assertSame(['verify', '--', '--allow-ci-baseline'], self::split(['verify', '--', '--allow-ci-baseline']));
+        self::assertSame(['verify', '--', '--testdox', '--allow-ci-baseline'], self::split(['verify', '--testdox', '--allow-ci-baseline']));
+    }
+
+    #[Test]
+    public function a_value_taking_option_shared_with_phpunit_is_still_forwarded(): void
+    {
+        // `--log-junit` is `run`'s, but also PHPUnit's own: on `verify` it has always been PHPUnit's.
+        self::assertSame(['verify', '--', '--log-junit=x.xml'], self::split(['verify', '--log-junit=x.xml']));
+    }
 }

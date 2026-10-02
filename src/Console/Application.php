@@ -146,7 +146,14 @@ final class Application extends BaseApplication
         if ($input === null) {
             $argv = self::rawArgv();
             array_shift($argv);
-            $input = new ArgvInput(['phpunit-replay', ...$this->splitPassthrough($argv)]);
+
+            try {
+                $input = new ArgvInput(['phpunit-replay', ...$this->splitPassthrough($argv)]);
+            } catch (\InvalidArgumentException $e) {
+                fwrite(STDERR, 'phpunit-replay: ' . $e->getMessage() . PHP_EOL);
+
+                return 2;
+            }
         }
 
         return parent::run($input, $output);
@@ -226,6 +233,8 @@ final class Application extends BaseApplication
                 continue;
             }
 
+            $this->refuseAnotherCommandsOption($command, $token);
+
             $inPassthrough = true;
             $passthrough[] = $token;
         }
@@ -238,6 +247,43 @@ final class Application extends BaseApplication
         }
 
         return $result;
+    }
+
+    /**
+     * A token about to be forwarded to PHPUnit that is a flag of ANOTHER phpunit-replay
+     * command (`verify --allow-ci-baseline`) is a mistake, not a PHPUnit option: forwarding
+     * it produced PHPUnit's "Unknown option ... Most similar options are --ignore-baseline"
+     * which points at the wrong tool entirely. Built from the registered commands' own
+     * definitions. Only valueless flags qualify: a value-taking option (`--log-junit`,
+     * `--name`) may legitimately be PHPUnit's own (`verify --log-junit=x.xml` is), and
+     * an option of this command or the application never reaches here.
+     *
+     * @throws \InvalidArgumentException
+     */
+    private function refuseAnotherCommandsOption(string $command, string $token): void
+    {
+        if (! str_starts_with($token, '--') || $token === '--') {
+            return;
+        }
+
+        [$bareName] = self::splitLongOptionToken($token);
+        $owners = [];
+
+        foreach ($this->ownCommandNames as $name) {
+            $definition = $this->get($name)->getNativeDefinition();
+
+            if ($name !== $command && $definition->hasOption($bareName) && ! $definition->getOption($bareName)->acceptValue()) {
+                $owners[] = '"' . $name . '"';
+            }
+        }
+
+        if ($owners === []) {
+            return;
+        }
+
+        $list = count($owners) === 1 ? $owners[0] : implode(', ', array_slice($owners, 0, -1)) . ' and ' . $owners[count($owners) - 1];
+
+        throw new \InvalidArgumentException(sprintf('--%s is an option of %s, not of "%s"', $bareName, $list, $command));
     }
 
     /** @return list<string> */

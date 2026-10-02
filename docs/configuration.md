@@ -214,7 +214,9 @@ unassisted run.
 
 ### `record`
 
-`--fresh` and `--parallel`/`-p[=N]`, same meanings.
+`--fresh`, `--allow-ci-baseline` and `--parallel`/`-p[=N]`, same meanings. `--allow-ci-baseline` is what lets a
+`record` detected as CI (`CI` set) finalize and publish the branch baseline; without it the results are saved
+locally and the baseline is not.
 
 Unlike `run`, `record` exits `2` if it has to degrade to a plain PHPUnit run — PHPUnit's own tests
 may all have passed, but no baseline was written, and that is a failure of what `record` was asked
@@ -222,7 +224,8 @@ to do.
 
 ### `verify`
 
-`--parallel`/`-p[=N]`, plus `[-- <phpunit args>]`.
+`--parallel`/`-p[=N]`, plus `[-- <phpunit args>]`. There is no `--allow-ci-baseline`: `verify` never
+finalizes or publishes a baseline, in CI or out of it.
 
 Runs the full suite in record mode and compares every result against the one the cache holds. The
 four figures it reports are explained in the [README](../README.md#keeping-the-cache-honest).

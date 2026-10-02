@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.12.3] — 2026-10-02
+
+### Fixed
+
+- **Fix: `record --allow-ci-baseline` died with `Unknown option`.** A CI job seeding a baseline ran `vendor/bin/phpunit-replay record --fresh -p --allow-ci-baseline` and got `phpunit-replay: unexpected error (Unknown option "--allow-ci-baseline". Most similar options are --ignore-baseline, --generate-baseline, --use-baseline, --fail-on-warning, ...)`, exit code 2. Only `run` defined the option, so the wrapper forwarded it to PHPUnit, and `record` hardcoded it off, although `record` is the command CI uses to publish a baseline. `record` now takes `--allow-ci-baseline` with `run`'s meaning: in CI it finalizes and publishes the baseline; without it, CI still saves results but publishes nothing. `verify` does not take it: it is a pure measurement and never finalizes a baseline.
+- **Fix: a wrapper option on the wrong command produced a misleading PHPUnit error.** An option that belongs to another phpunit-replay command was forwarded to PHPUnit, whose "Most similar options" list pointed at PHPUnit's own baseline flags. It now fails before PHPUnit starts, exit code 2: `phpunit-replay: --allow-ci-baseline is an option of "run" and "record", not of "verify"`. The message is built from the registered commands' option definitions. Options after `--`, PHPUnit's own options, and value-taking options that PHPUnit also defines (`--log-junit=FILE` on `verify`) are still forwarded untouched.
+
 ## [0.12.2] — 2026-10-01
 
 ### Fixed

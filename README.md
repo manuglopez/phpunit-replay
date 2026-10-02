@@ -262,7 +262,7 @@ abstract class TestCase extends \PHPUnit\Framework\TestCase
 | Command | What it does |
 |---|---|
 | `run` *(default)* | Runs what's affected, replays the rest. `--fresh` `--no-remote` `--explain` `--dry-run` `--log-junit=FILE` `--allow-ci-baseline` `--parallel`/`-p[=N]` |
-| `record` | Runs the whole suite and records a fresh baseline. What CI runs after a merge. `--fresh` `--parallel` |
+| `record` | Runs the whole suite and records a fresh baseline. What CI runs after a merge. `--fresh` `--allow-ci-baseline` `--parallel` |
 | `verify` | Runs the whole suite *and* checks every result against what the cache holds. Your merge gate. `--parallel` |
 | `status` | What's currently stored: branch, driver, counts, drift, quarantine, remote, lifetime divergences |
 | `explain <path>` | Which test files a change to `<path>` would affect, and why. Runs nothing |
