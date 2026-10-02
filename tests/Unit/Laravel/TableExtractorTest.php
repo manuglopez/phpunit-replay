@@ -82,6 +82,40 @@ final class TableExtractorTest extends TestCase
         self::assertSame([], TableExtractor::fromSql('   '));
     }
 
+    public function test_a_parenthesised_union_names_both_tables(): void
+    {
+        // How Laravel's MySQL and PostgreSQL grammars wrap a union.
+        self::assertSame(['comments', 'posts'], TableExtractor::fromSql('(select `id` from `posts`) union (select `id` from `comments`)'));
+    }
+
+    public function test_a_comma_join_names_every_table(): void
+    {
+        self::assertSame(['a', 'b'], TableExtractor::fromSql('select * from `a`, `b` where a.id = b.id'));
+        self::assertSame(['orders', 'users'], TableExtractor::fromSql('select * from users u, public.orders as o where o.user_id = u.id'));
+        self::assertSame(['users'], TableExtractor::fromSql('select * from users where id in (1, 2, 3)'), 'commas after the from list are not tables');
+    }
+
+    public function test_the_shapes_a_review_found_missing(): void
+    {
+        self::assertSame(['users'], TableExtractor::fromSql('/* a comment */ select * from users'));
+        self::assertSame(['users'], TableExtractor::fromSql("-- a comment\nselect * from users"));
+        self::assertSame(['order', 'tags', 'users'], TableExtractor::fromSql('select * from `users`, `order`, `tags` where 1'), 'a reserved word quoted as a name');
+        self::assertSame(['a', 'b', 'c'], TableExtractor::fromSql('select * from a, (select id from b) x, c'));
+        self::assertSame(['posts', 'users'], TableExtractor::fromSql('TRUNCATE users, posts'));
+        self::assertSame(['users'], TableExtractor::fromSql('truncate "users" restart identity cascade'));
+        self::assertSame(['a', 'b'], TableExtractor::fromSql('update `a`, `b` set a.x = b.x'));
+        self::assertSame(['a', 'b'], TableExtractor::fromSql('delete from a using b where a.id = b.id'));
+        self::assertSame(['users'], TableExtractor::fromSql("select * from `users` where name = 'from posts'"), 'a string is not a table');
+        self::assertSame(['a', 'b'], TableExtractor::fromSql('select * from a join b using (id)'));
+    }
+
+    public function test_a_statement_whose_tables_cannot_be_read_is_unknown(): void
+    {
+        self::assertSame([TableExtractor::UNKNOWN], TableExtractor::fromSql('call refresh_totals()'));
+        self::assertSame([TableExtractor::UNKNOWN], TableExtractor::fromSql('EXEC dbo.refresh'));
+        self::assertSame(['logs'], TableExtractor::fromSql('truncate table "logs"'));
+    }
+
     // fromMigrationSource()
 
     public function test_extracts_tables_from_schema_builder_calls(): void
@@ -154,5 +188,31 @@ final class TableExtractorTest extends TestCase
     public function test_returns_empty_for_migration_source_with_no_table_references(): void
     {
         self::assertSame([], TableExtractor::fromMigrationSource('return new class extends Migration {};'));
+    }
+
+    public function test_an_aliased_db_table_names_the_table_not_the_alias(): void
+    {
+        self::assertSame(['posts'], TableExtractor::fromMigrationSource("DB::table('posts as p')->update(['x' => 1]);"));
+        self::assertSame(['posts'], TableExtractor::fromMigrationSource("DB::table('posts AS p')->update(['x' => 1]);"));
+        self::assertSame(['posts', 'users'], TableExtractor::fromSql('select * from "posts" as "p" inner join "users" as "u" on "u"."id" = "p"."user_id"'));
+    }
+
+    public function test_a_table_named_through_a_variable_is_unresolved_never_guessed(): void
+    {
+        $php = <<<'PHP'
+            Schema::create('users', function ($table) {});
+            Schema::create($tableNames['roles'], function ($table) {});
+            PHP;
+
+        self::assertSame(['tables' => ['users'], 'unresolved' => true], TableExtractor::migrationTables($php));
+        self::assertSame(['tables' => [], 'unresolved' => true], TableExtractor::migrationTables('DB::table($table)->delete();'));
+        self::assertSame(['tables' => [], 'unresolved' => true], TableExtractor::migrationTables('Schema::table(config("x.table"), fn ($t) => null);'));
+    }
+
+    public function test_literal_tables_are_resolved(): void
+    {
+        self::assertSame(['tables' => ['posts'], 'unresolved' => false], TableExtractor::migrationTables("Schema::table('posts', fn (\$t) => null);"));
+        self::assertSame(['tables' => ['audits'], 'unresolved' => false], TableExtractor::migrationTables("Schema::connection('logs')->create('audits', fn (\$t) => null);"));
+        self::assertSame(['tables' => [], 'unresolved' => false], TableExtractor::migrationTables('return new class extends Migration {};'));
     }
 }

@@ -8,7 +8,9 @@ use Manuglopez\Replay\Cache\Graph;
 use Manuglopez\Replay\Config;
 use Manuglopez\Replay\Laravel\Rules\BladeRule;
 use Manuglopez\Replay\Laravel\Rules\MigrationRule;
+use Manuglopez\Replay\Laravel\Rules\SchemaDumpRule;
 use Manuglopez\Replay\Laravel\Rules\SiblingRule;
+use Manuglopez\Replay\Laravel\Subscribers\ArmLaravelTrackersOnPreparationStarted;
 use Manuglopez\Replay\Laravel\Subscribers\ArmLaravelTrackersOnPrepared;
 use Manuglopez\Replay\Laravel\Subscribers\FlushUsesDatabaseOnExecutionFinished;
 use Manuglopez\Replay\PHPUnit\ReplayState;
@@ -34,17 +36,21 @@ final class LaravelIntegration
     }
 
     /**
-     * @return array{migration: Rule, sibling: Rule, blade: Rule} inserted per SPEC.md §7.2
-     *         order: Migration first, Sibling/Blade after TestFile and before Watch. `$graph`
-     *         and `$projectRoot` are part of the contract for symmetry with the rest of the
-     *         chain, but unused here — these rules read both from the `Context` each
-     *         `apply()` call carries, not at construction time. `$stateDir` is where
+     * @return array{migration: Rule, schema: Rule, sibling: Rule, blade: Rule} inserted per
+     *         SPEC.md §7.2 order: Migration and SchemaDump first, Sibling/Blade after TestFile
+     *         and before Watch. `$graph` is part of the contract for symmetry with the rest of
+     *         the chain, but unused here — these rules read it from the `Context` each
+     *         `apply()` call carries. `$projectRoot` and `$config` say where the migrations
+     *         are and how they select (`MigrationPaths`, `migrations`); `$stateDir` is where
      *         `BladeRule` keeps its template references across runs.
      */
-    public static function rules(Graph $graph, string $projectRoot, ?string $stateDir = null): array
+    public static function rules(Graph $graph, string $projectRoot, ?string $stateDir = null, ?Config $config = null): array
     {
+        $config ??= Config::defaults();
+
         return [
-            'migration' => new MigrationRule(),
+            'migration' => new MigrationRule(MigrationPaths::for($projectRoot, $config), $config->migrations),
+            'schema' => new SchemaDumpRule($config->schemaDump),
             'sibling' => new SiblingRule(),
             'blade' => new BladeRule(BladeRule::cacheFileIn($stateDir)),
         ];
@@ -56,33 +62,57 @@ final class LaravelIntegration
      * (`Select\RunListBuilder`/`Console\Runner\RunPipeline`, `PHPUnit\ReplayState::bootInProcess()`
      * via its `prepareReplay()`, `Console\Commands\ExplainCommand`).
      *
-     * @return array{migration: Rule, sibling: Rule, blade: Rule}|array{}
+     * @return array{migration: Rule, schema: Rule, sibling: Rule, blade: Rule}|array{}
      */
     public static function rulesFor(Graph $graph, string $projectRoot, Config $config, ?string $stateDir = null): array
     {
-        return LaravelDetector::enabled($projectRoot, $config) ? self::rules($graph, $projectRoot, $stateDir) : [];
+        return LaravelDetector::enabled($projectRoot, $config) ? self::rules($graph, $projectRoot, $stateDir, $config) : [];
     }
 
     /** @return list<Subscriber> */
     public static function subscribers(Recorder $recorder, string $projectRoot): array
     {
         $usesDatabase = new UsesDatabaseCollector();
+        ReplayState::collectUsesDatabase($usesDatabase);
+
+        $arming = new ArmLaravelTrackersOnPrepared($recorder, $usesDatabase, $projectRoot);
 
         return [
-            new ArmLaravelTrackersOnPrepared($recorder, $usesDatabase, $projectRoot),
+            $arming,
             new FlushUsesDatabaseOnExecutionFinished(ReplayState::runWriter(), $usesDatabase),
+            new ArmLaravelTrackersOnPreparationStarted($arming),
         ];
     }
 
     /**
-     * Widens the recorded tables of every database-using test file (`$partial->usesDatabase`,
-     * written from `MigrationTables::usesDatabase()` while the test classes were loaded) to
-     * include every table any migration in the project touches — conservative: any migration
-     * might affect any database test (SPEC.md §10).
+     * The in-process extension's (`PHPUnit\ReplayExtension`, no wrapper): the same trackers
+     * and the same uses-database collector, which `ReplayState::persistInProcess()` reads
+     * directly, so nothing is written to a run directory. Before 0.13 the in-process path
+     * registered none of them and recorded no table and no template edge.
+     *
+     * @return list<Subscriber>
      */
-    public static function augment(RunPartial $partial, string $projectRoot): RunPartial
+    public static function inProcessSubscribers(Recorder $recorder, string $projectRoot): array
     {
-        if ($partial->usesDatabase === []) {
+        $usesDatabase = new UsesDatabaseCollector();
+        ReplayState::collectUsesDatabase($usesDatabase);
+
+        $arming = new ArmLaravelTrackersOnPrepared($recorder, $usesDatabase, $projectRoot);
+
+        return [$arming, new ArmLaravelTrackersOnPreparationStarted($arming)];
+    }
+
+    /**
+     * `migrations => 'conservative'` only: widens the recorded tables of every database-using
+     * test file (`$partial->usesDatabase`, written from `MigrationTables::usesDatabase()` while
+     * the test classes were loaded) to include every table any migration in the project
+     * touches — any migration might affect any database test (SPEC.md §10). The default,
+     * `precise`, keeps the tables each test file recorded: which files use a database is
+     * stored apart (`Cache\Graph::usesDatabase()`), so the rules can still reach them all.
+     */
+    public static function augment(RunPartial $partial, string $projectRoot, Config $config): RunPartial
+    {
+        if ($config->migrations !== 'conservative' || $partial->usesDatabase === []) {
             return $partial;
         }
 

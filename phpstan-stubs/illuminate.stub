@@ -1,0 +1,30 @@
+<?php
+
+// The two Laravel classes `Laravel\TrackersServiceProvider` and its subscriber name. The package
+// does not depend on illuminate/*: these are only for static analysis.
+
+namespace Illuminate\Support;
+
+abstract class ServiceProvider
+{
+    /** @var object */
+    protected $app;
+
+    /** @param object $app */
+    public function __construct($app)
+    {
+    }
+}
+
+namespace Illuminate\Foundation\Bootstrap;
+
+class RegisterProviders
+{
+    /** @var string|null */
+    protected static $bootstrapProviderPath;
+
+    /** @param list<string> $providers */
+    public static function merge(array $providers, ?string $bootstrapProviderPath = null): void
+    {
+    }
+}

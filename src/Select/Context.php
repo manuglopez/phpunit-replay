@@ -24,7 +24,10 @@ final class Context
      */
     public readonly array $changed;
 
-    /** @param list<string> $remaining project-relative changed paths not yet consumed */
+    /**
+     * @param list<string> $remaining project-relative changed paths not yet consumed
+     * @param string|null $base the commit the changes were diffed from (`Selector::affected()`)
+     */
     public function __construct(
         public readonly Graph $graph,
         public readonly string $projectRoot,
@@ -32,6 +35,7 @@ final class Context
         public readonly WatchPatterns $watch,
         array $remaining,
         public readonly Selection $selection,
+        public readonly ?string $base = null,
     ) {
         $this->remaining = $remaining;
         $this->changed = $remaining;

@@ -29,6 +29,9 @@ return [
     'never_cache' => [],                  // globs of test files that always run for real
     'quarantine_release_after' => 20,     // stable passes needed to leave automatic quarantine
     'laravel' => 'auto',                  // 'auto' | 'on' | 'off'
+    'migration_paths' => ['database/migrations'], // more directories (or files) holding migrations
+    'migrations' => 'precise',            // 'precise' | 'conservative': how a migration selects tests
+    'schema_dump' => 'conservative',      // 'conservative' | 'per-table': how a schema dump change selects tests
     'laravel_parallel_isolation' => true, // false to run --parallel on Laravel without per-worker DB isolation
     'junit_merge' => true,                // merge cached results into --log-junit output
     'mode' => 'auto',                     // extension mode override
@@ -121,6 +124,9 @@ their environment matches CI's.
 | Key | Default | Notes |
 |---|---|---|
 | `watch` | `[]` | Extra `glob => test directory or file` mappings, merged with the built-in defaults below. For anything a coverage driver cannot see a test read. |
+| `migration_paths` | `['database/migrations']` | Laravel only. Project-relative directories (searched recursively) or single `.php` files that hold migrations, for the `Migration` rule and for the fallback that runs every test on a non-`.php` file under them. `database/migrations` is always one, whatever this says. Added to it, without configuration: every **literal** argument of `loadMigrationsFrom()` in `app/Providers/**` and `bootstrap/**` (`'path'`, `database_path('...')`, `base_path('...')`, `__DIR__ . '/...'`, `dirname(__DIR__, n) . '/...'`, or an array of them), and `database/migrations/tenant` when `stancl/tenancy` is in `composer.lock`. An argument built any other way (a variable, a method call, `config()`) is ignored, never guessed: list that directory here. Paths outside the project or under `vendor/` are dropped. |
+| `migrations` | `'precise'` | Laravel only. `precise`: a migration that the test database runs (one the schema dump of the test connection does not list, or any migration when there is no dump) runs every test file that uses a database; a migration the dump already holds runs nothing on its own, and `explain` says `squashed into database/schema/…, not run by tests`. Each test file keeps the tables it actually queried. `conservative`: the 0.12 behaviour, where every test file using a database trait is recorded as touching every table any migration names and a migration selects by table. Use it if a test reaches the database in a way the table tracker cannot see (raw PDO, a result cached in a static by an earlier test). Part of the structural fingerprint: switching it records the suite again. |
+| `schema_dump` | `'conservative'` | Laravel only. How a change to `database/schema/{connection}-schema.sql` (or `.dump`) selects. `conservative`: any change but comments and whitespace runs every test file that uses a database. A dump is the whole database those tests run on, and what a change reaches through foreign keys, triggers, views, routines and the data migrations it squashes is more than a diff can say for certain, so this is the default. `per-table`: a change to the `migrations` rows, or to a statement no table owns, still runs every database test. Otherwise the changed tables, closed over foreign keys (both ways), triggers and views, run the tests that recorded one of them, plus every database test whose tables are not all known. Every database test runs when the change reaches a table a migration or seeder writes while building the database. Choose it when the suite's table tracking is complete (no raw PDO, no static caches of query results). Part of the structural fingerprint. |
 | `static_declaration_edges` | `false` | Adds a static-analysis hop alongside coverage attribution and filters coverage edges to executed function bodies. It makes recorded graphs far more reproducible but changes which files carry edges at all — read [reproducibility.md](reproducibility.md) for the measured cost before enabling it. |
 
 Built-in `WatchRule` defaults, by detected framework:
@@ -128,7 +134,7 @@ Built-in `WatchRule` defaults, by detected framework:
 | Framework | Detected by | Patterns |
 |---|---|---|
 | Generic | always | `.env*`, `phpunit.xml*`, `docker-compose*.y*ml`, `tests/**/Fixtures/**`, `tests/**/__snapshots__/**` |
-| Laravel | `artisan` exists | `config/**`, `routes/**`, `lang/**`, `resources/lang/**`, `app/** !*.php`, `bootstrap/*.php`; `database/migrations/**` and `resources/views/**` only with `laravel => 'off'` (otherwise the Migration and Blade rules cover them) |
+| Laravel | `artisan` exists | `config/**`, `routes/**`, `lang/**`, `resources/lang/**`, `app/** !*.php`, `bootstrap/*.php`; `database/migrations/**` and `resources/views/**` only with `laravel => 'off'` (otherwise the Migration and Blade rules cover them, and the two patterns, plus `<path>/**` for every other migration path, run every test only for a file those rules cannot claim) |
 | Symfony | `config/bundles.php` exists | `config/**`, `migrations/**`, `templates/**`, `translations/**` |
 
 ### Cache honesty

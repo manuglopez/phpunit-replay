@@ -31,10 +31,23 @@ final readonly class Config
     /** @var list<string> what a pass may publish to the remote (SPEC.md §9, docs/DECISIONS.md D-038) */
     private const REMOTE_PUSH_MODES = ['objects', 'all', 'off'];
 
+    /** @var list<string> how migrations select (docs/configuration.md `migrations`) */
+    private const MIGRATIONS_MODES = ['precise', 'conservative'];
+
+    /** @var list<string> how a schema dump change selects (docs/configuration.md `schema_dump`) */
+    private const SCHEMA_DUMP_MODES = ['conservative', 'per-table'];
+
+    /** Laravel's own migrations directory: always one of {@see self::$migrationPaths}' defaults. */
+    public const DEFAULT_MIGRATION_PATHS = ['database/migrations'];
+
     /**
      * @param array<string, string|list<string>> $watch
      * @param list<string> $neverCache
      * @param list<string> $baselineBranches ordered baseline candidates (D-039); `[]` means `[defaultBranch]`
+     * @param list<string> $migrationPaths project-relative directories (or files) holding migrations
+     *        (`Laravel\MigrationPaths`, which adds `database/migrations` and what it detects)
+     * @param string $migrations `precise` or `conservative` (`Laravel\Rules\MigrationRule`)
+     * @param string $schemaDump `conservative` or `per-table` (`Laravel\Rules\SchemaDumpRule`)
      */
     public function __construct(
         public ?string $stateDir,
@@ -55,6 +68,9 @@ final readonly class Config
         public array $baselineBranches = [],
         public bool $laravelParallelIsolation = true,
         public bool $staticDeclarationEdges = false,
+        public array $migrationPaths = self::DEFAULT_MIGRATION_PATHS,
+        public string $migrations = 'precise',
+        public string $schemaDump = 'conservative',
     ) {
     }
 
@@ -79,6 +95,9 @@ final readonly class Config
             baselineBranches: [],
             laravelParallelIsolation: true,
             staticDeclarationEdges: false,
+            migrationPaths: self::DEFAULT_MIGRATION_PATHS,
+            migrations: 'precise',
+            schemaDump: 'conservative',
         );
     }
 
@@ -112,6 +131,9 @@ final readonly class Config
             baselineBranches: self::stringListOrDefault($values['baseline_branches'] ?? null),
             laravelParallelIsolation: self::boolOrDefault($values['laravel_parallel_isolation'] ?? null, $defaults->laravelParallelIsolation),
             staticDeclarationEdges: self::boolOrDefault($values['static_declaration_edges'] ?? null, $defaults->staticDeclarationEdges),
+            migrationPaths: is_array($values['migration_paths'] ?? null) ? self::stringListOrDefault($values['migration_paths']) : $defaults->migrationPaths,
+            migrations: self::enumOrDefault($values['migrations'] ?? null, self::MIGRATIONS_MODES, $defaults->migrations),
+            schemaDump: self::enumOrDefault($values['schema_dump'] ?? null, self::SCHEMA_DUMP_MODES, $defaults->schemaDump),
         );
     }
 
@@ -158,6 +180,9 @@ final readonly class Config
             baselineBranches: $defaults->baselineBranches,
             laravelParallelIsolation: $defaults->laravelParallelIsolation,
             staticDeclarationEdges: $defaults->staticDeclarationEdges,
+            migrationPaths: $defaults->migrationPaths,
+            migrations: $defaults->migrations,
+            schemaDump: $defaults->schemaDump,
         );
     }
 
@@ -220,6 +245,9 @@ final readonly class Config
      *     baselineBranches?: list<string>,
      *     laravelParallelIsolation?: bool,
      *     staticDeclarationEdges?: bool,
+     *     migrationPaths?: list<string>,
+     *     migrations?: string,
+     *     schemaDump?: string,
      * } $overrides
      */
     public function with(array $overrides): self
@@ -243,6 +271,9 @@ final readonly class Config
             baselineBranches: array_key_exists('baselineBranches', $overrides) ? $overrides['baselineBranches'] : $this->baselineBranches,
             laravelParallelIsolation: array_key_exists('laravelParallelIsolation', $overrides) ? $overrides['laravelParallelIsolation'] : $this->laravelParallelIsolation,
             staticDeclarationEdges: array_key_exists('staticDeclarationEdges', $overrides) ? $overrides['staticDeclarationEdges'] : $this->staticDeclarationEdges,
+            migrationPaths: array_key_exists('migrationPaths', $overrides) ? $overrides['migrationPaths'] : $this->migrationPaths,
+            migrations: array_key_exists('migrations', $overrides) ? $overrides['migrations'] : $this->migrations,
+            schemaDump: array_key_exists('schemaDump', $overrides) ? $overrides['schemaDump'] : $this->schemaDump,
         );
     }
 

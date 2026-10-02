@@ -54,11 +54,11 @@ final class LaravelLiteScenariosTest extends TestCase
     }
 
     /**
-     * (a) record: 4 test files known, PostsIndexTest widened to every migration table
-     * (RefreshDatabase, SPEC.md §10 MigrationTables), HomePageTest untouched by that
-     * widening (it never touches the database), and HomePageTest has a PhpEdge into the
-     * Blade view it renders (BladeTracker). `status` reports the framework and the
-     * distinct table count (deliverable 5).
+     * (a) record: 4 test files known, PostsIndexTest with the tables it queried (since 0.13
+     * no longer widened to every migration table, SPEC.md §10) and recorded as using a
+     * database, HomePageTest with neither (it never touches the database), and HomePageTest
+     * has a PhpEdge into the Blade view it renders (BladeTracker). `status` reports the
+     * framework and the distinct table count (deliverable 5).
      */
     public function test_record_captures_migration_tables_and_blade_edges(): void
     {
@@ -74,15 +74,17 @@ final class LaravelLiteScenariosTest extends TestCase
         self::assertArrayHasKey('tests/Feature/PostsIndexTest.php', $tables);
         self::assertContains('posts', $tables['tests/Feature/PostsIndexTest.php']);
         self::assertContains('users', $tables['tests/Feature/PostsIndexTest.php']);
-        self::assertContains('comments', $tables['tests/Feature/PostsIndexTest.php']);
+        self::assertNotContains('comments', $tables['tests/Feature/PostsIndexTest.php'], 'what it queried, not every migration table');
         self::assertArrayNotHasKey('tests/Feature/HomePageTest.php', $tables);
+        self::assertContains('tests/Feature/PostsIndexTest.php', $graph->usesDatabase());
+        self::assertNotContains('tests/Feature/HomePageTest.php', $graph->usesDatabase());
 
         self::assertContains('resources/views/welcome.blade.php', $graph->dependenciesOf('tests/Feature/HomePageTest.php'));
 
         $status = $this->fixture->replay(['status']);
         self::assertSame(0, $status['exitCode'], $status['stdout'] . $status['stderr']);
         self::assertStringContainsString('framework: laravel', $status['stdout']);
-        self::assertMatchesRegularExpression('/tables:\s+3\b/', $status['stdout']);
+        self::assertMatchesRegularExpression('/tables:\s+2\b/', $status['stdout'], 'users and posts: no test queries comments');
     }
 
     /** (b) an unchanged run replays everything. */
@@ -95,11 +97,10 @@ final class LaravelLiteScenariosTest extends TestCase
     }
 
     /**
-     * (c) a real migration change (a new nullable column, so `TableExtractor` still finds
-     * `comments` — this is not a cosmetic-only edit) re-runs exactly the 3 test files
-     * whose widened tables include `comments`: every RefreshDatabase test file, because
-     * MigrationTables treats any migration as possibly affecting any database test
-     * (conservative, SPEC.md §10). HomePageTest, which never touches the database,
+     * (c) a real migration change (a new nullable column — this is not a cosmetic-only
+     * edit) re-runs exactly the 3 test files that use a database: the fixture has no schema
+     * dump, so the migration is pending and every fresh test database runs it (SPEC.md
+     * §7.2 item 1). HomePageTest, which never touches the database,
      * replays instead. Verified via `--explain --dry-run` and the real run's own counts,
      * plus `explain <path>` directly (deliverable 5).
      */

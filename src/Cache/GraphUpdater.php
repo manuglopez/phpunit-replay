@@ -8,6 +8,7 @@ use Manuglopez\Replay\Analysis\StaticEdges;
 use Manuglopez\Replay\Change\Git;
 use Manuglopez\Replay\Console\Runner\Warnings;
 use Manuglopez\Replay\Hermeticity\Quarantine;
+use Manuglopez\Replay\Laravel\TableExtractor;
 use Manuglopez\Replay\Record\RunPartial;
 use Manuglopez\Replay\Select\NonEdgeInputs;
 
@@ -147,16 +148,28 @@ final class GraphUpdater
             // Union, not replace (Cache\Graph::unionEdges() docblock): this partial only
             // reflects what THIS run's coverage attributed, which can under-report a test
             // file's true dependencies (first-loader-wins, docs/SPEC.md §4.3) relative to
-            // a previous, complete recording. Table edges are unaffected by that
-            // artifact — a Laravel query listener re-attributes every table a test
-            // queries on every single run (Laravel\TableTracker), never just the first —
-            // so `replaceTestTables` below stays exact.
+            // a previous, complete recording. Tables suffer the same artifact: a query whose
+            // result a static caches runs only in the first test of a process that needs it
+            // (Laravel\TableTracker sees the query, not the cached value), so which test file
+            // records its table moves with the run order. Tables are unioned too.
             $this->graph->unionEdges($edgesToRecord);
             $this->graph->markKnownTestFiles($executed);
 
-            if ($partial->tables !== []) {
-                $this->graph->replaceTestTables($partial->tables);
+            // `*` (tables nobody could name) is what this recording says, never accumulated:
+            // a recording made once with the configuration cached must not make every file a
+            // database test forever. The tables themselves still accumulate.
+            [$tables, $unknown] = self::splitUnknown($partial->tables);
+
+            if ($tables !== []) {
+                $this->graph->unionTestTables($tables);
             }
+
+            $this->graph->replaceTablesUnknown(self::withoutReplayed($executed, $replayed), $unknown);
+
+            // Whether a file uses a database is a fact about its class, which this run saw for
+            // every file it executed (Laravel\Subscribers\ArmLaravelTrackersOnPrepared). A file
+            // it only replayed never got that far, and keeps what the graph already says.
+            $this->graph->replaceUsesDatabase(self::withoutReplayed($executed, $replayed), $partial->usesDatabase);
 
             foreach ($edgesToRecord as $sources) {
                 $edgesCount += count($sources);
@@ -546,6 +559,48 @@ final class GraphUpdater
         }
 
         return $out;
+    }
+
+    /**
+     * @param array<string, list<string>> $tables
+     * @return array{array<string, list<string>>, list<string>} the tables without `*`, and the files that had it
+     */
+    private static function splitUnknown(array $tables): array
+    {
+        $unknown = [];
+
+        foreach ($tables as $testFile => $names) {
+            if (in_array(TableExtractor::UNKNOWN, $names, true)) {
+                $unknown[] = (string) $testFile;
+                $tables[$testFile] = array_values(array_filter($names, static fn (string $name): bool => $name !== TableExtractor::UNKNOWN));
+            }
+        }
+
+        return [array_filter($tables, static fn (array $names): bool => $names !== []), $unknown];
+    }
+
+    /**
+     * @param list<string> $executed
+     * @param array<string, TestResultArray> $replayed
+     * @return list<string>
+     */
+    private static function withoutReplayed(array $executed, array $replayed): array
+    {
+        if ($replayed === []) {
+            return $executed;
+        }
+
+        $replayedFiles = [];
+
+        foreach ($replayed as $result) {
+            $file = $result['file'] ?? null;
+
+            if (is_string($file) && $file !== '') {
+                $replayedFiles[$file] = true;
+            }
+        }
+
+        return array_values(array_filter($executed, static fn (string $file): bool => ! isset($replayedFiles[$file])));
     }
 
     /** @return list<string> */

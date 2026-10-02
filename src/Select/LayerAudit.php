@@ -60,7 +60,8 @@ use Manuglopez\Replay\Change\LastRunTree;
 final readonly class LayerAudit
 {
     /**
-     * @param Closure(list<string>): Selection $select the pass's own rule chain
+     * @param Closure(list<string>, ?string): Selection $select the pass's own rule chain, given
+     *        a change set and the sha it was diffed from
      *        ({@see RunListBuilder::select()})
      */
     public function __construct(
@@ -150,7 +151,7 @@ final readonly class LayerAudit
             return [[], false];
         }
 
-        $selection = ($this->select)($changed);
+        $selection = ($this->select)($changed, $sha);
         $reasons = $selection->reasons();
         $invalid = [];
 

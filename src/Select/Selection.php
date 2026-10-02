@@ -27,6 +27,14 @@ final class Selection
     /** @var array<string, list<Reason>> */
     private array $reasons = [];
 
+    /**
+     * Why a changed file selected nothing, when a rule knows (a migration squashed into the
+     * schema dump): what `explain` prints for it. Never a reason to run anything.
+     *
+     * @var list<Reason>
+     */
+    private array $notes = [];
+
     public function __construct(public readonly bool $sourcePhpChanged = false)
     {
     }
@@ -68,6 +76,19 @@ final class Selection
         }
 
         return true;
+    }
+
+    public function note(Reason $reason): void
+    {
+        if (! in_array($reason, $this->notes)) {
+            $this->notes[] = $reason;
+        }
+    }
+
+    /** @return list<Reason> */
+    public function notes(): array
+    {
+        return $this->notes;
     }
 
     public function has(string $testFile): bool

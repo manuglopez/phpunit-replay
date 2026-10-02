@@ -6,6 +6,8 @@ parameters:
         - bin
     excludePaths:
         - tests/Fixtures (?)
+    scanFiles:
+        - phpstan-stubs/illuminate.stub
     stubFiles:
         - phpstan-stubs/pcov.stub
         - phpstan-stubs/xdebug.stub

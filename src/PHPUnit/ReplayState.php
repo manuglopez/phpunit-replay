@@ -31,6 +31,7 @@ use Manuglopez\Replay\Hermeticity\Quarantine;
 use Manuglopez\Replay\Laravel\LaravelDetector;
 use Manuglopez\Replay\Laravel\LaravelIntegration;
 use Manuglopez\Replay\Laravel\OncePerProcessPaths;
+use Manuglopez\Replay\Laravel\UsesDatabaseCollector;
 use Manuglopez\Replay\PHPUnit\Decision\Decision;
 use Manuglopez\Replay\PHPUnit\Decision\ReplayIncomplete;
 use Manuglopez\Replay\PHPUnit\Decision\ReplayPass;
@@ -88,6 +89,9 @@ final class ReplayState
     private static ?ResultCollector $collector = null;
 
     private static ?NotCacheableCollector $notCacheable = null;
+
+    /** The Laravel integration's (`LaravelIntegration::subscribers()`), for the in-process partial. */
+    private static ?UsesDatabaseCollector $usesDatabase = null;
 
     private static ?RunWriter $runWriter = null;
 
@@ -560,13 +564,15 @@ final class ReplayState
             self::resultsForPersist($root),
             $recordsEdges && $recorder !== null ? self::relativiseMap($recorder->perTestTables(), $root, false) : [],
             ['truncated' => $truncated],
+            usesDatabase: $recordsEdges ? self::relativeList(self::$usesDatabase?->all() ?? [], $root) : [],
             notCacheable: self::$notCacheable?->all() ?? [],
         );
 
-        // Laravel integration (SPEC.md §10): widens database test tables the same way the
-        // wrapper does (Console\Runner\RunPipeline) before folding the partial into the graph.
+        // Laravel integration (SPEC.md §10): the same partial the wrapper folds
+        // (Console\Runner\RunPipeline), the files using a database included, and widened the
+        // same way under `migrations => 'conservative'`.
         if (LaravelDetector::enabled($root, self::$config ?? Config::defaults())) {
-            $partial = LaravelIntegration::augment($partial, $root);
+            $partial = LaravelIntegration::augment($partial, $root, self::$config ?? Config::defaults());
         }
 
         $git = self::$git ?? new Git($root);
@@ -707,6 +713,7 @@ final class ReplayState
         self::$recorder = null;
         self::$collector = null;
         self::$notCacheable = null;
+        self::$usesDatabase = null;
         self::$runWriter = null;
         self::$startedAt = null;
 
@@ -851,12 +858,7 @@ final class ReplayState
 
         $testPaths = TestPaths::fromConfiguration($configuration, $root);
 
-        $watch = new WatchPatterns();
-        $watch->useDefaults($root, $testPaths->directories(), LaravelDetector::enabled($root, $config));
-
-        if ($config->watch !== []) {
-            $watch->add($config->watch);
-        }
+        $watch = WatchPatterns::forProject($root, $testPaths->directories(), $config);
 
         $policy = new Policy($graph, $config, self::$quarantine ?? Quarantine::load($stateDir), $root);
         $reader = self::$reader ?? new ConfigurationReader($configuration);
@@ -889,7 +891,7 @@ final class ReplayState
             static fn (string $file): ?string => $inputs?->digestFor($file),
         ))->apply($branch, $stale);
 
-        $runList = $builder->build($changed, $branch, $stale);
+        $runList = $builder->build($changed, $branch, $stale, $sha);
         self::$runList = self::replayAffectedFromRemote($graph, $runList, $branch, $root);
 
         Warnings::debug('changed: ' . ($changed === [] ? '(none)' : implode(', ', $changed)));
@@ -1246,6 +1248,38 @@ final class ReplayState
         }
 
         return $out;
+    }
+
+    /**
+     * @param list<string> $absolute
+     * @return list<string>
+     */
+    private static function relativeList(array $absolute, string $root): array
+    {
+        $out = [];
+
+        foreach ($absolute as $path) {
+            $rel = Paths::relative($root, $path);
+
+            if ($rel !== null) {
+                $out[$rel] = true;
+            }
+        }
+
+        $list = array_map(strval(...), array_keys($out));
+        sort($list);
+
+        return $list;
+    }
+
+    /**
+     * The Laravel integration's collector of test files using a database
+     * (`LaravelIntegration::subscribers()`): the in-process partial carries them like the
+     * wrapper's `uses_database.json` does.
+     */
+    public static function collectUsesDatabase(UsesDatabaseCollector $collector): void
+    {
+        self::$usesDatabase = $collector;
     }
 
     /**

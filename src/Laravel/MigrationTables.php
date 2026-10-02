@@ -17,7 +17,7 @@ use SplFileInfo;
  * `tablesOf()` walks every migration under `database/migrations/**` and unions the tables
  * `TableExtractor::fromMigrationSource()` finds in each — the conservative rule (SPEC.md §10):
  * any migration might affect any database test. `usesDatabase()` answers whether a test class
- * (or one of its ancestors) uses one of Laravel's database-refreshing testing traits.
+ * (or one of its ancestors, or a trait it uses) uses one of Laravel's database testing traits.
  */
 final class MigrationTables
 {
@@ -25,6 +25,7 @@ final class MigrationTables
         'Illuminate\\Foundation\\Testing\\RefreshDatabase' => true,
         'Illuminate\\Foundation\\Testing\\DatabaseMigrations' => true,
         'Illuminate\\Foundation\\Testing\\DatabaseTransactions' => true,
+        'Illuminate\\Foundation\\Testing\\DatabaseTruncation' => true,
     ];
 
     /** @return list<string> Sorted, deduped table names referenced by any migration in the project. */
@@ -66,7 +67,8 @@ final class MigrationTables
 
     /**
      * True when $className, or one of its (non-internal) ancestors, uses
-     * RefreshDatabase|DatabaseMigrations|DatabaseTransactions. Only ever true when the class
+     * RefreshDatabase|DatabaseMigrations|DatabaseTransactions|DatabaseTruncation, directly or
+     * through another trait. Only ever true when the class
      * is already loaded in the current process (`class_exists($className, false)`) — the
      * only reliable way to check this is reflection over an autoloaded class.
      */
@@ -79,14 +81,40 @@ final class MigrationTables
         $reflection = new ReflectionClass($className);
 
         do {
-            foreach (array_keys($reflection->getTraits()) as $traitName) {
-                if (isset(self::DATABASE_TRAITS[$traitName])) {
-                    return true;
-                }
+            if (self::usesADatabaseTrait($reflection->getTraits())) {
+                return true;
             }
 
             $reflection = $reflection->getParentClass();
         } while ($reflection !== false && ! $reflection->isInternal());
+
+        return false;
+    }
+
+    /**
+     * A trait used through another trait counts: `LazilyRefreshDatabase` uses
+     * `RefreshDatabase`, and so does many a project's own testing trait.
+     *
+     * @param array<string, ReflectionClass<object>> $traits
+     * @param array<string, true> $seen
+     */
+    private static function usesADatabaseTrait(array $traits, array &$seen = []): bool
+    {
+        foreach ($traits as $name => $trait) {
+            if (isset(self::DATABASE_TRAITS[$name])) {
+                return true;
+            }
+
+            if (isset($seen[$name])) {
+                continue;
+            }
+
+            $seen[$name] = true;
+
+            if (self::usesADatabaseTrait($trait->getTraits(), $seen)) {
+                return true;
+            }
+        }
 
         return false;
     }

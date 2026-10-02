@@ -337,12 +337,7 @@ final class RunPipeline
         $this->hashes = FileHashes::inStateDir($root, $this->stateDir);
         $this->sourceScope = SourceScope::fromProjectRoot($root, $configuration);
 
-        $this->watch = new WatchPatterns();
-        $this->watch->useDefaults($root, $this->testPaths->directories(), LaravelDetector::enabled($root, $config));
-
-        if ($config->watch !== []) {
-            $this->watch->add($config->watch);
-        }
+        $this->watch = WatchPatterns::forProject($root, $this->testPaths->directories(), $config);
 
         $this->fingerprint = Fingerprint::compute($root, $this->driverName, $config->staticDeclarationEdges);
 
@@ -728,7 +723,7 @@ final class RunPipeline
         }
 
         if (LaravelDetector::enabled($root, $this->config)) {
-            $partial = LaravelIntegration::augment($partial, $root);
+            $partial = LaravelIntegration::augment($partial, $root, $this->config);
         }
 
         $complete = self::ranToTheEnd($partial, $exitCode);
@@ -821,7 +816,7 @@ final class RunPipeline
         }
 
         if (LaravelDetector::enabled($root, $this->config)) {
-            $partial = LaravelIntegration::augment($partial, $root);
+            $partial = LaravelIntegration::augment($partial, $root, $this->config);
         }
 
         // Bug fix (the false-green vector): a `verify` carrying a CLI selection —
@@ -1082,7 +1077,7 @@ final class RunPipeline
         $stale = $this->auditLayers($graph, $sha, $changedFiles, $lastRun, $root);
 
         /** @var list<string> $runList */
-        $runList = $this->computeRunList($graph, $changed, $this->branch, $root, $stale)['runList'];
+        $runList = $this->computeRunList($graph, $changed, $this->branch, $root, $stale, $sha)['runList'];
 
         return ReplaySet::against($graph, $this->branch, $runList);
     }
@@ -1137,7 +1132,7 @@ final class RunPipeline
         // layer the pass would serve from is checked against its own (Select\LayerAudit).
         $stale = $this->auditLayers($graph, $sha, $changedFiles, $lastRun, $root);
 
-        $data = $this->computeRunList($graph, $changed, $this->branch, $root, $stale);
+        $data = $this->computeRunList($graph, $changed, $this->branch, $root, $stale, $sha);
         /** @var list<string> $runList */
         $runList = $data['runList'];
 
@@ -1158,6 +1153,10 @@ final class RunPipeline
             // The plan as the rules made it, not the post-remote leftovers: a file served
             // from the remote is still part of the selection (and says why), marked as such.
             foreach ((new ExplainFormatter())->lines($data['list'], $selected, $servedFromRemote) as $line) {
+                fwrite(STDOUT, $line . PHP_EOL);
+            }
+
+            foreach ((new ExplainFormatter())->noteLines($data['list']->selection) as $line) {
                 fwrite(STDOUT, $line . PHP_EOL);
             }
         }
@@ -1257,7 +1256,7 @@ final class RunPipeline
         }
 
         if (LaravelDetector::enabled($root, $this->config)) {
-            $partial = LaravelIntegration::augment($partial, $root);
+            $partial = LaravelIntegration::augment($partial, $root, $this->config);
         }
 
         $complete = self::ranToTheEnd($partial, $exitCode);
@@ -1390,9 +1389,9 @@ final class RunPipeline
     private function auditLayers(Graph $graph, string $sha, ChangedFiles $changedFiles, ?LastRunTree $lastRun, string $root): array
     {
         // Built only if some layer does need its own diff.
-        $select = function (array $changed) use ($graph, $root): Selection {
+        $select = function (array $changed, ?string $base = null) use ($graph, $root): Selection {
             /** @var list<string> $changed */
-            return $this->runListBuilder($graph, $root)->select($changed);
+            return $this->runListBuilder($graph, $root)->select($changed, $base);
         };
         $stale = (new LayerAudit($graph, $changedFiles, $select))->apply($this->branch, $sha, $lastRun);
 
@@ -1425,11 +1424,11 @@ final class RunPipeline
      * @param array<string, array{reason: Reason, ids: list<string>}> $stale {@see self::auditLayers()}
      * @return array{list: RunList, runList: list<string>, affected: int, uncached: int, quarantined: int, replayed: int, replayedRemote: int, saved: float}
      */
-    private function computeRunList(Graph $graph, array $changed, string $branch, string $root, array $stale = []): array
+    private function computeRunList(Graph $graph, array $changed, string $branch, string $root, array $stale = [], ?string $base = null): array
     {
         $builder = $this->runListBuilder($graph, $root);
 
-        $list = $builder->build($changed, $branch, $stale);
+        $list = $builder->build($changed, $branch, $stale, $base);
 
         $affectedFiles = $list->selection->testFiles();
         $uncachedSet = array_diff(array_unique(array_merge($list->unknown, $list->rerun, $list->stale)), $affectedFiles);

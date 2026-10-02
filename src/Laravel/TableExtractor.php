@@ -20,10 +20,35 @@ final class TableExtractor
 
     private const IDENTIFIER = '(?:"[^"]+"|`[^`]+`|\[[^\]]+\]|\w+)';
 
-    /** @return list<string> Sorted, deduped table names referenced by the query. */
+    /**
+     * The table "name" a test file records when one of its statements touches tables nothing
+     * can name (`CALL proc()`, `EXEC …`): the rules then treat that file as touching any table.
+     */
+    public const UNKNOWN = '*';
+
+    /**
+     * Prefix of a table a test file recorded while a `migrate` or `db:seed` command ran
+     * (`TableTracker`): written into the database every database test of the process runs on.
+     */
+    public const BOOTSTRAP = '@';
+
+    /** Statements that run code whose tables cannot be read from the statement itself. */
+    private const OPAQUE_PREFIXES = ['call', 'exec', 'execute', 'do', 'merge'];
+
+    /** What a from, update, using or truncate list looks for next: a nesting, an item, or its end. */
+    private const LIST_TOKEN = '/[(),;]|\b(?:where|inner|left|right|cross|full|natural|join|group|order|limit|having|union|except|intersect|window|offset|fetch|for|returning|on|using|straight_join|set|values|restart|continue|cascade|restrict)\b/i';
+
+    /**
+     * @return list<string> Sorted, deduped table names referenced by the query; `[UNKNOWN]` when
+     *         they cannot be read. A function the query calls (`select refresh_totals()`) is
+     *         not followed: a stored function's tables are a known limit.
+     */
     public static function fromSql(string $sql): array
     {
-        $trimmed = ltrim($sql);
+        $sql = self::withoutLeadingComments($sql);
+
+        // `(select …) union (select …)`: Laravel's MySQL and PostgreSQL grammars wrap a union.
+        $trimmed = ltrim($sql, " \t\n\r\0\x0B(");
 
         if ($trimmed === '') {
             return [];
@@ -33,19 +58,45 @@ final class TableExtractor
             return [];
         }
 
-        if (! in_array(strtolower($prefixMatch[0]), self::DML_PREFIXES, true)) {
+        $prefix = strtolower($prefixMatch[0]);
+
+        if (in_array($prefix, self::OPAQUE_PREFIXES, true)) {
+            return [self::UNKNOWN];
+        }
+
+        if ($prefix !== 'truncate' && ! in_array($prefix, self::DML_PREFIXES, true)) {
             return [];
         }
 
-        $pattern = '/\b(?:from|into|update|join)\s+(' . self::IDENTIFIER . '(?:\s*\.\s*' . self::IDENTIFIER . ')*)/i';
+        // Matched on a copy whose quoted contents are blanked: a string reading `from posts`
+        // is not a table, and a reserved word quoted as a name (`order`) ends no list.
+        // Offsets are the same in both, so names are read from the original.
+        $masked = self::masked($sql);
+        $qualified = '(' . self::IDENTIFIER . '(?:\s*\.\s*' . self::IDENTIFIER . ')*)';
+        $names = [];
 
-        if (preg_match_all($pattern, $sql, $matches) === false) {
-            return [];
+        if (preg_match_all('/\b(?:into|join)\s+' . $qualified . '/i', $masked, $matches, PREG_OFFSET_CAPTURE) !== false) {
+            foreach ($matches[1] as [$text, $offset]) {
+                $names[] = substr($sql, $offset, strlen($text));
+            }
+        }
+
+        // Lists: `from a, b x, (select …) y`, `update a, b set`, `delete … using b`, `truncate a, b`.
+        if (preg_match_all('/\b(?:from|update|using|truncate(?:\s+table)?)\s+/i', $masked, $starts, PREG_OFFSET_CAPTURE) !== false) {
+            foreach ($starts[0] as [$text, $offset]) {
+                foreach (self::listItems($masked, $offset + strlen($text)) as [$from, $length]) {
+                    $item = substr($sql, $from, $length);
+
+                    if (preg_match('/^\s*' . $qualified . '/', $item, $m) === 1) {
+                        $names[] = $m[1];
+                    }
+                }
+            }
         }
 
         $tables = [];
 
-        foreach ($matches[1] as $qualified) {
+        foreach ($names as $qualified) {
             $name = self::unqualified($qualified);
 
             if ($name === '') {
@@ -65,12 +116,127 @@ final class TableExtractor
         return $out;
     }
 
+    private static function withoutLeadingComments(string $sql): string
+    {
+        while (true) {
+            $sql = ltrim($sql);
+
+            if (str_starts_with($sql, '/*')) {
+                $end = strpos($sql, '*/');
+                $sql = $end === false ? '' : substr($sql, $end + 2);
+
+                continue;
+            }
+
+            if (str_starts_with($sql, '--')) {
+                $end = strpos($sql, "\n");
+                $sql = $end === false ? '' : substr($sql, $end + 1);
+
+                continue;
+            }
+
+            return $sql;
+        }
+    }
+
+    /** `$sql` with the contents of every quoted string and identifier replaced by `_`. */
+    private static function masked(string $sql): string
+    {
+        if (strpbrk($sql, '\'"`') === false) {
+            return $sql;
+        }
+
+        return (string) preg_replace_callback(
+            '/\'(?:[^\'\\\\]|\\\\.|\'\')*\'?|"(?:[^"]|"")*"?|`(?:[^`]|``)*`?/s',
+            static fn (array $m): string => $m[0][0] . str_repeat('_', max(0, strlen($m[0]) - 2)) . (strlen($m[0]) > 1 ? $m[0][strlen($m[0]) - 1] : ''),
+            $sql,
+        );
+    }
+
+    /**
+     * The comma-separated items of a list starting at `$offset` of `$masked`, as offset and
+     * length: up to a clause keyword, a `;`, or the `)` closing the list's own parenthesis.
+     *
+     * @return list<array{int, int}>
+     */
+    private static function listItems(string $masked, int $offset): array
+    {
+        $items = [];
+        $depth = 0;
+        $start = $offset;
+        $length = strlen($masked);
+        $i = $offset;
+
+        while ($i < $length) {
+            if ($depth > 0) {
+                $i += strcspn($masked, '()', $i);
+
+                if ($i >= $length) {
+                    break;
+                }
+
+                $depth += $masked[$i] === '(' ? 1 : -1;
+                $i++;
+
+                continue;
+            }
+
+            if (preg_match(self::LIST_TOKEN, $masked, $m, PREG_OFFSET_CAPTURE, $i) !== 1) {
+                $i = $length;
+
+                break;
+            }
+
+            [$token, $at] = $m[0];
+
+            if ($token === '(') {
+                $depth++;
+                $i = $at + 1;
+
+                continue;
+            }
+
+            if ($token === ',') {
+                $items[] = [$start, $at - $start];
+                $start = $at + 1;
+                $i = $start;
+
+                continue;
+            }
+
+            // `)`, `;` or a clause keyword: the list ends here.
+            $i = $at;
+
+            break;
+        }
+
+        $items[] = [$start, $i - $start];
+
+        return $items;
+    }
+
     /** @return list<string> Table names referenced by `Schema::` calls, raw SQL, or `DB::table()`. */
     public static function fromMigrationSource(string $php): array
     {
-        $tables = [];
+        return self::migrationTables($php)['tables'];
+    }
 
-        $schemaPattern = '/Schema::\s*(?:create|table|drop|dropIfExists|dropColumn|dropColumns|rename)\s*\(\s*[\'"]([^\'"]+)[\'"](?:\s*,\s*[\'"]([^\'"]+)[\'"])?/';
+    /**
+     * {@see self::fromMigrationSource()}, and whether the source also names a table this
+     * cannot read: `Schema::create($tableNames['roles'], ...)`, `DB::table($table)`, a
+     * `config()` call. Such a migration touches tables nobody can name, so what selects by
+     * its tables must not narrow by the ones it could read (`Rules\MigrationRule`).
+     *
+     * @return array{tables: list<string>, unresolved: bool}
+     */
+    public static function migrationTables(string $php): array
+    {
+        $tables = [];
+        $call = '(?:Schema::\s*|Schema::connection\s*\([^)]*\)\s*->\s*)(?:create|table|drop|dropIfExists|dropColumn|dropColumns|rename)\s*\(\s*';
+        $unresolved = preg_match('/' . $call . '(?![\'"])\S/', $php) === 1
+            || preg_match('/DB::table\s*\(\s*(?![\'"])\S/', $php) === 1;
+
+        $schemaPattern = '/' . $call . '[\'"]([^\'"]+)[\'"](?:\s*,\s*[\'"]([^\'"]+)[\'"])?/';
 
         if (preg_match_all($schemaPattern, $php, $matches) !== false) {
             foreach ($matches[1] as $i => $primary) {
@@ -109,6 +275,8 @@ final class TableExtractor
 
         if (preg_match_all('/DB::table\(\s*[\'"]([^\'"]+)[\'"]\s*\)/', $php, $matches) !== false) {
             foreach ($matches[1] as $name) {
+                // `DB::table('posts as p')`: the table, not the alias.
+                $name = (string) preg_replace('/\s+as\s+\w+\s*$/i', '', trim($name));
                 $lower = strtolower(self::lastDottedSegment($name));
 
                 if ($lower !== '' && ! self::isSchemaMeta($lower)) {
@@ -120,7 +288,7 @@ final class TableExtractor
         $out = array_map(strval(...), array_keys($tables));
         sort($out);
 
-        return $out;
+        return ['tables' => $out, 'unresolved' => $unresolved];
     }
 
     private static function unqualified(string $qualified): string

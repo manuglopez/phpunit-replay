@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace Manuglopez\Replay\Laravel\Rules;
 
+use Manuglopez\Replay\Laravel\MigrationPaths;
 use Manuglopez\Replay\Laravel\TableExtractor;
+use Manuglopez\Replay\Laravel\TestSchemaDump;
 use Manuglopez\Replay\Select\Context;
 use Manuglopez\Replay\Select\Reason;
 use Manuglopez\Replay\Select\ResiduePatterns;
@@ -12,103 +14,183 @@ use Manuglopez\Replay\Select\Rule;
 use Manuglopez\Replay\Support\Paths;
 
 /**
- * Laravel-only rule (SPEC.md §7.2.1): a changed `.php` file under `database/migrations/` is parsed
- * with `TableExtractor::fromMigrationSource()`; every test file whose recorded tables
- * (`Graph::testTables()`) intersect the migration's tables is affected. It narrows only when
- * the graph has at least one recorded table and the migration yields some; otherwise it
- * selects every test (a migration that cannot be read, parses to zero tables, or a graph
- * with no tables yet). A migration whose tables no test records selects every test that
- * records any table: each of those migrates a database, so each runs it. It consumes every
- * `.php` migration; any other file under `database/migrations/` (a `.sql` file a migration
- * reads) is left for the `database/migrations/**` fallback, which runs everything
- * (`Select\WatchDefaults\Laravel`).
+ * Laravel-only rule (SPEC.md §7.2.1). It claims every changed `.php` file under a migration
+ * path (`Laravel\MigrationPaths`: `database/migrations`, `migration_paths`, the literal
+ * `loadMigrationsFrom()` calls, the tenancy conventions); any other file there (a `.sql` file
+ * a migration reads) is left to the fallback patterns for those paths, which run everything
+ * (`Select\WatchDefaults\Laravel`). While the graph has recorded no table at all, a migration
+ * runs every test, in either mode.
+ *
+ * `migrations => 'precise'` (the default) decides by whether the test database runs it:
+ *
+ * - **squashed**: the `migrations` rows of the schema dump the test connection loads list it
+ *   (`Laravel\TestSchemaDump`). No test database runs it, so it selects nothing on its own
+ *   account, and `explain` says so. Regenerating the dump is a dump change
+ *   (`SchemaDumpRule`). Rows that cannot be read squash nothing;
+ * - **pending**: anything else. Every fresh test database runs it whichever tables it names,
+ *   and one that throws breaks them all, so it selects every test file that uses a database
+ *   (`Cache\Graph::databaseTestFiles()`).
+ *
+ * `migrations => 'conservative'` keeps 0.12's rule, over the tables every database test was
+ * widened to (`LaravelIntegration::augment()`): the test files whose recorded tables intersect
+ * the migration's; every test that records a table when no test records one of them; every
+ * test when it names none; every database test when it names a table it cannot read
+ * (`Schema::create($tableNames['roles'])`, `DB::table($table)`), whatever else it names.
  */
 final class MigrationRule implements Rule
 {
+    private readonly MigrationPaths $paths;
+
+    /** @var array<string, true>|false|null false until read; null when nothing is squashed */
+    private array|false|null $squashed = false;
+
+    private ?string $squashedInto = null;
+
+    public function __construct(?MigrationPaths $paths = null, private readonly string $mode = 'precise')
+    {
+        $this->paths = $paths ?? MigrationPaths::default();
+    }
+
     public function name(): string
     {
         return 'Migration';
     }
 
+    public function paths(): MigrationPaths
+    {
+        return $this->paths;
+    }
+
+    public function conservative(): bool
+    {
+        return $this->mode === 'conservative';
+    }
+
     public function apply(Context $context): void
     {
         $testTables = $context->graph->testTables();
+        $this->squashed = false;
 
         foreach ($context->remaining as $rel) {
-            if (! self::isMigrationPath($rel)) {
+            if (! $this->paths->isMigration($rel)) {
                 continue;
-            }
-
-            $tables = self::tablesForMigration($rel, $context->projectRoot);
-
-            // Nothing to narrow by: a migration with no readable table (deleted, raw
-            // statements, a data migration), or a graph with no table recorded yet. Every
-            // test runs, which is what the `database/migrations/**` watch default this rule
-            // replaces did for it (`Select\WatchDefaults\Laravel`).
-            if ($tables === [] || $testTables === []) {
-                $targets = ResiduePatterns::targetsFor($context->testPaths);
-
-                foreach ($context->watch->testsUnderDirectories($targets, $context->graph->allTestFiles()) as $testFile) {
-                    $context->selection->add($testFile, new Reason($this->name(), $rel, 'no tables to narrow by'));
-                }
-
-                $context->consume($rel);
-
-                continue;
-            }
-
-            $lowerTables = array_map(strtolower(...), $tables);
-            $matched = false;
-
-            foreach ($testTables as $testFile => $testFileTables) {
-                foreach ($testFileTables as $table) {
-                    if (in_array($table, $lowerTables, true)) {
-                        $context->selection->add((string) $testFile, new Reason($this->name(), $rel, implode(', ', $tables)));
-                        $matched = true;
-
-                        break;
-                    }
-                }
-            }
-
-            // Tables no test records (a new `widgets` table): nobody queries them yet, and the
-            // migration still runs for every test that migrates a database — a migration that
-            // throws breaks all of them. Those are the tests with any recorded table, which is
-            // narrower than "every test that uses the database": `TableTracker` is armed on
-            // `Test\Prepared`, after `setUp()`, so a test whose only queries run in `setUp()`
-            // or a factory there, through raw PDO, or from a result cached statically by an
-            // earlier test records no table and is not selected (a known gap, as on 0.11.0).
-            if (! $matched) {
-                foreach (array_keys($testTables) as $testFile) {
-                    $context->selection->add((string) $testFile, new Reason($this->name(), $rel, 'tables no test records: every database test'));
-                }
             }
 
             $context->consume($rel);
+
+            // A graph with no table recorded yet says nothing about who uses a database.
+            if ($testTables === []) {
+                $this->selectEveryTest($context, $rel, 'no tables to narrow by');
+
+                continue;
+            }
+
+            if ($this->conservative()) {
+                $this->byTable($context, $rel, $testTables);
+
+                continue;
+            }
+
+            $squashedInto = $this->squashedInto($context, $rel);
+
+            if ($squashedInto !== null) {
+                $context->selection->note(new Reason($this->name(), $rel, 'squashed into ' . $squashedInto . ', not run by tests'));
+
+                continue;
+            }
+
+            $this->selectDatabaseTests($context, $rel, 'pending migration: every database test');
         }
     }
 
-    /** Shared with `Select\NonEdgeInputs`, whose `migrations@3` scopes are this rule's claim. */
-    public static function isMigrationPath(string $rel): bool
+    /** The dump a migration is squashed into, or null when the test database runs it. */
+    private function squashedInto(Context $context, string $rel): ?string
     {
-        return str_starts_with($rel, 'database/migrations/') && str_ends_with($rel, '.php');
+        if ($this->squashed === false) {
+            $this->squashed = TestSchemaDump::squashed($context->projectRoot, $context->graph->configuration());
+            $this->squashedInto = $this->squashed === null ? null : TestSchemaDump::path($context->projectRoot, $context->graph->configuration());
+        }
+
+        return $this->squashed !== null && isset($this->squashed[TestSchemaDump::migrationName($rel)]) ? $this->squashedInto : null;
     }
 
-    /** @return list<string> */
+    /** @param array<string, list<string>> $testTables */
+    private function byTable(Context $context, string $rel, array $testTables): void
+    {
+        $read = self::tablesForMigration($rel, $context->projectRoot);
+        $tables = $read['tables'];
+
+        if ($read['unresolved']) {
+            $this->selectDatabaseTests($context, $rel, 'tables it cannot name: every database test');
+
+            return;
+        }
+
+        // Nothing to narrow by: a migration with no readable table (deleted, raw statements,
+        // a data migration). Every test runs.
+        if ($tables === []) {
+            $this->selectEveryTest($context, $rel, 'no tables to narrow by');
+
+            return;
+        }
+
+        $lowerTables = array_map(strtolower(...), $tables);
+        $matched = false;
+
+        // A test file whose tables are not all known may use any of them.
+        foreach ($context->graph->databaseTestFiles() as $testFile) {
+            if ($context->graph->tablesUnknown($testFile)) {
+                $context->selection->add($testFile, new Reason($this->name(), $rel, 'a database test whose tables are not all known'));
+            }
+        }
+
+        foreach ($testTables as $testFile => $testFileTables) {
+            foreach ($testFileTables as $table) {
+                // `@t`: written while the database was built.
+                if (in_array(ltrim($table, TableExtractor::BOOTSTRAP), $lowerTables, true)) {
+                    $context->selection->add((string) $testFile, new Reason($this->name(), $rel, implode(', ', $tables)));
+                    $matched = true;
+
+                    break;
+                }
+            }
+        }
+
+        // Tables no test records (a new `widgets` table): nobody queries them yet, and the
+        // migration still runs for every test that migrates a database.
+        if (! $matched) {
+            foreach (array_keys($testTables) as $testFile) {
+                $context->selection->add((string) $testFile, new Reason($this->name(), $rel, 'tables no test records: every database test'));
+            }
+        }
+    }
+
+    private function selectEveryTest(Context $context, string $rel, string $detail): void
+    {
+        $targets = ResiduePatterns::targetsFor($context->testPaths);
+
+        foreach ($context->watch->testsUnderDirectories($targets, $context->graph->allTestFiles()) as $testFile) {
+            $context->selection->add($testFile, new Reason($this->name(), $rel, $detail));
+        }
+    }
+
+    private function selectDatabaseTests(Context $context, string $rel, string $detail): void
+    {
+        foreach ($context->graph->databaseTestFiles() as $testFile) {
+            $context->selection->add($testFile, new Reason($this->name(), $rel, $detail));
+        }
+    }
+
+    /** @return array{tables: list<string>, unresolved: bool} */
     public static function tablesForMigration(string $rel, string $projectRoot): array
     {
         $absolute = Paths::join($projectRoot, $rel);
-
-        if (! is_file($absolute)) {
-            return [];
-        }
-
-        $content = @file_get_contents($absolute);
+        $content = is_file($absolute) ? @file_get_contents($absolute) : false;
 
         if ($content === false) {
-            return [];
+            return ['tables' => [], 'unresolved' => false];
         }
 
-        return TableExtractor::fromMigrationSource($content);
+        return TableExtractor::migrationTables($content);
     }
 }

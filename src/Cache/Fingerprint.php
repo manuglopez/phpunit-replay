@@ -5,7 +5,9 @@ declare(strict_types=1);
 namespace Manuglopez\Replay\Cache;
 
 use Manuglopez\Replay\Analysis\DeclarationScanner;
+use Manuglopez\Replay\Config;
 use Manuglopez\Replay\Coverage\CoverageFormat;
+use Manuglopez\Replay\Laravel\LaravelDetector;
 use Symfony\Component\Process\Exception\ExceptionInterface;
 use Symfony\Component\Process\Process;
 
@@ -201,6 +203,21 @@ final readonly class Fingerprint
         if ($staticDeclarationEdges) {
             $structural['static_declaration_edges'] = true;
             $structural['analysis_rules'] = DeclarationScanner::RULES_VERSION;
+        }
+
+        // Laravel (0.13): `test_tables` holds each test file's own queries (no union of every
+        // migration's tables, plus the `@`/`*` markers), and the two modes decide what a
+        // migration and a schema dump select. A 0.12 reader narrowing on raw tables, or a
+        // graph recorded under another mode, would serve results the rules never vouched
+        // for: each side rejects the other's graph structurally, and `status` names the key.
+        // Read from `phpunit-replay.php` here so the wrapper and its PHPUnit child agree
+        // without passing anything along (neither mode has an environment override).
+        $config = Config::load($projectRoot);
+
+        if (LaravelDetector::enabled($projectRoot, $config)) {
+            $structural['tables_raw'] = true;
+            $structural['migrations'] = $config->migrations;
+            $structural['schema_dump'] = $config->schemaDump;
         }
 
         return [

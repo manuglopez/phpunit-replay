@@ -162,6 +162,61 @@ final class SiblingRuleTest extends TestCase
         self::assertSame(['app/Providers/NewProvider.php'], $context->remaining);
     }
 
+    public function test_a_new_file_in_a_new_subdirectory_selects_the_tests_of_the_nearest_ancestor_with_edges(): void
+    {
+        // A new `Reports/` folder has no tested sibling yet; its parent is full of them, and
+        // Laravel discovers the new command the way it discovers theirs.
+        TempDir::write($this->root . '/app/Console/Commands/Reports/Monthly/SendReport.php', '<?php class SendReport {}');
+
+        $graph = new Graph($this->root);
+        $graph->replaceEdges([
+            'tests/PruneTest.php' => ['app/Console/Commands/PruneUsers.php'],
+            'tests/ImportTest.php' => ['app/Console/Commands/Import/ImportUsers.php'],
+            'tests/OtherTest.php' => ['app/Models/User.php'],
+        ]);
+
+        $selection = new Selection();
+        $context = $this->makeContext($graph, ['app/Console/Commands/Reports/Monthly/SendReport.php'], $selection);
+
+        (new SiblingRule())->apply($context);
+
+        self::assertSame(['tests/ImportTest.php', 'tests/PruneTest.php'], $selection->testFiles());
+        self::assertSame(['app/Console/Commands/Reports/Monthly/SendReport.php'], $context->remaining, 'additive: what the residue fallback would run still runs');
+        self::assertSame('app/Console/Commands/**', $selection->reasons()['tests/PruneTest.php'][0]->detail);
+    }
+
+    public function test_the_walk_up_stops_at_the_first_ancestor_with_edges(): void
+    {
+        TempDir::write($this->root . '/app/Console/Commands/Reports/Monthly/SendReport.php', '<?php class SendReport {}');
+
+        $graph = new Graph($this->root);
+        $graph->replaceEdges([
+            'tests/WeeklyTest.php' => ['app/Console/Commands/Reports/Weekly/SendWeekly.php'],
+            'tests/PruneTest.php' => ['app/Console/Commands/PruneUsers.php'],
+        ]);
+
+        $selection = new Selection();
+        (new SiblingRule())->apply($this->makeContext($graph, ['app/Console/Commands/Reports/Monthly/SendReport.php'], $selection));
+
+        self::assertSame(['tests/WeeklyTest.php'], $selection->testFiles(), 'Reports/** has edges: Commands/** is not reached');
+        self::assertSame('app/Console/Commands/Reports/**', $selection->reasons()['tests/WeeklyTest.php'][0]->detail);
+    }
+
+    public function test_the_walk_up_never_leaves_the_sibling_root(): void
+    {
+        TempDir::write($this->root . '/app/Console/Commands/Reports/SendReport.php', '<?php class SendReport {}');
+
+        $graph = new Graph($this->root);
+        $graph->replaceEdges(['tests/KernelTest.php' => ['app/Console/Kernel.php']]);
+
+        $selection = new Selection();
+        $context = $this->makeContext($graph, ['app/Console/Commands/Reports/SendReport.php'], $selection);
+        (new SiblingRule())->apply($context);
+
+        self::assertSame([], $selection->testFiles(), 'app/Console is above the sibling root');
+        self::assertSame(['app/Console/Commands/Reports/SendReport.php'], $context->remaining);
+    }
+
     /** @param list<string> $remaining */
     private function makeContext(Graph $graph, array $remaining, Selection $selection): Context
     {

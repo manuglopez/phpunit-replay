@@ -43,6 +43,22 @@ final class Graph
     /** @var list<string> */
     private array $notCacheable = [];
 
+    /**
+     * Test files whose class uses a database-refreshing trait (Laravel, SPEC.md §10), as the
+     * last run that executed each one saw it. Encoded as `uses_database` only when non-empty.
+     *
+     * @var list<string>
+     */
+    private array $usesDatabase = [];
+
+    /**
+     * Test files whose latest recording could not name every table they touched. Encoded as
+     * `tables_unknown` only when non-empty.
+     *
+     * @var array<string, true>
+     */
+    private array $tablesUnknown = [];
+
     /** @var array<string, mixed> */
     private array $fingerprint = [];
 
@@ -305,10 +321,168 @@ final class Graph
         }
     }
 
+    /**
+     * {@see self::replaceTestTables()}, but adding to what each file already holds: what
+     * every recording writes (`GraphUpdater`). A query a static caches runs only in the
+     * first test of a process that needs it, so which file records its table moves with
+     * the run order; the union converges on every file that ever did, like edges.
+     *
+     * @param array<string, list<string>> $testToTables
+     */
+    public function unionTestTables(array $testToTables): void
+    {
+        $merged = [];
+
+        foreach ($testToTables as $testFile => $tables) {
+            $testRel = $this->relative((string) $testFile);
+
+            if ($testRel !== null) {
+                $merged[$testRel] = [...$this->testTables[$testRel] ?? [], ...$tables];
+            }
+        }
+
+        $this->replaceTestTables($merged);
+    }
+
+    /**
+     * The tables written while the database itself was built (`@table` entries,
+     * `Laravel\TableTracker`: a migration's or a seeder's writes), whichever test file was
+     * running at the time: every database test of that process runs on them.
+     *
+     * @return list<string>
+     */
+    public function bootstrapTables(): array
+    {
+        $tables = [];
+
+        foreach ($this->testTables as $names) {
+            foreach ($names as $name) {
+                if (str_starts_with($name, '@') && strlen($name) > 1) {
+                    $tables[substr($name, 1)] = true;
+                }
+            }
+        }
+
+        $list = array_map(strval(...), array_keys($tables));
+        sort($list);
+
+        return $list;
+    }
+
+    /**
+     * What a test file's own queries named, without the markers: `@table` (bootstrap,
+     * {@see self::bootstrapTables()}) and `*` (tables that could not be named).
+     *
+     * @return list<string>
+     */
+    public function queriedTables(string $testFile): array
+    {
+        return array_values(array_filter(
+            $this->testTables[$testFile] ?? [],
+            static fn (string $name): bool => $name !== '*' && ! str_starts_with($name, '@'),
+        ));
+    }
+
+    /**
+     * The test file's latest recording saw a statement whose tables nobody could name, or its
+     * trackers were armed after `setUp()` began (`Laravel\Subscribers\ArmLaravelTrackersOnPrepared`).
+     * Unlike its tables, which only accumulate, this is what the latest recording said.
+     */
+    public function tablesUnknown(string $testFile): bool
+    {
+        return isset($this->tablesUnknown[$testFile]);
+    }
+
+    /**
+     * For each file of `$executed`, whether its tables are unknown is what this recording
+     * says (`$unknown`); a file it did not execute keeps what an earlier one said.
+     *
+     * @param list<string> $executed
+     * @param list<string> $unknown
+     */
+    public function replaceTablesUnknown(array $executed, array $unknown): void
+    {
+        foreach ($executed as $testFile) {
+            $rel = $this->relative($testFile);
+
+            if ($rel !== null) {
+                unset($this->tablesUnknown[$rel]);
+            }
+        }
+
+        foreach ($unknown as $testFile) {
+            $rel = $this->relative($testFile);
+
+            if ($rel !== null) {
+                $this->tablesUnknown[$rel] = true;
+            }
+        }
+
+        ksort($this->tablesUnknown, SORT_STRING);
+    }
+
     /** @return array<string, list<string>> */
     public function testTables(): array
     {
         return $this->testTables;
+    }
+
+    /**
+     * For each file of `$executed`, whether it uses a database is what this run says
+     * (`$usesDatabase`); a file the run did not execute keeps what an earlier run said.
+     *
+     * @param list<string> $executed test files the run executed
+     * @param list<string> $usesDatabase the ones among them that use a database
+     */
+    public function replaceUsesDatabase(array $executed, array $usesDatabase): void
+    {
+        $set = array_fill_keys($this->usesDatabase, true);
+
+        foreach ($executed as $testFile) {
+            $rel = $this->relative($testFile);
+
+            if ($rel !== null) {
+                unset($set[$rel]);
+            }
+        }
+
+        foreach ($usesDatabase as $testFile) {
+            $rel = $this->relative($testFile);
+
+            if ($rel !== null) {
+                $set[$rel] = true;
+            }
+        }
+
+        $files = array_map(strval(...), array_keys($set));
+        sort($files);
+        $this->usesDatabase = $files;
+    }
+
+    /** @return list<string> */
+    public function usesDatabase(): array
+    {
+        return $this->usesDatabase;
+    }
+
+    /**
+     * Every test file known to use a database: the `uses_database` set and every file that
+     * recorded a table (a graph from before 0.13 has only the second).
+     *
+     * @return list<string>
+     */
+    public function databaseTestFiles(): array
+    {
+        $files = array_fill_keys($this->usesDatabase, true) + $this->tablesUnknown;
+
+        foreach (array_keys($this->testTables) as $testFile) {
+            $files[(string) $testFile] = true;
+        }
+
+        $list = array_map(strval(...), array_keys($files));
+        sort($list);
+
+        return $list;
     }
 
     /** @param list<string> $testFiles */
@@ -729,6 +903,8 @@ final class Graph
         $known = array_unique(array_merge(
             array_keys($this->edges),
             array_keys($this->testTables),
+            $this->usesDatabase,
+            array_map(strval(...), array_keys($this->tablesUnknown)),
         ));
 
         $edgesChanged = false;
@@ -744,6 +920,8 @@ final class Graph
             }
 
             unset($this->testTables[$testRel]);
+            $this->usesDatabase = array_values(array_diff($this->usesDatabase, [$testRel]));
+            unset($this->tablesUnknown[$testRel]);
 
             $this->notCacheable = array_values(array_diff($this->notCacheable, [$testRel]));
         }
@@ -941,7 +1119,9 @@ final class Graph
 
         foreach ($this->testTables as $names) {
             foreach ($names as $name) {
-                $tables[$name] = true;
+                if ($name !== '*') {
+                    $tables[ltrim($name, '@')] = true;
+                }
             }
         }
 
@@ -972,6 +1152,9 @@ final class Graph
         $graph->edges = self::decodeEdges($data['edges'] ?? null);
         $graph->testTables = self::decodeStringMap($data['test_tables'] ?? null);
         $graph->notCacheable = self::decodeStringList($data['not_cacheable'] ?? null);
+        $graph->usesDatabase = self::decodeStringList($data['uses_database'] ?? null);
+        $graph->tablesUnknown = array_fill_keys(self::decodeStringList($data['tables_unknown'] ?? null), true);
+        sort($graph->usesDatabase);
         $graph->baselines = self::decodeBaselines($data['baselines'] ?? null);
         $graph->configuration = is_string($data['configuration'] ?? null) && $data['configuration'] !== '' ? $data['configuration'] : null;
 
@@ -1316,6 +1499,14 @@ final class Graph
 
         if ($this->configuration !== null) {
             $payload['configuration'] = $this->configuration;
+        }
+
+        if ($this->usesDatabase !== []) {
+            $payload['uses_database'] = $this->usesDatabase;
+        }
+
+        if ($this->tablesUnknown !== []) {
+            $payload['tables_unknown'] = array_map(strval(...), array_keys($this->tablesUnknown));
         }
 
         return Json::encode($payload);

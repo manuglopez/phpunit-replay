@@ -21,9 +21,9 @@ final class Selector
     }
 
     /**
-     * @param array{migration?: Rule, sibling?: Rule, blade?: Rule} $extraRules Laravel-only
+     * @param array{migration?: Rule, schema?: Rule, sibling?: Rule, blade?: Rule} $extraRules Laravel-only
      *        rules (SPEC.md §7.2, docs/INTERNALS.md "Laravel"), inserted in SPEC order:
-     *        Migration first, PhpEdge, TestFile, then Sibling and Blade, then Watch last.
+     *        Migration and SchemaDump first, PhpEdge, TestFile, then Sibling and Blade, then Watch last.
      *        Absent keys are simply skipped, so `[]` (the default, and every non-Laravel
      *        project) reproduces the plain chain.
      */
@@ -36,6 +36,7 @@ final class Selector
     ): self {
         return new self($graph, $testPaths, $watch, $projectRoot, [
             ...(isset($extraRules['migration']) ? [$extraRules['migration']] : []),
+            ...(isset($extraRules['schema']) ? [$extraRules['schema']] : []),
             new Rules\PhpEdgeRule(),
             new Rules\TestFileRule(),
             ...(isset($extraRules['sibling']) ? [$extraRules['sibling']] : []),
@@ -44,8 +45,13 @@ final class Selector
         ]);
     }
 
-    /** @param list<string> $changed relative or absolute */
-    public function affected(array $changed): Selection
+    /**
+     * @param list<string> $changed relative or absolute
+     * @param string|null $base the commit `$changed` was diffed from, for a rule that compares
+     *        a file's content before and after (`Laravel\Rules\SchemaDumpRule`); null when the
+     *        change set has no such base
+     */
+    public function affected(array $changed, ?string $base = null): Selection
     {
         $remaining = [];
 
@@ -78,6 +84,7 @@ final class Selector
             $this->watch,
             $remaining,
             $selection,
+            $base,
         );
 
         foreach ($this->rules as $rule) {
@@ -99,6 +106,10 @@ final class Selector
             foreach ($reasons as $reason) {
                 $final->add($testFile, $reason);
             }
+        }
+
+        foreach ($selection->notes() as $note) {
+            $final->note($note);
         }
 
         return $final;
