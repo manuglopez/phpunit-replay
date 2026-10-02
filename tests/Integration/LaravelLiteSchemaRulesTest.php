@@ -141,6 +141,29 @@ final class LaravelLiteSchemaRulesTest extends TestCase
         self::assertSame(['tests/Feature/PostJsonTest.php', 'tests/Feature/PostsIndexTest.php', 'tests/Feature/UserModelTest.php'], $graph->usesDatabase());
     }
 
+    public function test_tables_a_trait_s_set_up_or_a_seeder_touches_are_recorded(): void
+    {
+        // Laravel runs every testing trait's setUp (RefreshDatabase and its seeder included)
+        // before its afterApplicationCreated callbacks: the trackers must be armed earlier.
+        $fixture = $this->fixtures[] = FixtureProject::laravelLite();
+        $fixture->write('tests/Support/SeedsAPost.php', "<?php\n\ndeclare(strict_types=1);\n\nnamespace Tests\\Support;\n\nuse Illuminate\\Support\\Facades\\DB;\n\ntrait SeedsAPost\n{\n    protected function setUpSeedsAPost(): void\n    {\n        \$id = DB::table('users')->insertGetId(['name' => 'x', 'email' => 'x@x', 'password' => 'p']);\n        DB::table('posts')->insert(['user_id' => \$id, 'title' => 't', 'body' => 'b']);\n    }\n}\n");
+        $fixture->write('tests/Feature/TraitSetUpTest.php', "<?php\n\ndeclare(strict_types=1);\n\nnamespace Tests\\Feature;\n\nuse Illuminate\\Foundation\\Testing\\RefreshDatabase;\nuse Tests\\Support\\SeedsAPost;\nuse Tests\\TestCase;\n\nclass TraitSetUpTest extends TestCase\n{\n    use RefreshDatabase;\n    use SeedsAPost;\n\n    public function test_nothing_queried_here(): void\n    {\n        \$this->assertTrue(true);\n    }\n}\n");
+        $fixture->write('database/seeders/AdminSeeder.php', "<?php\n\ndeclare(strict_types=1);\n\nnamespace Database\\Seeders;\n\nuse Illuminate\\Database\\Seeder;\nuse Illuminate\\Support\\Facades\\DB;\n\nclass AdminSeeder extends Seeder\n{\n    public function run(): void\n    {\n        DB::table('users')->insert(['name' => 'admin', 'email' => 'admin@x', 'password' => 'p']);\n    }\n}\n");
+        // Laravel's documented place for a seeder: the base test case, so whichever database
+        // test of the process migrates first also seeds.
+        $fixture->write('tests/TestCase.php', "<?php\n\ndeclare(strict_types=1);\n\nnamespace Tests;\n\nuse Database\\Seeders\\AdminSeeder;\nuse Illuminate\\Foundation\\Testing\\TestCase as BaseTestCase;\n\nabstract class TestCase extends BaseTestCase\n{\n    protected \$seeder = AdminSeeder::class;\n}\n");
+        $fixture->repo->commitAll('a trait setUp and a seeder');
+        $recorded = $fixture->replay(['record']);
+        self::assertSame(0, $recorded['exitCode'], $recorded['stdout'] . $recorded['stderr']);
+
+        $graph = ReplayAssert::loadGraph($fixture);
+        self::assertNotNull($graph);
+        self::assertSame(['posts', 'users'], $graph->testTables()['tests/Feature/TraitSetUpTest.php'] ?? null, 'written by setUpSeedsAPost()');
+        // RefreshDatabase migrates and seeds once per process, in whichever test comes first:
+        // every later database test runs on those rows, so they are every database test's.
+        self::assertContains('users', $graph->bootstrapTables(), 'written by the seeder RefreshDatabase runs');
+    }
+
     public function test_the_wrapper_and_the_in_process_extension_record_the_same_tables_and_database_tests(): void
     {
         $wrapper = $this->recorded();
@@ -164,9 +187,35 @@ final class LaravelLiteSchemaRulesTest extends TestCase
         self::assertSame($wrapperGraph->usesDatabase(), $inProcessGraph->usesDatabase());
     }
 
-    public function test_a_dump_change_touching_one_table_selects_only_that_table_s_tests(): void
+    public function test_by_default_a_dump_change_selects_every_database_test_and_whitespace_nothing(): void
     {
         $fixture = $this->recorded(withDump: true);
+
+        $fixture->write(self::DUMP, "-- dumped again\n" . str_replace("\n  \"", "\n    \"", self::SCHEMA));
+        self::assertSame([], $this->plan($fixture), 'comments and whitespace only');
+
+        $fixture->write(self::DUMP, str_replace('"amount" integer not null', '"amount" integer not null, "note" varchar', self::SCHEMA));
+        $plan = $this->plan($fixture);
+        self::assertSame(self::DATABASE_TESTS, array_keys($plan));
+        self::assertSame('SchemaDump ' . self::DUMP . ' (changed: every database test)', $plan['tests/Feature/UserModelTest.php']);
+    }
+
+    public function test_regenerating_the_dump_after_a_data_migration_selects_every_database_test(): void
+    {
+        // The dump stores no data: once its rows list the data migration, no test database
+        // runs it, and a test reading what it inserted fails under plain PHPUnit.
+        $fixture = $this->recorded(withDump: true, config: "<?php\n\nreturn ['schema_dump' => 'per-table'];\n");
+
+        $fixture->write(self::DUMP, self::SCHEMA . "INSERT INTO migrations VALUES(4,'2024_01_05_000000_seed_admin',1);\n");
+        $plan = $this->plan($fixture);
+
+        self::assertSame(self::DATABASE_TESTS, array_keys($plan));
+        self::assertStringContainsString('migration rows changed', $plan['tests/Feature/LedgerTest.php']);
+    }
+
+    public function test_a_dump_change_touching_one_table_selects_only_that_table_s_tests(): void
+    {
+        $fixture = $this->recorded(withDump: true, config: "<?php\n\nreturn ['schema_dump' => 'per-table'];\n");
         $graph = ReplayAssert::loadGraph($fixture);
         self::assertNotNull($graph);
         $before = $this->digests($fixture, $graph);
@@ -176,8 +225,11 @@ final class LaravelLiteSchemaRulesTest extends TestCase
 
         $fixture->write(self::DUMP, str_replace('"title" varchar not null', '"title" varchar not null, "subtitle" varchar', self::SCHEMA));
         $plan = $this->plan($fixture);
-        self::assertSame(['tests/Feature/PostJsonTest.php', 'tests/Feature/PostsIndexTest.php'], array_keys($plan));
-        self::assertSame('SchemaDump ' . self::DUMP . ' (posts)', $plan['tests/Feature/PostJsonTest.php']);
+        // posts.user_id references users: deleting a user cascades to posts, so the users
+        // tests are reached too. LedgerTest's table is tied to nothing.
+        self::assertSame(['tests/Feature/PostJsonTest.php', 'tests/Feature/PostsIndexTest.php', 'tests/Feature/UserModelTest.php'], array_keys($plan));
+        self::assertSame('SchemaDump ' . self::DUMP . ' (posts, users)', $plan['tests/Feature/PostJsonTest.php']);
+        self::assertSame('SchemaDump ' . self::DUMP . ' (users)', $plan['tests/Feature/UserModelTest.php']);
 
         // The digest moves for exactly the tests the rule selects.
         $after = $this->digests($fixture, $graph);

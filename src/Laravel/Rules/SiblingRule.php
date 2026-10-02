@@ -83,7 +83,6 @@ final class SiblingRule implements Rule
                     foreach ($graph->dependenciesOf($testFile) as $dependency) {
                         if (str_starts_with($dependency, $ancestor . '/')) {
                             $context->selection->add($testFile, new Reason($this->name(), $rel, $ancestor . '/**'));
-                            $matched = true;
 
                             break;
                         }
@@ -91,6 +90,10 @@ final class SiblingRule implements Rule
                 }
             }
 
+            // The ancestor walk only adds, and never consumes: a presumption one level removed
+            // must not narrow what the residue fallback (with `static_declaration_edges`)
+            // would have run for the file.
+            //
             // Only consume when the presumption actually found a sibling to stand on, the
             // way {@see BladeRule} does with its ancestors. A directory none of whose files
             // any test has an edge to tells us nothing, and swallowing the path there hid it

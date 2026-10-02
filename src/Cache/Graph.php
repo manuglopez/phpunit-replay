@@ -313,6 +313,74 @@ final class Graph
         }
     }
 
+    /**
+     * {@see self::replaceTestTables()}, but adding to what each file already holds: what
+     * every recording writes (`GraphUpdater`). A query a static caches runs only in the
+     * first test of a process that needs it, so which file records its table moves with
+     * the run order; the union converges on every file that ever did, like edges.
+     *
+     * @param array<string, list<string>> $testToTables
+     */
+    public function unionTestTables(array $testToTables): void
+    {
+        $merged = [];
+
+        foreach ($testToTables as $testFile => $tables) {
+            $testRel = $this->relative((string) $testFile);
+
+            if ($testRel !== null) {
+                $merged[$testRel] = [...$this->testTables[$testRel] ?? [], ...$tables];
+            }
+        }
+
+        $this->replaceTestTables($merged);
+    }
+
+    /**
+     * The tables written while the database itself was built (`@table` entries,
+     * `Laravel\TableTracker`: a migration's or a seeder's writes), whichever test file was
+     * running at the time: every database test of that process runs on them.
+     *
+     * @return list<string>
+     */
+    public function bootstrapTables(): array
+    {
+        $tables = [];
+
+        foreach ($this->testTables as $names) {
+            foreach ($names as $name) {
+                if (str_starts_with($name, '@') && strlen($name) > 1) {
+                    $tables[substr($name, 1)] = true;
+                }
+            }
+        }
+
+        $list = array_map(strval(...), array_keys($tables));
+        sort($list);
+
+        return $list;
+    }
+
+    /**
+     * What a test file's own queries named, without the markers: `@table` (bootstrap,
+     * {@see self::bootstrapTables()}) and `*` (tables that could not be named).
+     *
+     * @return list<string>
+     */
+    public function queriedTables(string $testFile): array
+    {
+        return array_values(array_filter(
+            $this->testTables[$testFile] ?? [],
+            static fn (string $name): bool => $name !== '*' && ! str_starts_with($name, '@'),
+        ));
+    }
+
+    /** A test file one of whose statements touched tables nobody could name (`*`). */
+    public function tablesUnknown(string $testFile): bool
+    {
+        return in_array('*', $this->testTables[$testFile] ?? [], true);
+    }
+
     /** @return array<string, list<string>> */
     public function testTables(): array
     {
@@ -1009,7 +1077,9 @@ final class Graph
 
         foreach ($this->testTables as $names) {
             foreach ($names as $name) {
-                $tables[$name] = true;
+                if ($name !== '*') {
+                    $tables[ltrim($name, '@')] = true;
+                }
             }
         }
 

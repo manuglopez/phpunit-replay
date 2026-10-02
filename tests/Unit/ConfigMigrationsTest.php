@@ -25,6 +25,14 @@ final class ConfigMigrationsTest extends TestCase
         self::assertSame(['database/tenant'], $config->with(['migrationPaths' => ['database/tenant']])->migrationPaths);
     }
 
+    public function test_schema_dump_mode_defaults_to_conservative_and_accepts_per_table(): void
+    {
+        self::assertSame('conservative', Config::defaults()->schemaDump);
+        self::assertSame('per-table', Config::fromArray(['schema_dump' => 'per-table'])->schemaDump);
+        self::assertSame('conservative', Config::fromArray(['schema_dump' => 'by-table'])->schemaDump);
+        self::assertSame('per-table', Config::defaults()->with(['schemaDump' => 'per-table'])->schemaDump);
+    }
+
     public function test_migrations_mode_defaults_to_precise_and_accepts_conservative(): void
     {
         self::assertSame('precise', Config::defaults()->migrations);

@@ -366,7 +366,7 @@ final class NonEdgeInputsTest extends TestCase
         self::assertNotSame($before, $this->inputs(extraRules: $rules)->digestFor('tests/ATest.php'), 'pending again');
     }
 
-    public function test_a_schema_dump_block_is_an_input_of_the_tests_using_its_table_and_of_database_tests_with_none(): void
+    public function test_by_default_the_whole_normalised_dump_is_every_database_test_s_input(): void
     {
         $this->repo->write('tests/CTest.php', "<?php\nfinal class CTest {}\n");
         $this->repo->write('tests/DTest.php', "<?php\nfinal class DTest {}\n");
@@ -374,6 +374,29 @@ final class NonEdgeInputsTest extends TestCase
         $this->graph->replaceTestTables(['tests/ATest.php' => ['users'], 'tests/BTest.php' => ['posts']]);
         $this->graph->replaceUsesDatabase(['tests/CTest.php'], ['tests/CTest.php']);
         $rules = ['schema' => new SchemaDumpRule()];
+
+        $before = $this->digests($rules);
+        $this->repo->write('database/schema/sqlite-schema.sql', "-- again\n" . str_replace('"title" varchar', '"title"    varchar', self::SQLITE_DUMP));
+        self::assertSame($before, $this->digests($rules), 'comments and whitespace only');
+
+        $this->repo->write('database/schema/sqlite-schema.sql', str_replace('"title" varchar', '"title" varchar, "body" text', self::SQLITE_DUMP));
+        $after = $this->digests($rules);
+
+        foreach (['tests/ATest.php', 'tests/BTest.php', 'tests/CTest.php'] as $file) {
+            self::assertNotSame($before[$file], $after[$file], $file . ' uses a database');
+        }
+
+        self::assertSame($before['tests/DTest.php'], $after['tests/DTest.php'], 'no database');
+    }
+
+    public function test_per_table_a_block_is_an_input_of_the_tests_using_its_table_and_of_database_tests_with_none(): void
+    {
+        $this->repo->write('tests/CTest.php', "<?php\nfinal class CTest {}\n");
+        $this->repo->write('tests/DTest.php', "<?php\nfinal class DTest {}\n");
+        $this->repo->write('database/schema/sqlite-schema.sql', self::SQLITE_DUMP);
+        $this->graph->replaceTestTables(['tests/ATest.php' => ['users'], 'tests/BTest.php' => ['posts']]);
+        $this->graph->replaceUsesDatabase(['tests/CTest.php'], ['tests/CTest.php']);
+        $rules = ['schema' => new SchemaDumpRule('per-table')];
 
         $before = $this->digests($rules);
         $this->repo->write('database/schema/sqlite-schema.sql', str_replace('"title" varchar', '"title" varchar, "body" text', self::SQLITE_DUMP));
@@ -384,17 +407,72 @@ final class NonEdgeInputsTest extends TestCase
         self::assertNotSame($before['tests/CTest.php'], $after['tests/CTest.php'], 'a database test with no recorded table');
         self::assertSame($before['tests/DTest.php'], $after['tests/DTest.php'], 'no database');
 
-        // Only the migration rows: nobody's.
+        // The migration rows: which migrations run changed, every database test's.
         $before = $after;
-        $this->repo->write('database/schema/sqlite-schema.sql', str_replace('"title" varchar', '"title" varchar, "body" text', self::SQLITE_DUMP) . "INSERT INTO migrations VALUES(3,'2024_03_01_000000_x',2);\n");
-        self::assertSame($before, $this->digests($rules));
-
-        // A table no test records: every database test's.
-        $this->repo->write('database/schema/sqlite-schema.sql', self::SQLITE_DUMP . "CREATE TABLE IF NOT EXISTS \"tags\"(\"id\" integer);\n");
+        $rows = str_replace('"title" varchar', '"title" varchar, "body" text', self::SQLITE_DUMP) . "INSERT INTO migrations VALUES(3,'2024_03_01_000000_x',2);\n";
+        $this->repo->write('database/schema/sqlite-schema.sql', $rows);
         $after = $this->digests($rules);
-        self::assertNotSame($before['tests/ATest.php'], $after['tests/ATest.php']);
-        self::assertNotSame($before['tests/BTest.php'], $after['tests/BTest.php']);
-        self::assertSame($before['tests/DTest.php'], $after['tests/DTest.php']);
+
+        foreach (['tests/ATest.php', 'tests/BTest.php', 'tests/CTest.php'] as $file) {
+            self::assertNotSame($before[$file], $after[$file], $file);
+        }
+
+        // A table no test records: only the database tests whose tables are not all known.
+        $before = $after;
+        $this->repo->write('database/schema/sqlite-schema.sql', $rows . "CREATE TABLE IF NOT EXISTS \"tags\"(\"id\" integer);\n");
+        $after = $this->digests($rules);
+        self::assertSame($before['tests/ATest.php'], $after['tests/ATest.php']);
+        self::assertSame($before['tests/BTest.php'], $after['tests/BTest.php']);
+        self::assertNotSame($before['tests/CTest.php'], $after['tests/CTest.php']);
+    }
+
+    public function test_per_table_a_digest_never_moves_for_what_another_test_records(): void
+    {
+        // A test recording a table for the first time moved every database test's digest,
+        // with no file changed.
+        $this->repo->write('tests/CTest.php', "<?php\nfinal class CTest {}\n");
+        $this->repo->write('database/schema/sqlite-schema.sql', self::SQLITE_DUMP . "CREATE TABLE IF NOT EXISTS \"tags\"(\"id\" integer);\n");
+        $this->graph->replaceTestTables(['tests/ATest.php' => ['users'], 'tests/BTest.php' => ['posts']]);
+        $rules = ['schema' => new SchemaDumpRule('per-table')];
+
+        $before = $this->digests($rules);
+        $this->graph->unionTestTables(['tests/CTest.php' => ['tags']]);
+        $after = $this->digests($rules);
+
+        self::assertSame($before['tests/ATest.php'], $after['tests/ATest.php']);
+        self::assertSame($before['tests/BTest.php'], $after['tests/BTest.php']);
+    }
+
+    public function test_per_table_a_foreign_key_carries_the_tables_it_ties(): void
+    {
+        $dump = "CREATE TABLE IF NOT EXISTS \"users\"(\"id\" integer primary key);\nCREATE TABLE IF NOT EXISTS \"posts\"(\"id\" integer, \"user_id\" integer, foreign key(\"user_id\") references \"users\"(\"id\") on delete cascade);\nCREATE TABLE IF NOT EXISTS \"tags\"(\"id\" integer);\nINSERT INTO migrations VALUES(1,'x',1);\n";
+        $this->repo->write('database/schema/sqlite-schema.sql', $dump);
+        $this->graph->replaceTestTables(['tests/ATest.php' => ['users'], 'tests/BTest.php' => ['tags']]);
+        $rules = ['schema' => new SchemaDumpRule('per-table')];
+
+        $before = $this->digests($rules);
+        $this->repo->write('database/schema/sqlite-schema.sql', str_replace(' on delete cascade', '', $dump));
+        $after = $this->digests($rules);
+
+        self::assertNotSame($before['tests/ATest.php'], $after['tests/ATest.php'], 'deleting a user does something else now');
+        self::assertSame($before['tests/BTest.php'], $after['tests/BTest.php']);
+    }
+
+    public function test_a_pending_migration_stays_in_the_scope_of_the_test_that_first_ran_it(): void
+    {
+        // The first loader has an edge to the migration file: squashing it (a row in the
+        // dump) must still move its digest.
+        $this->repo->write('phpunit.xml', '<phpunit><php><env name="DB_CONNECTION" value="sqlite"/></php></phpunit>');
+        $this->repo->write('database/schema/sqlite-schema.sql', self::SQLITE_DUMP);
+        $this->repo->write('database/migrations/2024_02_01_000000_seed_admin.php', "<?php\nDB::table('users')->insert([]);\n");
+        $this->graph->unionEdges(['tests/ATest.php' => ['database/migrations/2024_02_01_000000_seed_admin.php']]);
+        $this->graph->replaceTestTables(['tests/ATest.php' => ['users']]);
+        $rules = ['migration' => new MigrationRule()];
+
+        $before = $this->inputs(extraRules: $rules)->digestFor('tests/ATest.php');
+        $this->repo->write('database/schema/sqlite-schema.sql', self::SQLITE_DUMP . "INSERT INTO migrations VALUES(3,'2024_02_01_000000_seed_admin',2);\n");
+
+        self::assertNotSame($before, $this->inputs(extraRules: $rules)->digestFor('tests/ATest.php'));
     }
 
     public function test_a_schema_dump_that_does_not_parse_is_every_database_test_s_input_whole(): void

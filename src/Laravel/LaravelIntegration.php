@@ -50,7 +50,7 @@ final class LaravelIntegration
 
         return [
             'migration' => new MigrationRule(MigrationPaths::for($projectRoot, $config), $config->migrations),
-            'schema' => new SchemaDumpRule(),
+            'schema' => new SchemaDumpRule($config->schemaDump),
             'sibling' => new SiblingRule(),
             'blade' => new BladeRule(BladeRule::cacheFileIn($stateDir)),
         ];

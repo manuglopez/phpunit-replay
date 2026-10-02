@@ -150,7 +150,7 @@ Each rule consumes what earlier ones didn't claim, except `BladeRule` and your w
 | # | Rule | Triggers on | Picks |
 |---|---|---|---|
 | 1 | `MigrationRule` *(Laravel)* | a changed `.php` under `database/migrations`, a `migration_paths` entry, or a literal `loadMigrationsFrom()` path | nothing when the schema dump of the test connection already holds it (no test database runs it); otherwise every test that uses a database. `migrations => 'conservative'` keeps 0.12's selection by table |
-| 1b | `SchemaDumpRule` *(Laravel)* | a changed `database/schema/<connection>-schema.sql` or `.dump` | the tests that recorded a table whose block changed, compared with the dump at the diff base; every database test when it cannot compare |
+| 1b | `SchemaDumpRule` *(Laravel)* | a changed `database/schema/<connection>-schema.sql` or `.dump` | every test that uses a database, unless only comments or whitespace changed; with `schema_dump => 'per-table'`, the tests that use a changed table or one its foreign keys, triggers and views tie it to |
 | 2 | `PhpEdgeRule` | a changed or deleted file the graph knows | every test file with an edge to it |
 | 3 | `TestFileRule` | a changed file that is itself a test | itself |
 | 4 | `SiblingRule` *(Laravel)* | a new `.php` in a provider/listener/policy/command/factory/seeder directory | tests with an edge to a neighbour in that directory; in a new subdirectory, tests with an edge under the nearest ancestor that has one |
@@ -437,7 +437,7 @@ Three extra things get tracked while recording:
 
 - **Tables.** A query listener links every table a test's queries touch, `setUp()` and its factories included.
 - **Blade views.** A view composer on `'*'` links every rendered view as a dependency, exactly like a PHP file.
-- **Database tests.** Any test file using `RefreshDatabase`, `DatabaseMigrations`, `DatabaseTransactions` or `DatabaseTruncation` (directly or through another trait) is recorded as using a database. A migration the test database runs selects all of them; one already squashed into the schema dump selects none; a change to the dump selects the tests that use the tables it changed. `migrations => 'conservative'` widens every such test to every table any migration names instead, as before 0.13.
+- **Database tests.** Any test file using `RefreshDatabase`, `DatabaseMigrations`, `DatabaseTransactions` or `DatabaseTruncation` (directly or through another trait) is recorded as using a database. A migration the test database runs selects all of them; one already squashed into the schema dump selects none; a change to the dump selects every database test (or, with `schema_dump => 'per-table'`, the tests that use what it changed). `migrations => 'conservative'` widens every such test to every table any migration names instead, as before 0.13.
 
 The package's own `laravel-lite` fixture shows the effect:
 
@@ -445,7 +445,7 @@ The package's own `laravel-lite` fixture shows the effect:
 |---|---|
 | Add a column to the `comments` migration | `3 executed · 1 replayed` — every test using `RefreshDatabase`. `HomePageTest` never touches the database, so it replays |
 | The same, once a schema dump (`database/schema/sqlite-schema.sql`) lists the migration | nothing executes: `squashed into database/schema/sqlite-schema.sql, not run by tests` |
-| Add a column to `posts` in that schema dump | only the two tests that query `posts` execute |
+| Add a column to `posts` in that schema dump | the 3 database tests execute; with `schema_dump => 'per-table'`, the two that query `posts` and `UserModelTest` (`posts.user_id` references `users`) |
 | Edit `welcome.blade.php` | `1 executed · 3 replayed` — only the test that renders it |
 
 `--parallel` on Laravel also wires up per-worker database isolation automatically, whenever Laravel, Paratest and a resolvable `ParallelRunner` are all present. Without it every worker migrates the same database, which shows up as deadlocks rather than clean failures.

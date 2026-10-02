@@ -13,8 +13,10 @@ use Manuglopez\Replay\Laravel\LaravelIntegration;
 use Manuglopez\Replay\Laravel\MigrationPaths;
 use Manuglopez\Replay\Laravel\Rules\BladeRule;
 use Manuglopez\Replay\Laravel\Rules\MigrationRule;
+use Manuglopez\Replay\Laravel\Rules\SchemaDumpRule;
 use Manuglopez\Replay\Laravel\Rules\SiblingRule;
 use Manuglopez\Replay\Laravel\SchemaDump;
+use Manuglopez\Replay\Laravel\TableExtractor;
 use Manuglopez\Replay\Laravel\TestSchemaDump;
 use Manuglopez\Replay\PHPUnit\ConfigurationWriter;
 use Manuglopez\Replay\Record\SourceScope;
@@ -47,7 +49,7 @@ use Manuglopez\Replay\Support\Paths;
  * | `migrations:untouched@1` | `Laravel\Rules\MigrationRule`, `conservative` | migrations whose tables no test records | T records any table |
  * | `migrations:unknown@1` | `Laravel\Rules\MigrationRule`, `conservative` | migrations naming a table they cannot read | T uses a database |
  * | `migrations:unnarrowed@1` | `Laravel\Rules\MigrationRule` | migrations with no table to narrow by (`conservative`), or every one while the graph records no table | T is under the residue targets |
- * | `schema:<dump>@1` | `Laravel\Rules\SchemaDumpRule` | the dump's statements no table owns, the blocks of the tables T records and of the tables no test records (every block when T records none); the whole file when it does not parse, or while the graph records no table | T uses a database (under the residue targets, while the graph records no table) |
+ * | `schema:<dump>@1` | `Laravel\Rules\SchemaDumpRule` | the normalised dump (`conservative`); with `per-table`, the rows, the statements no table owns and the blocks of what `SchemaDump::related()` ties to T's queried tables and to the build tables (every block when T's tables are not all known); the whole file when it does not parse, or while the graph records no table | T uses a database (under the residue targets, while the graph records no table) |
  * | `sibling:<dir>@3` | `Laravel\Rules\SiblingRule` | sibling candidates in `<dir>` no test has an edge to | T depends on a file in `<dir>` |
  * | `sibling-tree:<dir>@1` | `Laravel\Rules\SiblingRule`, a new subdirectory | sibling candidates whose own directory no test has an edge into, and whose nearest ancestor that one has is `<dir>` | T depends on a file under `<dir>` |
  * | `fallback:<pattern>@1` | `Rules\WatchRule`, fallback patterns (the Laravel `resources/views/**` and `database/migrations/**` while the Laravel rules run) | files matching the pattern that no rule claims | T is under one of its targets |
@@ -132,7 +134,8 @@ final class NonEdgeInputs
      *     templates: array<string, true>,
      *     members: array<string, true>,
      *     databaseFiles: array<string, true>,
-     *     dumps: array<string, array{whole: ?string, global: ?string, blocks: array<string, string>, unrecorded: list<string>, carriedByAll: bool}>,
+     *     dumps: array<string, array{whole: ?string, normalised: string, rows: string, global: ?string, blocks: array<string, string>, dump: ?SchemaDump, perTable: bool, carriedByAll: bool}>,
+     *     bootstrap: list<string>,
      * }|null|false false until computed, null when the tree could not be listed
      */
     private array|false|null $state = false;
@@ -329,10 +332,13 @@ final class NonEdgeInputs
             }
         }
 
-        // Take the test file's own key inputs out of every shared scope that holds them.
+        // Take the test file's own key inputs out of every shared scope that holds them. Not
+        // out of `migrations:pending@1`: what it says is whether a test database runs the
+        // migration, which the dump's rows decide and no key covers. The test that first ran
+        // the migration has an edge to it, and must see it become squashed too.
         foreach (array_keys($own) as $path) {
             foreach ($state['memberOf'][(string) $path] ?? [] as $id) {
-                if (isset($scopes[$id])) {
+                if (isset($scopes[$id]) && $id !== 'migrations:pending@1') {
                     $scopes[$id]['acc'] ^= $this->elements[(string) $path];
                     $scopes[$id]['count']--;
                 }
@@ -344,7 +350,7 @@ final class NonEdgeInputs
 
         foreach ($tables === [] ? [] : $state['migrationsByTable'] as $path => $migrationTables) {
             foreach ($migrationTables as $table) {
-                if (isset($tables[$table])) {
+                if (isset($tables[$table]) || isset($tables[TableExtractor::BOOTSTRAP . $table]) || isset($tables[TableExtractor::UNKNOWN])) {
                     if (! isset($own[$path])) {
                         $byTable[] = (string) $path;
                     }
@@ -358,7 +364,7 @@ final class NonEdgeInputs
             $scopes['migrations@3'] = ['acc' => $this->accumulate($byTable)['acc'], 'count' => count($byTable), 'members' => $byTable];
         }
 
-        // SchemaDumpRule: the blocks of the dump this test file's selection depends on.
+        // SchemaDumpRule: what of the dump this test file's selection depends on.
         foreach ($state['dumps'] as $dump => $info) {
             $dump = (string) $dump;
 
@@ -366,33 +372,14 @@ final class NonEdgeInputs
                 continue;
             }
 
-            $parts = [];
+            $parts = $this->schemaParts($testFile, $info, $state['bootstrap']);
+            $acc = str_repeat("\0", 16);
 
-            if ($info['whole'] !== null) {
-                $parts[] = $info['whole'];
-            } else {
-                if ($info['global'] !== null) {
-                    $parts[] = $info['global'];
-                }
-
-                $carried = $tables === [] ? array_keys($info['blocks']) : [...array_keys($tables), ...$info['unrecorded']];
-
-                foreach (array_unique(array_map(strval(...), $carried)) as $table) {
-                    if (isset($info['blocks'][$table])) {
-                        $parts[] = $info['blocks'][$table];
-                    }
-                }
+            foreach ($parts as $part) {
+                $acc ^= $part;
             }
 
-            if ($parts !== []) {
-                $acc = str_repeat("\0", 16);
-
-                foreach ($parts as $part) {
-                    $acc ^= $part;
-                }
-
-                $scopes['schema:' . $dump . '@1'] = ['acc' => $acc, 'count' => count($parts), 'members' => [$dump]];
-            }
+            $scopes['schema:' . $dump . '@1'] = ['acc' => $acc, 'count' => count($parts), 'members' => [$dump]];
         }
 
         // BladeRule: what the templates this test file renders may include.
@@ -476,7 +463,8 @@ final class NonEdgeInputs
      *     templates: array<string, true>,
      *     members: array<string, true>,
      *     databaseFiles: array<string, true>,
-     *     dumps: array<string, array{whole: ?string, global: ?string, blocks: array<string, string>, unrecorded: list<string>, carriedByAll: bool}>,
+     *     dumps: array<string, array{whole: ?string, normalised: string, rows: string, global: ?string, blocks: array<string, string>, dump: ?SchemaDump, perTable: bool, carriedByAll: bool}>,
+     *     bootstrap: list<string>,
      * }|null
      */
     private function state(): ?array
@@ -497,7 +485,9 @@ final class NonEdgeInputs
 
         foreach ($testTables as $tables) {
             foreach ($tables as $table) {
-                $recordedTables[$table] = true;
+                if ($table !== TableExtractor::UNKNOWN) {
+                    $recordedTables[ltrim($table, TableExtractor::BOOTSTRAP)] = true;
+                }
             }
         }
 
@@ -601,10 +591,9 @@ final class NonEdgeInputs
 
                 $ancestor = SiblingRule::nearestAncestorWithEdges($rel, $dependencyTree);
 
+                // Additive (the rule does not consume it): the residue and fallbacks below still see it.
                 if ($ancestor !== null) {
                     $sets['sibling-tree:' . $ancestor . '@1'][] = $rel;
-
-                    continue;
                 }
             }
 
@@ -678,7 +667,7 @@ final class NonEdgeInputs
 
         foreach ($dumpPaths as $dump) {
             if (! isset($ignored[$dump])) {
-                $dumps[$dump] = $this->dumpInfo($dump, $testTables === [], $recordedTables);
+                $dumps[$dump] = $this->dumpInfo($dump, $testTables === []);
                 $members[$dump] = true;
             }
         }
@@ -692,43 +681,89 @@ final class NonEdgeInputs
             'members' => $members,
             'databaseFiles' => array_fill_keys($this->graph->databaseTestFiles(), true),
             'dumps' => $dumps,
+            'bootstrap' => $this->graph->bootstrapTables(),
         ];
     }
 
     /**
      * What a schema dump contributes, per {@see SchemaDumpRule}: the whole file while the graph
      * records no table (every test's input) or when it does not parse (every database test's);
-     * otherwise each table's block and the statements no table owns, hashed apart.
+     * otherwise its normalised statements (`conservative`), or its rows, its statements no
+     * table owns and each table's block, hashed apart (`per-table`).
      *
-     * @param array<string, true> $recordedTables every table some test records
-     * @return array{whole: ?string, global: ?string, blocks: array<string, string>, unrecorded: list<string>, carriedByAll: bool}
+     * @return array{whole: ?string, normalised: string, rows: string, global: ?string, blocks: array<string, string>, dump: ?SchemaDump, perTable: bool, carriedByAll: bool}
      */
-    private function dumpInfo(string $dump, bool $noTables, array $recordedTables): array
+    private function dumpInfo(string $dump, bool $noTables): array
     {
         $parsed = $noTables ? null : $this->parsedDump($dump);
+        $rule = $this->extraRules['schema'] ?? null;
+        $perTable = $rule instanceof SchemaDumpRule && $rule->perTable();
 
         if ($parsed === null) {
-            return ['whole' => $this->element($dump), 'global' => null, 'blocks' => [], 'unrecorded' => [], 'carriedByAll' => $noTables];
+            return ['whole' => $this->element($dump), 'normalised' => '', 'rows' => '', 'global' => null, 'blocks' => [], 'dump' => null, 'perTable' => $perTable, 'carriedByAll' => $noTables];
         }
 
         $blocks = [];
-        $unrecorded = [];
 
         foreach ($parsed->tables() as $table) {
             $blocks[$table] = hash('xxh128', $dump . "\0" . $table . "\0" . $parsed->block($table), true);
-
-            if (! isset($recordedTables[$table])) {
-                $unrecorded[] = $table;
-            }
         }
 
         return [
             'whole' => null,
+            'normalised' => hash('xxh128', $dump . "\0normalised\0" . $parsed->normalisedHash(), true),
+            'rows' => hash('xxh128', $dump . "\0rows\0" . $parsed->rowsHash(), true),
             'global' => $parsed->global() === '' ? null : hash('xxh128', $dump . "\0\0" . $parsed->global(), true),
             'blocks' => $blocks,
-            'unrecorded' => $unrecorded,
+            'dump' => $parsed,
+            'perTable' => $perTable,
             'carriedByAll' => false,
         ];
+    }
+
+    /**
+     * The parts of a dump `$testFile` carries, mirroring {@see SchemaDumpRule}: per test file,
+     * from its own recorded tables and the tables the database is built with only, never from
+     * what another test file records.
+     *
+     * @param array{whole: ?string, normalised: string, rows: string, global: ?string, blocks: array<string, string>, dump: ?SchemaDump, perTable: bool, carriedByAll: bool} $info
+     * @param list<string> $bootstrap
+     * @return list<string>
+     */
+    private function schemaParts(string $testFile, array $info, array $bootstrap): array
+    {
+        if ($info['whole'] !== null) {
+            return [$info['whole']];
+        }
+
+        if (! $info['perTable'] || $info['dump'] === null) {
+            return [$info['normalised']];
+        }
+
+        $parts = [$info['rows']];
+
+        if ($info['global'] !== null) {
+            $parts[] = $info['global'];
+        }
+
+        $queried = $this->graph->queriedTables($testFile);
+        $tables = array_keys($info['blocks']);
+
+        if (! $this->graph->tablesUnknown($testFile) && $queried !== []) {
+            $reached = SchemaDump::related([...$queried, ...$bootstrap], $info['dump']);
+
+            if ($reached !== [SchemaDump::EVERY_TABLE]) {
+                $tables = $reached;
+            }
+        }
+
+        foreach ($tables as $table) {
+            if (isset($info['blocks'][$table])) {
+                $parts[] = $info['blocks'][$table];
+            }
+        }
+
+        return $parts;
     }
 
     /** Parsed once per instance and content: {@see self::refresh()} keeps it. */

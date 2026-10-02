@@ -147,15 +147,15 @@ final class GraphUpdater
             // Union, not replace (Cache\Graph::unionEdges() docblock): this partial only
             // reflects what THIS run's coverage attributed, which can under-report a test
             // file's true dependencies (first-loader-wins, docs/SPEC.md §4.3) relative to
-            // a previous, complete recording. Table edges are unaffected by that
-            // artifact — a Laravel query listener re-attributes every table a test
-            // queries on every single run (Laravel\TableTracker), never just the first —
-            // so `replaceTestTables` below stays exact.
+            // a previous, complete recording. Tables suffer the same artifact: a query whose
+            // result a static caches runs only in the first test of a process that needs it
+            // (Laravel\TableTracker sees the query, not the cached value), so which test file
+            // records its table moves with the run order. Tables are unioned too.
             $this->graph->unionEdges($edgesToRecord);
             $this->graph->markKnownTestFiles($executed);
 
             if ($partial->tables !== []) {
-                $this->graph->replaceTestTables($partial->tables);
+                $this->graph->unionTestTables($partial->tables);
             }
 
             // Whether a file uses a database is a fact about its class, which this run saw for

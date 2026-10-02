@@ -181,7 +181,7 @@ final class SiblingRuleTest extends TestCase
         (new SiblingRule())->apply($context);
 
         self::assertSame(['tests/ImportTest.php', 'tests/PruneTest.php'], $selection->testFiles());
-        self::assertSame([], $context->remaining);
+        self::assertSame(['app/Console/Commands/Reports/Monthly/SendReport.php'], $context->remaining, 'additive: what the residue fallback would run still runs');
         self::assertSame('app/Console/Commands/**', $selection->reasons()['tests/PruneTest.php'][0]->detail);
     }
 

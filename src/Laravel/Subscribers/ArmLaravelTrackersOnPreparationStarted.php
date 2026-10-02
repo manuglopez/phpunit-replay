@@ -4,41 +4,57 @@ declare(strict_types=1);
 
 namespace Manuglopez\Replay\Laravel\Subscribers;
 
+use Illuminate\Foundation\Bootstrap\RegisterProviders;
+use Manuglopez\Replay\Laravel\TrackersServiceProvider;
 use PHPUnit\Event\Code\TestMethod;
 use PHPUnit\Event\Test\PreparationStarted;
 use PHPUnit\Event\Test\PreparationStartedSubscriber;
 use PHPUnit\Framework\TestCase;
+use ReflectionProperty;
+use Throwable;
 
 /**
- * Arms the trackers inside `setUp()`, as soon as Laravel has created the test's application,
- * so that the tables a test's `setUp()` and its factories query are recorded too.
+ * Arms the trackers before Laravel's `setUp()` touches the database, so that every table a
+ * test reaches through its `setUp()` is recorded: `RefreshDatabase` and its `$seed`/`$seeder`,
+ * every trait's `setUp<Trait>()` and `#[SetUp]` method, the ParallelTesting setUp callbacks,
+ * the factories in the test's own `setUp()`.
  *
- * `Test\Prepared` ({@see ArmLaravelTrackersOnPrepared}) fires after `setUp()` has returned,
- * and `Test\PreparationStarted` before Laravel's `TestCase::setUp()` creates the application
- * the queries go through, so neither event alone can arm it in time. Laravel's own hook can:
- * `afterApplicationCreated()` runs its callbacks right after `refreshApplication()` and the
- * testing traits (`RefreshDatabase` has migrated by then), before the rest of `setUp()`. This
- * subscriber registers one on the running test case at `PreparationStarted`. PHPUnit's event
- * value objects do not carry the test case instance, but PHPUnit dispatches events
- * synchronously from `TestCase::runBare()`, so the instance is on the call stack; a test
- * class that is not a Laravel test case (no `afterApplicationCreated()`) is left to the
- * `Prepared` fallback, which also covers an application created some other way.
+ * Laravel's `setUpTheTestEnvironment()` runs `refreshApplication()`, the ParallelTesting
+ * callbacks, then `setUpTraits()`, then the `afterApplicationCreated()` callbacks: the only
+ * point before the traits is the application's own bootstrap inside `createApplication()`.
+ * At `Test\PreparationStarted` (before `setUp()`), for a Laravel test case, this merges
+ * {@see TrackersServiceProvider} into the providers the next application registers
+ * (`Illuminate\Foundation\Bootstrap\RegisterProviders::merge()`, Laravel 11+); its `boot()`
+ * arms that application while it bootstraps, and marks it armed early.
  *
- * Not covered, as before: queries a test runs before `afterApplicationCreated` fires (a
- * seeder `RefreshDatabase` runs), through raw PDO, or from a result an earlier test cached in
- * a static (the first loader records the table, the others do not).
+ * Where that cannot happen (Laravel 10, which has no `merge()`; a configuration loaded from
+ * cache, for which Laravel skips merged providers; an application created some other way), the
+ * trackers are armed late, by an `afterApplicationCreated()` callback or at `Prepared`, and
+ * {@see ArmLaravelTrackersOnPrepared} records the test as touching unknown tables. PHPUnit's
+ * event value objects do not carry the test case instance, but PHPUnit dispatches events
+ * synchronously from `TestCase::runBare()`, so the instance is on the call stack.
+ *
+ * Not recorded, either way: queries through raw PDO, and a result an earlier test cached in a
+ * static (the first test to load it records the table; `Cache\GraphUpdater` unions what every
+ * recording saw).
  */
 final readonly class ArmLaravelTrackersOnPreparationStarted implements PreparationStartedSubscriber
 {
+    private const SERVICE_PROVIDER = 'Illuminate\\Support\\ServiceProvider';
+
     public function __construct(private ArmLaravelTrackersOnPrepared $arming)
     {
     }
 
     public function notify(PreparationStarted $event): void
     {
-        if (! $event->test() instanceof TestMethod) {
+        $test = $event->test();
+
+        if (! $test instanceof TestMethod) {
             return;
         }
+
+        $this->arming->recordUsesDatabase($test);
 
         $testCase = self::runningTestCase();
 
@@ -46,13 +62,38 @@ final readonly class ArmLaravelTrackersOnPreparationStarted implements Preparati
             return;
         }
 
+        $this->arming->expectEarlyArming();
         $arming = $this->arming;
 
+        self::mergeProvider(static function (object $app) use ($arming): void {
+            $arming->armTrackers($app, early: true);
+        });
+
+        // The late fallback: still before the rest of the test's own setUp().
         /** @var callable $register */
         $register = [$testCase, 'afterApplicationCreated'];
         $register(static function () use ($arming): void {
             $arming->armTrackers();
         });
+    }
+
+    /** @param \Closure(object): void $arm */
+    private static function mergeProvider(\Closure $arm): void
+    {
+        if (! class_exists(self::SERVICE_PROVIDER) || ! class_exists(RegisterProviders::class)) {
+            return;
+        }
+
+        TrackersServiceProvider::armWith($arm);
+
+        try {
+            // merge() also sets the bootstrap providers path: keep the one already there.
+            $path = (new ReflectionProperty(RegisterProviders::class, 'bootstrapProviderPath'))->getValue();
+            RegisterProviders::merge([TrackersServiceProvider::class], is_string($path) ? $path : null);
+        } catch (Throwable) {
+            // Laravel 10 (no merge()), or a RegisterProviders that differs: armed late, so the
+            // test is recorded as touching unknown tables.
+        }
     }
 
     private static function runningTestCase(): ?TestCase

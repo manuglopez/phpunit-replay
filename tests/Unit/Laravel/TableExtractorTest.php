@@ -82,6 +82,26 @@ final class TableExtractorTest extends TestCase
         self::assertSame([], TableExtractor::fromSql('   '));
     }
 
+    public function test_a_parenthesised_union_names_both_tables(): void
+    {
+        // How Laravel's MySQL and PostgreSQL grammars wrap a union.
+        self::assertSame(['comments', 'posts'], TableExtractor::fromSql('(select `id` from `posts`) union (select `id` from `comments`)'));
+    }
+
+    public function test_a_comma_join_names_every_table(): void
+    {
+        self::assertSame(['a', 'b'], TableExtractor::fromSql('select * from `a`, `b` where a.id = b.id'));
+        self::assertSame(['orders', 'users'], TableExtractor::fromSql('select * from users u, public.orders as o where o.user_id = u.id'));
+        self::assertSame(['users'], TableExtractor::fromSql('select * from users where id in (1, 2, 3)'), 'commas after the from list are not tables');
+    }
+
+    public function test_a_statement_whose_tables_cannot_be_read_is_unknown(): void
+    {
+        self::assertSame([TableExtractor::UNKNOWN], TableExtractor::fromSql('call refresh_totals()'));
+        self::assertSame([TableExtractor::UNKNOWN], TableExtractor::fromSql('EXEC dbo.refresh'));
+        self::assertSame(['logs'], TableExtractor::fromSql('truncate table "logs"'));
+    }
+
     // fromMigrationSource()
 
     public function test_extracts_tables_from_schema_builder_calls(): void

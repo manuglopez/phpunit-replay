@@ -39,19 +39,39 @@ final readonly class SchemaDump
 {
     private const QUALIFIED = '((?:"(?:[^"]|"")+"|`(?:[^`]|``)+`|\[[^\]]+\]|[\w$]+)(?:\s*\.\s*(?:"(?:[^"]|"")+"|`(?:[^`]|``)+`|\[[^\]]+\]|[\w$]+))*)';
 
+    private const QUALIFIED_RAW = self::QUALIFIED;
+
     /** What the tokenizer looks at one character at a time; anything else is copied in runs. */
     private const SPECIAL = " \t\r\n\f\v-/*'\"`\$";
 
     private const NOISE = '/^(?:SET\b|LOCK\s+TABLES?\b|UNLOCK\s+TABLES?\b|START\s+TRANSACTION\b|BEGIN(?:\s+TRANSACTION)?$|COMMIT$|PRAGMA\b|USE\b|SELECT\s+pg_catalog\.(?:set_config|setval)\s*\()/i';
 
+    /** {@see self::related()}'s answer when a dependency cannot be followed: every table. */
+    public const EVERY_TABLE = '*';
+
+    private const TRIGGER = '/^CREATE\s+(?:OR\s+REPLACE\s+)?(?:DEFINER\s*=\s*\S+\s+)?(?:TEMP(?:ORARY)?\s+)?(?:CONSTRAINT\s+)?TRIGGER\s+(?:IF\s+NOT\s+EXISTS\s+)?' . self::QUALIFIED_RAW . '.*?\sON\s+' . self::QUALIFIED_RAW . '(.*)$/is';
+
+    private const VIEW = '/^CREATE\s+(?:OR\s+REPLACE\s+)?(?:(?:ALGORITHM|DEFINER)\s*=\s*\S+\s+|SQL\s+SECURITY\s+\w+\s+|MATERIALIZED\s+|TEMP(?:ORARY)?\s+|RECURSIVE\s+)*VIEW\s+(?:IF\s+NOT\s+EXISTS\s+)?' . self::QUALIFIED_RAW . '.*?\sAS\s+(.*)$/is';
+
+    private const ROUTINE = '/^CREATE\s+(?:OR\s+REPLACE\s+)?(?:DEFINER\s*=\s*\S+\s+)?(?:FUNCTION|PROCEDURE)\s+' . self::QUALIFIED_RAW . '(.*)$/is';
+
+    /** SQL a body builds at runtime: what it touches cannot be read. */
+    private const DYNAMIC = '/\b(?:EXECUTE\s+(?:IMMEDIATE\b|format\s*\(|[\'"$])|PREPARE\s+\w+\s+FROM)/i';
+
     /**
      * @param array<string, string> $blocks lowercased table => its statements, normalised
      * @param list<string>|null $migrations the `migrations` rows' names, null when none could be read
+     * @param array<string, array<string, true>> $relations table => the tables a foreign key,
+     *        a trigger or a view ties it to (symmetric; {@see self::EVERY_TABLE} for one that
+     *        cannot be followed)
      */
     private function __construct(
         private array $blocks,
         private string $global,
         private ?array $migrations,
+        private array $relations = [],
+        private string $rows = '',
+        private string $normalised = '',
     ) {
     }
 
@@ -90,17 +110,22 @@ final readonly class SchemaDump
         $sequenceOwner = [];
         $global = [];
         $migrations = null;
+        $rows = [];
+        $normalised = [];
 
         foreach ($statements as [$statement, $copyRows]) {
             if (preg_match(self::NOISE, $statement) === 1) {
                 continue;
             }
 
+            $normalised[] = $copyRows === [] ? $statement : $statement . "\n" . implode("\n", $copyRows);
+
             if (preg_match('/^INSERT\s+(?:IGNORE\s+)?INTO\s+' . self::QUALIFIED . '/i', $statement, $m) === 1) {
                 $table = self::name($m[1]);
 
                 if ($table === 'migrations') {
                     $migrations = [...$migrations ?? [], ...self::insertedNames($statement)];
+                    $rows[] = $statement;
 
                     continue;
                 }
@@ -115,6 +140,7 @@ final readonly class SchemaDump
 
                 if ($table === 'migrations') {
                     $migrations = [...$migrations ?? [], ...self::copiedNames($m[3] ?? '', $copyRows)];
+                    $rows[] = $statement . "\n" . implode("\n", $copyRows);
 
                     continue;
                 }
@@ -176,8 +202,176 @@ final readonly class SchemaDump
         }
 
         ksort($blocks, SORT_STRING);
+        sort($rows);
 
-        return new self($blocks, implode("\n", $global), $migrations);
+        return new self(
+            $blocks,
+            implode("\n", $global),
+            $migrations,
+            self::relationsOf($byTable, $global),
+            implode("\n", $rows),
+            implode("\n", $normalised),
+        );
+    }
+
+    /**
+     * The tables `$tables` are tied to, transitively, through a foreign key (both ways), a
+     * trigger (its table and every table its body, or the function it executes, touches) or a
+     * view (and the tables it selects from), in any of `$dumps` (the old and the new one, so
+     * that a tie just added or just removed counts). `[EVERY_TABLE]` when one of them reaches
+     * a tie that cannot be followed (dynamic SQL, a routine the dump does not hold).
+     *
+     * @param list<string> $tables
+     * @return list<string>
+     */
+    public static function related(array $tables, self ...$dumps): array
+    {
+        // A tie nobody can follow (dynamic SQL, a routine the dump does not hold) may reach
+        // any table, and any table's change may reach it: nothing can be narrowed.
+        foreach ($dumps as $dump) {
+            foreach ($dump->relations as $others) {
+                if (isset($others[self::EVERY_TABLE])) {
+                    return [self::EVERY_TABLE];
+                }
+            }
+        }
+
+        $seen = [];
+        $queue = array_map(strtolower(...), $tables);
+
+        while ($queue !== []) {
+            $table = array_pop($queue);
+
+            if (isset($seen[$table])) {
+                continue;
+            }
+
+            $seen[$table] = true;
+
+            foreach ($dumps as $dump) {
+                foreach (array_keys($dump->relations[$table] ?? []) as $other) {
+                    if ($other === self::EVERY_TABLE) {
+                        return [self::EVERY_TABLE];
+                    }
+
+                    $queue[] = (string) $other;
+                }
+            }
+        }
+
+        $list = array_map(strval(...), array_keys($seen));
+        sort($list);
+
+        return $list;
+    }
+
+    /** A hash of the `migrations` rows alone: which migrations the dump says already ran. */
+    public function rowsHash(): string
+    {
+        return hash('xxh128', $this->rows);
+    }
+
+    /** A hash of every statement, normalised: equal for two dumps that differ only in comments and whitespace. */
+    public function normalisedHash(): string
+    {
+        return hash('xxh128', $this->normalised);
+    }
+
+    /**
+     * @param array<string, list<string>> $byTable
+     * @param list<string> $global
+     * @return array<string, array<string, true>>
+     */
+    private static function relationsOf(array $byTable, array $global): array
+    {
+        $tables = array_fill_keys(array_map(strval(...), array_keys($byTable)), true);
+        $routines = [];
+
+        foreach ($global as $statement) {
+            if (preg_match(self::ROUTINE, $statement, $m) === 1) {
+                $routines[self::name($m[1])] = preg_match(self::DYNAMIC, $m[2]) === 1 ? null : self::referencesIn($m[2]);
+            }
+        }
+
+        $relations = [];
+        $tie = static function (string $a, string $b) use (&$relations, $tables): void {
+            if ($a === $b || ($b !== self::EVERY_TABLE && ! isset($tables[$b]))) {
+                return;
+            }
+
+            $relations[$a][$b] = true;
+
+            if ($b !== self::EVERY_TABLE) {
+                $relations[$b][$a] = true;
+            }
+        };
+
+        foreach ($byTable as $table => $statements) {
+            $table = (string) $table;
+
+            foreach ($statements as $statement) {
+                if (preg_match_all('/\bREFERENCES\s+' . self::QUALIFIED . '/i', $statement, $m) !== false) {
+                    foreach ($m[1] as $referenced) {
+                        $tie($table, self::name($referenced));
+                    }
+                }
+
+                $body = null;
+
+                if (preg_match(self::TRIGGER, $statement, $m) === 1) {
+                    $body = $m[3];
+                } elseif (preg_match(self::VIEW, $statement, $m) === 1) {
+                    $body = $m[2];
+                }
+
+                if ($body === null) {
+                    continue;
+                }
+
+                if (preg_match(self::DYNAMIC, $body) === 1) {
+                    $tie($table, self::EVERY_TABLE);
+
+                    continue;
+                }
+
+                foreach (self::referencesIn($body) as $referenced) {
+                    $tie($table, $referenced);
+                }
+
+                // `EXECUTE FUNCTION f()`, `EXECUTE PROCEDURE f()`, `CALL p()`: what the routine touches.
+                if (preg_match_all('/\b(?:EXECUTE\s+(?:FUNCTION|PROCEDURE)|CALL)\s+' . self::QUALIFIED . '/i', $body, $calls) !== false) {
+                    foreach ($calls[1] as $routine) {
+                        $references = $routines[self::name($routine)] ?? null;
+
+                        if ($references === null) {
+                            $tie($table, self::EVERY_TABLE);
+
+                            continue;
+                        }
+
+                        foreach ($references as $referenced) {
+                            $tie($table, $referenced);
+                        }
+                    }
+                }
+            }
+        }
+
+        return $relations;
+    }
+
+    /** @return list<string> the names a body reads or writes (`from`, `into`, `update`, `join`) */
+    private static function referencesIn(string $sql): array
+    {
+        $names = [];
+
+        if (preg_match_all('/\b(?:from|into|update|join)\s+' . self::QUALIFIED . '/i', $sql, $m) !== false) {
+            foreach ($m[1] as $qualified) {
+                $names[self::name($qualified)] = true;
+            }
+        }
+
+        return array_map(strval(...), array_keys($names));
     }
 
     /**
@@ -243,6 +437,7 @@ final readonly class SchemaDump
             '/^CREATE\s+(?:OR\s+REPLACE\s+)?(?:DEFINER\s*=\s*\S+\s+)?(?:TEMP(?:ORARY)?\s+)?(?:CONSTRAINT\s+)?TRIGGER\s+(?:IF\s+NOT\s+EXISTS\s+)?' . self::QUALIFIED . '.*?\sON\s+' . self::QUALIFIED . '/is',
             '/^CREATE\s+(?:OR\s+REPLACE\s+)?(?:(?:ALGORITHM|DEFINER)\s*=\s*\S+\s+|SQL\s+SECURITY\s+\w+\s+|MATERIALIZED\s+|TEMP(?:ORARY)?\s+|RECURSIVE\s+)*VIEW\s+(?:IF\s+NOT\s+EXISTS\s+)?' . self::QUALIFIED . '/i',
             '/^COMMENT\s+ON\s+TABLE\s+' . self::QUALIFIED . '/i',
+            '/^DROP\s+(?:MATERIALIZED\s+)?VIEW\s+(?:IF\s+EXISTS\s+)?' . self::QUALIFIED . '/i',
         ];
 
         foreach ($patterns as $i => $pattern) {

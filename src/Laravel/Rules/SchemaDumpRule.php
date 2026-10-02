@@ -14,31 +14,51 @@ use Manuglopez\Replay\Support\Paths;
 
 /**
  * Laravel-only rule: a changed schema dump (`database/schema/{connection}-schema.sql|.dump`,
- * {@see SchemaDump::isDumpPath()}). `RefreshDatabase` builds the test database from it before
- * any migration runs, coverage never credits it to a test, and it is not a migration, so
- * before 0.13 nothing claimed it and a change to it ran nothing.
+ * {@see SchemaDump::isDumpPath()}). `RefreshDatabase` builds the test database from it, then
+ * runs only the migrations its `migrations` rows do not list. Coverage never credits it to a
+ * test, and it is not a migration, so before 0.13 nothing claimed it and a change to it ran
+ * nothing.
  *
- * The dump at the change set's base (`Context::$base`, read with `git show`) and the one in
- * the working tree are split into per-table blocks ({@see SchemaDump}) and compared:
+ * The dump at the change set's base (`Context::$base`, read with `git show`) is compared with
+ * the working tree's, statement by statement ({@see SchemaDump}: comments and whitespace do
+ * not count). With `schema_dump => 'conservative'` (the default), any other change selects
+ * every test file that uses a database (`Cache\Graph::databaseTestFiles()`): a dump is the
+ * whole database every such test runs on, and what a change to it reaches through foreign
+ * keys, triggers, views, routines and the data migrations it squashes is more than a diff can
+ * say for certain.
  *
- * - a table whose block was added, removed or changed selects the test files whose recorded
- *   tables (`Cache\Graph::testTables()`) contain it, and every database test file that
- *   recorded no table at all (nothing says it does not use that table);
- * - a changed table no test records, or a changed statement no table owns (a function, a
- *   type), selects every database test file (`Cache\Graph::databaseTestFiles()`);
- * - a change to the `migrations` rows alone selects nothing beyond what the migration files
- *   changed with it select themselves (`MigrationRule`), and `explain` says so.
+ * `schema_dump => 'per-table'` narrows, table by table:
  *
- * Conservative where it cannot compare: a dump that does not parse (a `pg_dump` archive
- * included), no version at the base (a new dump, a change set without a base) selects every
- * database test file; a graph with no table recorded yet, every test. The rule always
- * consumes the dump: nothing after it could say more.
+ * - the `migrations` rows changed: which migrations run in a test database changed (a data
+ *   migration squashed by regenerating the dump stops running, since a dump holds no data), so
+ *   every database test file;
+ * - a statement no table owns changed (a function, a type), or a tie a trigger or routine
+ *   makes cannot be followed: every database test file;
+ * - otherwise the changed tables, closed over what ties them to others
+ *   ({@see SchemaDump::related()}: foreign keys both ways, a trigger's or a view's tables), in
+ *   the old dump and the new one. Every database test file when that reaches a table the
+ *   database is built with (`Cache\Graph::bootstrapTables()`: a migration's or a seeder's
+ *   writes); else the files whose recorded tables meet it, plus every database test file with
+ *   no recorded table or with tables nobody could name.
+ *
+ * Either way, where it cannot compare: a dump that does not parse (a `pg_dump -Fc` archive
+ * included), no version at the base, or no base selects every database test file; a graph
+ * with no table recorded yet, every test. The rule always consumes the dump.
  */
 final class SchemaDumpRule implements Rule
 {
+    public function __construct(private readonly string $mode = 'conservative')
+    {
+    }
+
     public function name(): string
     {
         return 'SchemaDump';
+    }
+
+    public function perTable(): bool
+    {
+        return $this->mode === 'per-table';
     }
 
     public function apply(Context $context): void
@@ -55,9 +75,7 @@ final class SchemaDumpRule implements Rule
 
     private function select(Context $context, string $rel): void
     {
-        $testTables = $context->graph->testTables();
-
-        if ($testTables === []) {
+        if ($context->graph->testTables() === []) {
             $targets = ResiduePatterns::targetsFor($context->testPaths);
 
             foreach ($context->watch->testsUnderDirectories($targets, $context->graph->allTestFiles()) as $testFile) {
@@ -70,13 +88,6 @@ final class SchemaDumpRule implements Rule
         $absolute = Paths::join($context->projectRoot, $rel);
         $newContent = is_file($absolute) ? @file_get_contents($absolute) : null;
         $new = $newContent === null ? SchemaDump::none() : ($newContent === false ? null : SchemaDump::parse($newContent));
-
-        if ($new === null) {
-            $this->selectDatabaseTests($context, $rel, 'cannot be read: every database test');
-
-            return;
-        }
-
         $oldContent = $context->base === null ? null : (new Git($context->projectRoot))->show($context->base, $rel);
 
         if ($oldContent === null) {
@@ -87,54 +98,69 @@ final class SchemaDumpRule implements Rule
 
         $old = SchemaDump::parse($oldContent);
 
-        if ($old === null) {
+        if ($new === null || $old === null) {
             $this->selectDatabaseTests($context, $rel, 'cannot be read: every database test');
 
             return;
         }
 
-        $changed = SchemaDump::changedTables($old, $new);
-
-        if (SchemaDump::globalChanged($old, $new)) {
-            $this->selectDatabaseTests($context, $rel, 'a statement no table owns changed: every database test');
-        }
-
-        if ($changed === []) {
-            if (! SchemaDump::globalChanged($old, $new)) {
-                $context->selection->note(new Reason($this->name(), $rel, 'only migration rows changed, no table'));
-            }
+        if ($old->normalisedHash() === $new->normalisedHash()) {
+            $context->selection->note(new Reason($this->name(), $rel, 'comments and whitespace only'));
 
             return;
         }
 
-        $changedSet = array_fill_keys($changed, true);
-        $recorded = [];
+        if (! $this->perTable()) {
+            $this->selectDatabaseTests($context, $rel, 'changed: every database test');
 
-        foreach ($testTables as $testFile => $tables) {
-            $hit = [];
+            return;
+        }
 
-            foreach ($tables as $table) {
-                $recorded[$table] = true;
+        if ($old->rowsHash() !== $new->rowsHash()) {
+            $this->selectDatabaseTests($context, $rel, 'migration rows changed: which migrations run changed, every database test');
 
-                if (isset($changedSet[$table])) {
-                    $hit[] = $table;
-                }
+            return;
+        }
+
+        if (SchemaDump::globalChanged($old, $new)) {
+            $this->selectDatabaseTests($context, $rel, 'a statement no table owns changed: every database test');
+
+            return;
+        }
+
+        $changed = SchemaDump::changedTables($old, $new);
+        $reached = SchemaDump::related($changed, $old, $new);
+
+        if ($reached === [SchemaDump::EVERY_TABLE]) {
+            $this->selectDatabaseTests($context, $rel, 'a trigger or routine nobody can follow: every database test');
+
+            return;
+        }
+
+        $reachedSet = array_fill_keys($reached, true);
+        $bootstrap = array_values(array_filter($context->graph->bootstrapTables(), static fn (string $table): bool => isset($reachedSet[$table])));
+
+        if ($bootstrap !== []) {
+            $this->selectDatabaseTests($context, $rel, 'tables the database is built with (' . implode(', ', $bootstrap) . '): every database test');
+
+            return;
+        }
+
+        $graph = $context->graph;
+
+        foreach ($graph->databaseTestFiles() as $testFile) {
+            $queried = $graph->queriedTables($testFile);
+
+            if ($graph->tablesUnknown($testFile) || $queried === []) {
+                $context->selection->add($testFile, new Reason($this->name(), $rel, implode(', ', $changed) . ': a database test whose tables are not all known'));
+
+                continue;
             }
+
+            $hit = array_values(array_filter($queried, static fn (string $table): bool => isset($reachedSet[$table])));
 
             if ($hit !== []) {
-                $context->selection->add((string) $testFile, new Reason($this->name(), $rel, implode(', ', $hit)));
-            }
-        }
-
-        $unrecorded = array_values(array_filter($changed, static fn (string $table): bool => ! isset($recorded[$table])));
-
-        if ($unrecorded !== []) {
-            $this->selectDatabaseTests($context, $rel, 'tables no test records (' . implode(', ', $unrecorded) . '): every database test');
-        }
-
-        foreach ($context->graph->databaseTestFiles() as $testFile) {
-            if (! isset($testTables[$testFile])) {
-                $context->selection->add($testFile, new Reason($this->name(), $rel, implode(', ', $changed) . ': a database test with no recorded table'));
+                $context->selection->add($testFile, new Reason($this->name(), $rel, implode(', ', $hit)));
             }
         }
     }

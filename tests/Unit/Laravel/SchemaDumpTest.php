@@ -228,6 +228,78 @@ final class SchemaDumpTest extends TestCase
         self::assertNull($dump->migrations(), 'no rows: whether a migration is squashed is unknown');
     }
 
+    public function test_a_foreign_key_relates_both_tables(): void
+    {
+        // A child's ON DELETE change alters only the child's block, and changes what deleting
+        // a parent does.
+        $dump = SchemaDump::parse("CREATE TABLE `users` (`id` int);\nCREATE TABLE `posts` (`id` int, `user_id` int, CONSTRAINT `p_fk` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE);\nCREATE TABLE `tags` (`id` int);\n");
+
+        self::assertNotNull($dump);
+        self::assertSame(['posts', 'users'], SchemaDump::related(['posts'], $dump));
+        self::assertSame(['posts', 'users'], SchemaDump::related(['users'], $dump));
+        self::assertSame(['tags'], SchemaDump::related(['tags'], $dump));
+    }
+
+    public function test_a_trigger_relates_its_table_to_the_tables_its_body_writes(): void
+    {
+        $mysql = "CREATE TABLE `users` (`id` int);\nCREATE TABLE `audit_log` (`user_id` int);\nDELIMITER ;;\n/*!50003 CREATE*/ /*!50017 DEFINER=`root`@`%`*/ /*!50003 TRIGGER `users_ai` AFTER INSERT ON `users` FOR EACH ROW INSERT INTO audit_log(user_id) VALUES (NEW.id) */;;\nDELIMITER ;\n";
+        $sqlite = "CREATE TABLE IF NOT EXISTS \"users\"(\"id\" integer);\nCREATE TABLE IF NOT EXISTS \"audit_log\"(\"user_id\" integer);\nCREATE TRIGGER users_audit AFTER INSERT ON users BEGIN INSERT INTO audit_log(user_id) VALUES (new.id); END;\n";
+
+        foreach ([$mysql, $sqlite] as $sql) {
+            $dump = SchemaDump::parse($sql);
+            self::assertNotNull($dump);
+            self::assertSame(['audit_log', 'users'], SchemaDump::related(['audit_log'], $dump));
+        }
+    }
+
+    public function test_a_postgres_trigger_follows_its_function(): void
+    {
+        $sql = "CREATE TABLE public.users (id bigint);\nCREATE TABLE public.audit_log (user_id bigint);\nCREATE TABLE public.tags (id bigint);\n"
+            . "CREATE FUNCTION public.audit() RETURNS trigger LANGUAGE plpgsql AS \$\$ BEGIN INSERT INTO public.audit_log (user_id) VALUES (NEW.id); RETURN NEW; END; \$\$;\n"
+            . "CREATE TRIGGER users_audit AFTER INSERT ON public.users FOR EACH ROW EXECUTE FUNCTION public.audit();\n";
+        $dump = SchemaDump::parse($sql);
+
+        self::assertNotNull($dump);
+        self::assertSame(['audit_log', 'users'], SchemaDump::related(['audit_log'], $dump));
+
+        $missing = SchemaDump::parse(str_replace('CREATE FUNCTION public.audit()', 'CREATE FUNCTION public.other()', $sql));
+        self::assertNotNull($missing);
+        self::assertSame([SchemaDump::EVERY_TABLE], SchemaDump::related(['tags'], $missing), 'a trigger whose function is not in the dump relates to everything');
+    }
+
+    public function test_a_view_relates_to_the_tables_it_selects_from(): void
+    {
+        $sql = "CREATE TABLE `users` (`id` int, `active` tinyint);\n/*!50001 DROP VIEW IF EXISTS `active_users`*/;\n/*!50001 CREATE ALGORITHM=UNDEFINED */\n/*!50013 DEFINER=`root`@`%` SQL SECURITY DEFINER */\n/*!50001 VIEW `active_users` AS select `users`.`id` AS `id` from `users` where `users`.`active` = 1 */;\n";
+        $dump = SchemaDump::parse($sql);
+
+        self::assertNotNull($dump);
+        self::assertSame(['active_users', 'users'], $dump->tables());
+        self::assertSame('', $dump->global(), 'DROP VIEW belongs to the view');
+        self::assertSame(['active_users', 'users'], SchemaDump::related(['users'], $dump));
+    }
+
+    public function test_dynamic_sql_in_a_trigger_relates_to_everything(): void
+    {
+        $dump = SchemaDump::parse("CREATE TABLE IF NOT EXISTS \"users\"(\"id\" integer);\nCREATE TABLE IF NOT EXISTS \"tags\"(\"id\" integer);\nDELIMITER ;;\nCREATE TRIGGER t AFTER INSERT ON users FOR EACH ROW CALL refresh_totals() ;;\nDELIMITER ;\n");
+
+        self::assertNotNull($dump);
+        self::assertSame([SchemaDump::EVERY_TABLE], SchemaDump::related(['tags'], $dump));
+    }
+
+    public function test_the_migration_rows_have_their_own_hash(): void
+    {
+        $old = SchemaDump::parse(self::MYSQL);
+        $new = SchemaDump::parse(self::MYSQL . "INSERT INTO `migrations` (`id`, `migration`, `batch`) VALUES (3,'2024_01_03_000000_x',2);\n");
+        $whitespace = SchemaDump::parse(str_replace("\n  `", "\n      `", self::MYSQL) . "\n\n-- dumped again\n");
+
+        self::assertNotNull($old);
+        self::assertNotNull($new);
+        self::assertNotNull($whitespace);
+        self::assertNotSame($old->rowsHash(), $new->rowsHash());
+        self::assertNotSame($old->normalisedHash(), $new->normalisedHash());
+        self::assertSame($old->normalisedHash(), $whitespace->normalisedHash(), 'comments and whitespace only');
+    }
+
     public function test_the_dump_path_shape(): void
     {
         self::assertTrue(SchemaDump::isDumpPath('database/schema/mysql-schema.sql'));

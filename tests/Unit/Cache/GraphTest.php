@@ -216,6 +216,18 @@ final class GraphTest extends TestCase
         );
     }
 
+    public function test_union_test_tables_keeps_what_earlier_recordings_saw(): void
+    {
+        // A query whose result a static caches runs in whichever test loads it first: the
+        // holder moves with the run order, and each recording must add, never replace.
+        $graph = new Graph($this->root);
+        $graph->unionTestTables(['tests/AlphaTest.php' => ['comments']]);
+        $graph->unionTestTables(['tests/BetaTest.php' => ['Comments'], 'tests/AlphaTest.php' => ['users']]);
+
+        self::assertSame(['comments', 'users'], $graph->testTables()['tests/AlphaTest.php']);
+        self::assertSame(['comments'], $graph->testTables()['tests/BetaTest.php']);
+    }
+
     public function test_uses_database_is_replaced_for_the_files_a_run_executed_only(): void
     {
         $graph = new Graph($this->root);

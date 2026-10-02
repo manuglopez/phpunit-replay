@@ -6,6 +6,7 @@ namespace Manuglopez\Replay\Console\Commands;
 
 use Manuglopez\Replay\Cache\GraphStore;
 use Manuglopez\Replay\Cache\StateDirectory;
+use Manuglopez\Replay\Change\BaselineResolver;
 use Manuglopez\Replay\Change\Git;
 use Manuglopez\Replay\Config;
 use Manuglopez\Replay\Console\ExplainFormatter;
@@ -81,9 +82,12 @@ final class ExplainCommand extends Command
 
         $extraRules = LaravelIntegration::rulesFor($graph, $root, $config, $stateDir);
         // A rule that compares a file before and after (a schema dump) compares it with what
-        // a pass would diff it from: the branch's baseline, else HEAD.
-        $branch = $git->currentBranch();
-        $base = ($branch !== null ? $graph->recordedSha($branch) : null) ?? $git->currentSha();
+        // a pass would diff it from (`RunPipeline`: `baseline['sha'] ?? recordedSha`), from
+        // the local graph only (explain does not read the remote); HEAD when there is none.
+        $branch = $git->currentBranch() ?? 'HEAD';
+        $head = $git->currentSha();
+        $resolved = $head === null ? null : (new BaselineResolver($git, $graph, null, $config, $config->defaultBranch ?? $git->defaultBranch()))->resolve($branch, $head);
+        $base = $resolved['sha'] ?? $graph->recordedSha($branch) ?? $head;
         $selection = Selector::default($graph, $testPaths, $watch, $root, $extraRules)->affected([$rel], $base);
         $runList = new RunList($selection, [], [], []);
 

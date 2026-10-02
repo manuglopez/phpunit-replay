@@ -139,7 +139,8 @@ final class MigrationRule implements Rule
 
         foreach ($testTables as $testFile => $testFileTables) {
             foreach ($testFileTables as $table) {
-                if (in_array($table, $lowerTables, true)) {
+                // `*`: tables nobody could name; `@t`: written while the database was built.
+                if ($table === TableExtractor::UNKNOWN || in_array(ltrim($table, TableExtractor::BOOTSTRAP), $lowerTables, true)) {
                     $context->selection->add((string) $testFile, new Reason($this->name(), $rel, implode(', ', $tables)));
                     $matched = true;
 

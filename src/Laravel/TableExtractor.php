@@ -20,10 +20,26 @@ final class TableExtractor
 
     private const IDENTIFIER = '(?:"[^"]+"|`[^`]+`|\[[^\]]+\]|\w+)';
 
-    /** @return list<string> Sorted, deduped table names referenced by the query. */
+    /**
+     * The table "name" a test file records when one of its statements touches tables nothing
+     * can name (`CALL proc()`, `EXEC …`): the rules then treat that file as touching any table.
+     */
+    public const UNKNOWN = '*';
+
+    /**
+     * Prefix of a table a test file recorded while a `migrate` or `db:seed` command ran
+     * (`TableTracker`): written into the database every database test of the process runs on.
+     */
+    public const BOOTSTRAP = '@';
+
+    /** Statements that run code whose tables cannot be read from the statement itself. */
+    private const OPAQUE_PREFIXES = ['call', 'exec', 'execute', 'do', 'merge'];
+
+    /** @return list<string> Sorted, deduped table names referenced by the query; `[UNKNOWN]` when they cannot be read. */
     public static function fromSql(string $sql): array
     {
-        $trimmed = ltrim($sql);
+        // `(select …) union (select …)`: Laravel's MySQL and PostgreSQL grammars wrap a union.
+        $trimmed = ltrim($sql, " \t\n\r\0\x0B(");
 
         if ($trimmed === '') {
             return [];
@@ -33,19 +49,44 @@ final class TableExtractor
             return [];
         }
 
-        if (! in_array(strtolower($prefixMatch[0]), self::DML_PREFIXES, true)) {
+        $prefix = strtolower($prefixMatch[0]);
+
+        if (in_array($prefix, self::OPAQUE_PREFIXES, true)) {
+            return [self::UNKNOWN];
+        }
+
+        $qualified = '(' . self::IDENTIFIER . '(?:\s*\.\s*' . self::IDENTIFIER . ')*)';
+
+        if ($prefix === 'truncate') {
+            return preg_match('/^truncate\s+(?:table\s+)?' . $qualified . '/i', $trimmed, $m) === 1 && self::unqualified($m[1]) !== ''
+                ? [strtolower(self::unqualified($m[1]))]
+                : [];
+        }
+
+        if (! in_array($prefix, self::DML_PREFIXES, true)) {
             return [];
         }
 
-        $pattern = '/\b(?:from|into|update|join)\s+(' . self::IDENTIFIER . '(?:\s*\.\s*' . self::IDENTIFIER . ')*)/i';
+        $names = [];
 
-        if (preg_match_all($pattern, $sql, $matches) === false) {
-            return [];
+        if (preg_match_all('/\b(?:from|into|update|join)\s+' . $qualified . '/i', $sql, $matches) !== false) {
+            $names = $matches[1];
+        }
+
+        // A comma join, `from a, b as x, c`: the from list up to the next clause.
+        if (preg_match_all('/\bfrom\s+(.+?)(?=\b(?:where|inner|left|right|cross|full|natural|join|group|order|limit|having|union|except|intersect|window|offset|fetch|for|returning|on|using|straight_join)\b|[();]|$)/is', $sql, $lists) !== false) {
+            foreach ($lists[1] as $list) {
+                foreach (array_slice(explode(',', $list), 1) as $item) {
+                    if (preg_match('/^\s*' . $qualified . '/', $item, $m) === 1) {
+                        $names[] = $m[1];
+                    }
+                }
+            }
         }
 
         $tables = [];
 
-        foreach ($matches[1] as $qualified) {
+        foreach ($names as $qualified) {
             $name = self::unqualified($qualified);
 
             if ($name === '') {

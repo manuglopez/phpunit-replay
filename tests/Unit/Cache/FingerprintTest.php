@@ -97,6 +97,25 @@ final class FingerprintTest extends TestCase
         self::assertFalse(Fingerprint::structuralMatches($stored, $current));
     }
 
+    public function test_a_laravel_project_records_what_its_tables_and_migration_modes_mean(): void
+    {
+        // 0.13 records raw tables and changed what a migration and a dump select: a graph of
+        // either side must be rejected by the other, and switching a mode re-records.
+        self::assertArrayNotHasKey('tables_raw', Fingerprint::compute($this->repo->root, 'pcov', false)['structural'], 'not a Laravel project');
+
+        $this->repo->write('artisan', "#!/usr/bin/env php\n");
+        $structural = Fingerprint::compute($this->repo->root, 'pcov', false)['structural'];
+        self::assertTrue($structural['tables_raw']);
+        self::assertSame('precise', $structural['migrations']);
+        self::assertSame('conservative', $structural['schema_dump']);
+
+        $this->repo->write('phpunit-replay.php', "<?php\nreturn ['migrations' => 'conservative', 'schema_dump' => 'per-table'];\n");
+        $structural = Fingerprint::compute($this->repo->root, 'pcov', false)['structural'];
+        self::assertSame('conservative', $structural['migrations']);
+        self::assertSame('per-table', $structural['schema_dump']);
+        self::assertContains('schema_dump', Fingerprint::structuralDrift(['structural' => [...$structural, 'schema_dump' => 'conservative']], ['structural' => $structural]), 'named in the drift report');
+    }
+
     /**
      * `edges_by_running_class` (Fingerprint's own class docblock): unconditional, exactly
      * like `edges_exclude_ignored` above and for the same kind of reason — it describes this
