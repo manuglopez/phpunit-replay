@@ -189,7 +189,7 @@ final class LaravelLiteSchemaRulesTest extends TestCase
         $fixture = $this->fixtures[] = FixtureProject::laravelLite();
         $cache = new \Symfony\Component\Process\Process(['php', 'artisan', 'config:cache'], $fixture->root(), [
             'APP_ENV' => 'testing', 'DB_CONNECTION' => 'sqlite', 'DB_DATABASE' => ':memory:', 'CACHE_STORE' => 'array',
-            'SESSION_DRIVER' => 'array', 'APP_KEY' => 'base64:98efEiSEB2S5QVEvsmMo9ys9zawgJC351b/8PzhSZOg=',
+            'SESSION_DRIVER' => 'array', 'APP_KEY' => 'base64:' . base64_encode(random_bytes(32)),
         ]);
         $cache->run();
         self::assertSame(0, $cache->getExitCode(), $cache->getOutput() . $cache->getErrorOutput());
@@ -337,8 +337,35 @@ final class LaravelLiteSchemaRulesTest extends TestCase
 
         $fixture->write('app/Console/Commands/Reports/SendReport.php', "<?php\n\ndeclare(strict_types=1);\n\nnamespace App\\Console\\Commands\\Reports;\n\nfinal class SendReport\n{\n}\n");
 
-        self::assertSame(['tests/Feature/PruneUsersTest.php' => 'Sibling  app/Console/Commands/Reports/SendReport.php (app/Console/Commands/**)'], $this->plan($fixture));
-        self::assertSame(['tests/Feature/PruneUsersTest.php'], array_keys(array_diff_assoc($this->digests($fixture, $graph), $before)));
+        // The tests the walk-up should reach are those with an edge anywhere under the sibling
+        // root: PruneUsersTest always, and whichever others the coverage driver credited with
+        // a command file (Xdebug, and some pcov builds, see the command classes the console
+        // kernel loads at boot). Derived from the graph, not hard-coded, for that reason.
+        $expected = [];
+
+        foreach ($graph->allTestFiles() as $testFile) {
+            foreach ($graph->dependenciesOf($testFile) as $dependency) {
+                if (str_starts_with($dependency, 'app/Console/Commands/')) {
+                    $expected[] = $testFile;
+
+                    break;
+                }
+            }
+        }
+
+        sort($expected);
+        self::assertContains('tests/Feature/PruneUsersTest.php', $expected);
+
+        $plan = $this->plan($fixture);
+        self::assertSame($expected, array_keys($plan));
+
+        foreach ($plan as $reason) {
+            self::assertSame('Sibling  app/Console/Commands/Reports/SendReport.php (app/Console/Commands/**)', $reason);
+        }
+
+        $moved = array_keys(array_diff_assoc($this->digests($fixture, $graph), $before));
+        sort($moved);
+        self::assertSame($expected, $moved);
     }
 
     /** A recorded copy of the fixture, with `LedgerTest` and, when asked, a schema dump. */
