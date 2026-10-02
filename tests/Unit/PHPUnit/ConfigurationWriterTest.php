@@ -4,13 +4,11 @@ declare(strict_types=1);
 
 namespace Manuglopez\Replay\Tests\Unit\PHPUnit;
 
+use Manuglopez\Replay\PHPUnit\ConfigurationReader;
 use Manuglopez\Replay\PHPUnit\ConfigurationWriter;
 use Manuglopez\Replay\Tests\Support\TempDir;
 use PHPUnit\Framework\TestCase;
-use PHPUnit\TextUI\CliArguments\Builder as CliArgumentsBuilder;
 use PHPUnit\TextUI\Configuration\Configuration;
-use PHPUnit\TextUI\Configuration\Merger;
-use PHPUnit\TextUI\XmlConfiguration\Loader as XmlConfigurationLoader;
 
 final class ConfigurationWriterTest extends TestCase
 {
@@ -44,10 +42,10 @@ final class ConfigurationWriterTest extends TestCase
 
     private function load(string $xmlFile): Configuration
     {
-        $xml = (new XmlConfigurationLoader())->load($xmlFile);
-        $cli = (new CliArgumentsBuilder())->fromParameters(['--configuration', $xmlFile]);
+        $xml = ConfigurationReader::xmlConfigurationLoader()->load($xmlFile);
+        $cli = ConfigurationReader::cliArgumentsBuilder()->fromParameters(['--configuration', $xmlFile]);
 
-        return (new Merger())->merge($cli, $xml);
+        return ConfigurationReader::merger()->merge($cli, $xml);
     }
 
     public function test_temp_path_is_next_to_the_source_file(): void

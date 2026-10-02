@@ -4,12 +4,14 @@ declare(strict_types=1);
 
 namespace Manuglopez\Replay\PHPUnit;
 
+use PHPUnit\Event\Facade as EventFacade;
 use PHPUnit\TextUI\CliArguments\Builder as CliArgumentsBuilder;
 use PHPUnit\TextUI\CliArguments\Configuration as CliConfiguration;
 use PHPUnit\TextUI\Configuration\Configuration;
 use PHPUnit\TextUI\Configuration\Merger;
 use PHPUnit\TextUI\Configuration\SourceMapper;
 use PHPUnit\TextUI\XmlConfiguration\Loader as XmlConfigurationLoader;
+use ReflectionClass;
 use SebastianBergmann\CodeCoverage\Filter;
 use Throwable;
 
@@ -37,6 +39,58 @@ final readonly class ConfigurationReader
     }
 
     /**
+     * PHPUnit 13.4 gave `XmlConfiguration\Loader`, `CliArguments\Builder` and
+     * `Configuration\Merger` a required `Event\Emitter` constructor argument (they used to
+     * reach for `Event\Facade::emitter()` themselves); 11.5, 12 and 13.0-13.3 take none. The
+     * three factories below are the ONLY places this package constructs them, and
+     * {@see self::construct()} decides per installed version whether to hand one over.
+     */
+    public static function xmlConfigurationLoader(): XmlConfigurationLoader
+    {
+        $loader = self::construct(XmlConfigurationLoader::class);
+        assert($loader instanceof XmlConfigurationLoader);
+
+        return $loader;
+    }
+
+    public static function cliArgumentsBuilder(): CliArgumentsBuilder
+    {
+        $builder = self::construct(CliArgumentsBuilder::class);
+        assert($builder instanceof CliArgumentsBuilder);
+
+        return $builder;
+    }
+
+    public static function merger(): Merger
+    {
+        $merger = self::construct(Merger::class);
+        assert($merger instanceof Merger);
+
+        return $merger;
+    }
+
+    /**
+     * `$class` is a plain, non-literal `string` on purpose, for the same PHPStan reason as
+     * {@see self::intOption()}: a literal `new Loader()` is checked against whichever PHPUnit
+     * is installed and reported as a wrong argument count in the cells where the constructor
+     * differs. The constructor's parameter count is read off the installed class: none on
+     * PHPUnit before 13.4, the event emitter from 13.4 on (the same object PHPUnit's own
+     * `TextUI\Application` passes them).
+     *
+     * @param class-string $class
+     */
+    private static function construct(string $class): object
+    {
+        $constructor = (new ReflectionClass($class))->getConstructor();
+
+        if ($constructor === null || $constructor->getNumberOfRequiredParameters() === 0) {
+            return new $class();
+        }
+
+        return new $class(EventFacade::emitter());
+    }
+
+    /**
      * Builds a `Configuration` from an XML file plus CLI-style arguments, without ever
      * touching `PHPUnit\TextUI\Configuration\Registry` (this may run inside a process
      * that is not the one PHPUnit's own Registry belongs to).
@@ -51,15 +105,15 @@ final readonly class ConfigurationReader
      */
     public static function fromXmlFile(string $xmlFile, array $cliArguments = []): self
     {
-        $xml = (new XmlConfigurationLoader())->load($xmlFile);
+        $xml = self::xmlConfigurationLoader()->load($xmlFile);
 
-        $cli = (new CliArgumentsBuilder())->fromParameters([
+        $cli = self::cliArgumentsBuilder()->fromParameters([
             '--configuration',
             $xmlFile,
             ...$cliArguments,
         ]);
 
-        $configuration = (new Merger())->merge($cli, $xml);
+        $configuration = self::merger()->merge($cli, $xml);
 
         return new self($configuration, $cli);
     }
@@ -95,7 +149,7 @@ final readonly class ConfigurationReader
         }
 
         try {
-            return (new CliArgumentsBuilder())->fromParameters($arguments);
+            return self::cliArgumentsBuilder()->fromParameters($arguments);
         } catch (Throwable) {
             return null;
         }
