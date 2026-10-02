@@ -112,9 +112,7 @@ final class VerifyCommandTest extends TestCase
 
     public function test_verify_parallel_actually_goes_through_paratest(): void
     {
-        if (! FixtureProject::paratestAvailable()) {
-            self::markTestSkipped('vendor/bin/paratest is not installed in this package (composer install --no-dev?).');
-        }
+        FixtureProject::skipUnlessParatestUsable();
 
         $recorded = $this->fixture->replay(['record']);
         self::assertSame(0, $recorded['exitCode'], $recorded['stdout'] . $recorded['stderr']);

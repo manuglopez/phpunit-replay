@@ -5,12 +5,10 @@ declare(strict_types=1);
 namespace Manuglopez\Replay\Console\Runner;
 
 use Manuglopez\Replay\Change\Git;
+use Manuglopez\Replay\PHPUnit\ConfigurationReader;
 use Manuglopez\Replay\Support\Paths;
-use PHPUnit\TextUI\CliArguments\Builder as CliArgumentsBuilder;
 use PHPUnit\TextUI\CliArguments\Configuration as CliConfiguration;
 use PHPUnit\TextUI\Configuration\Configuration;
-use PHPUnit\TextUI\Configuration\Merger;
-use PHPUnit\TextUI\XmlConfiguration\Loader as XmlConfigurationLoader;
 
 /**
  * docs/INTERNALS.md "Wrapper pipeline" steps 1 (root & tools) and 4 (PHPUnit configuration
@@ -74,15 +72,15 @@ final class ProjectLocator
      */
     public function buildConfiguration(string $configFile, array $cliArguments): array
     {
-        $xml = (new XmlConfigurationLoader())->load($configFile);
+        $xml = ConfigurationReader::xmlConfigurationLoader()->load($configFile);
 
-        $cli = (new CliArgumentsBuilder())->fromParameters([
+        $cli = ConfigurationReader::cliArgumentsBuilder()->fromParameters([
             '--configuration',
             $configFile,
             ...$cliArguments,
         ]);
 
-        return [(new Merger())->merge($cli, $xml), $cli];
+        return [ConfigurationReader::merger()->merge($cli, $xml), $cli];
     }
 
     /** @param list<string> $phpunitArgs */

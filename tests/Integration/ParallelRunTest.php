@@ -27,9 +27,7 @@ final class ParallelRunTest extends TestCase
     {
         parent::setUp();
 
-        if (! FixtureProject::paratestAvailable()) {
-            self::markTestSkipped('vendor/bin/paratest is not installed in this package (composer install --no-dev?).');
-        }
+        FixtureProject::skipUnlessParatestUsable();
     }
 
     protected function tearDown(): void

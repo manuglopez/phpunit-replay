@@ -4,12 +4,10 @@ declare(strict_types=1);
 
 namespace Manuglopez\Replay\Tests\Unit\Select;
 
+use Manuglopez\Replay\PHPUnit\ConfigurationReader;
 use Manuglopez\Replay\Select\TestPaths;
 use Manuglopez\Replay\Tests\Support\TempDir;
 use PHPUnit\Framework\TestCase;
-use PHPUnit\TextUI\CliArguments\Builder as CliBuilder;
-use PHPUnit\TextUI\Configuration\Merger;
-use PHPUnit\TextUI\XmlConfiguration\Loader as XmlLoader;
 
 final class TestPathsTest extends TestCase
 {
@@ -160,9 +158,9 @@ final class TestPathsTest extends TestCase
 
     private function mergedConfiguration(string $xmlPath): \PHPUnit\TextUI\Configuration\Configuration
     {
-        $xml = (new XmlLoader())->load($xmlPath);
-        $cli = (new CliBuilder())->fromParameters([]);
+        $xml = ConfigurationReader::xmlConfigurationLoader()->load($xmlPath);
+        $cli = ConfigurationReader::cliArgumentsBuilder()->fromParameters([]);
 
-        return (new Merger())->merge($cli, $xml);
+        return ConfigurationReader::merger()->merge($cli, $xml);
     }
 }
