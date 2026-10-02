@@ -51,6 +51,14 @@ final class Graph
      */
     private array $usesDatabase = [];
 
+    /**
+     * Test files whose latest recording could not name every table they touched. Encoded as
+     * `tables_unknown` only when non-empty.
+     *
+     * @var array<string, true>
+     */
+    private array $tablesUnknown = [];
+
     /** @var array<string, mixed> */
     private array $fingerprint = [];
 
@@ -375,10 +383,42 @@ final class Graph
         ));
     }
 
-    /** A test file one of whose statements touched tables nobody could name (`*`). */
+    /**
+     * The test file's latest recording saw a statement whose tables nobody could name, or its
+     * trackers were armed after `setUp()` began (`Laravel\Subscribers\ArmLaravelTrackersOnPrepared`).
+     * Unlike its tables, which only accumulate, this is what the latest recording said.
+     */
     public function tablesUnknown(string $testFile): bool
     {
-        return in_array('*', $this->testTables[$testFile] ?? [], true);
+        return isset($this->tablesUnknown[$testFile]);
+    }
+
+    /**
+     * For each file of `$executed`, whether its tables are unknown is what this recording
+     * says (`$unknown`); a file it did not execute keeps what an earlier one said.
+     *
+     * @param list<string> $executed
+     * @param list<string> $unknown
+     */
+    public function replaceTablesUnknown(array $executed, array $unknown): void
+    {
+        foreach ($executed as $testFile) {
+            $rel = $this->relative($testFile);
+
+            if ($rel !== null) {
+                unset($this->tablesUnknown[$rel]);
+            }
+        }
+
+        foreach ($unknown as $testFile) {
+            $rel = $this->relative($testFile);
+
+            if ($rel !== null) {
+                $this->tablesUnknown[$rel] = true;
+            }
+        }
+
+        ksort($this->tablesUnknown, SORT_STRING);
     }
 
     /** @return array<string, list<string>> */
@@ -433,7 +473,7 @@ final class Graph
      */
     public function databaseTestFiles(): array
     {
-        $files = array_fill_keys($this->usesDatabase, true);
+        $files = array_fill_keys($this->usesDatabase, true) + $this->tablesUnknown;
 
         foreach (array_keys($this->testTables) as $testFile) {
             $files[(string) $testFile] = true;
@@ -864,6 +904,7 @@ final class Graph
             array_keys($this->edges),
             array_keys($this->testTables),
             $this->usesDatabase,
+            array_map(strval(...), array_keys($this->tablesUnknown)),
         ));
 
         $edgesChanged = false;
@@ -880,6 +921,7 @@ final class Graph
 
             unset($this->testTables[$testRel]);
             $this->usesDatabase = array_values(array_diff($this->usesDatabase, [$testRel]));
+            unset($this->tablesUnknown[$testRel]);
 
             $this->notCacheable = array_values(array_diff($this->notCacheable, [$testRel]));
         }
@@ -1111,6 +1153,7 @@ final class Graph
         $graph->testTables = self::decodeStringMap($data['test_tables'] ?? null);
         $graph->notCacheable = self::decodeStringList($data['not_cacheable'] ?? null);
         $graph->usesDatabase = self::decodeStringList($data['uses_database'] ?? null);
+        $graph->tablesUnknown = array_fill_keys(self::decodeStringList($data['tables_unknown'] ?? null), true);
         sort($graph->usesDatabase);
         $graph->baselines = self::decodeBaselines($data['baselines'] ?? null);
         $graph->configuration = is_string($data['configuration'] ?? null) && $data['configuration'] !== '' ? $data['configuration'] : null;
@@ -1460,6 +1503,10 @@ final class Graph
 
         if ($this->usesDatabase !== []) {
             $payload['uses_database'] = $this->usesDatabase;
+        }
+
+        if ($this->tablesUnknown !== []) {
+            $payload['tables_unknown'] = array_map(strval(...), array_keys($this->tablesUnknown));
         }
 
         return Json::encode($payload);

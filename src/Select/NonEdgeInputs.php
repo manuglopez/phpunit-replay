@@ -348,9 +348,9 @@ final class NonEdgeInputs
         // MigrationRule, narrowed by the tables this test file was recorded touching.
         $byTable = [];
 
-        foreach ($tables === [] ? [] : $state['migrationsByTable'] as $path => $migrationTables) {
+        foreach ($tables === [] && ! $this->graph->tablesUnknown($testFile) ? [] : $state['migrationsByTable'] as $path => $migrationTables) {
             foreach ($migrationTables as $table) {
-                if (isset($tables[$table]) || isset($tables[TableExtractor::BOOTSTRAP . $table]) || isset($tables[TableExtractor::UNKNOWN])) {
+                if (isset($tables[$table]) || isset($tables[TableExtractor::BOOTSTRAP . $table]) || $this->graph->tablesUnknown($testFile)) {
                     if (! isset($own[$path])) {
                         $byTable[] = (string) $path;
                     }

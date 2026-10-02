@@ -35,9 +35,18 @@ final class TableExtractor
     /** Statements that run code whose tables cannot be read from the statement itself. */
     private const OPAQUE_PREFIXES = ['call', 'exec', 'execute', 'do', 'merge'];
 
-    /** @return list<string> Sorted, deduped table names referenced by the query; `[UNKNOWN]` when they cannot be read. */
+    /** What a from, update, using or truncate list looks for next: a nesting, an item, or its end. */
+    private const LIST_TOKEN = '/[(),;]|\b(?:where|inner|left|right|cross|full|natural|join|group|order|limit|having|union|except|intersect|window|offset|fetch|for|returning|on|using|straight_join|set|values|restart|continue|cascade|restrict)\b/i';
+
+    /**
+     * @return list<string> Sorted, deduped table names referenced by the query; `[UNKNOWN]` when
+     *         they cannot be read. A function the query calls (`select refresh_totals()`) is
+     *         not followed: a stored function's tables are a known limit.
+     */
     public static function fromSql(string $sql): array
     {
+        $sql = self::withoutLeadingComments($sql);
+
         // `(select …) union (select …)`: Laravel's MySQL and PostgreSQL grammars wrap a union.
         $trimmed = ltrim($sql, " \t\n\r\0\x0B(");
 
@@ -55,28 +64,29 @@ final class TableExtractor
             return [self::UNKNOWN];
         }
 
-        $qualified = '(' . self::IDENTIFIER . '(?:\s*\.\s*' . self::IDENTIFIER . ')*)';
-
-        if ($prefix === 'truncate') {
-            return preg_match('/^truncate\s+(?:table\s+)?' . $qualified . '/i', $trimmed, $m) === 1 && self::unqualified($m[1]) !== ''
-                ? [strtolower(self::unqualified($m[1]))]
-                : [];
-        }
-
-        if (! in_array($prefix, self::DML_PREFIXES, true)) {
+        if ($prefix !== 'truncate' && ! in_array($prefix, self::DML_PREFIXES, true)) {
             return [];
         }
 
+        // Matched on a copy whose quoted contents are blanked: a string reading `from posts`
+        // is not a table, and a reserved word quoted as a name (`order`) ends no list.
+        // Offsets are the same in both, so names are read from the original.
+        $masked = self::masked($sql);
+        $qualified = '(' . self::IDENTIFIER . '(?:\s*\.\s*' . self::IDENTIFIER . ')*)';
         $names = [];
 
-        if (preg_match_all('/\b(?:from|into|update|join)\s+' . $qualified . '/i', $sql, $matches) !== false) {
-            $names = $matches[1];
+        if (preg_match_all('/\b(?:into|join)\s+' . $qualified . '/i', $masked, $matches, PREG_OFFSET_CAPTURE) !== false) {
+            foreach ($matches[1] as [$text, $offset]) {
+                $names[] = substr($sql, $offset, strlen($text));
+            }
         }
 
-        // A comma join, `from a, b as x, c`: the from list up to the next clause.
-        if (preg_match_all('/\bfrom\s+(.+?)(?=\b(?:where|inner|left|right|cross|full|natural|join|group|order|limit|having|union|except|intersect|window|offset|fetch|for|returning|on|using|straight_join)\b|[();]|$)/is', $sql, $lists) !== false) {
-            foreach ($lists[1] as $list) {
-                foreach (array_slice(explode(',', $list), 1) as $item) {
+        // Lists: `from a, b x, (select …) y`, `update a, b set`, `delete … using b`, `truncate a, b`.
+        if (preg_match_all('/\b(?:from|update|using|truncate(?:\s+table)?)\s+/i', $masked, $starts, PREG_OFFSET_CAPTURE) !== false) {
+            foreach ($starts[0] as [$text, $offset]) {
+                foreach (self::listItems($masked, $offset + strlen($text)) as [$from, $length]) {
+                    $item = substr($sql, $from, $length);
+
                     if (preg_match('/^\s*' . $qualified . '/', $item, $m) === 1) {
                         $names[] = $m[1];
                     }
@@ -104,6 +114,105 @@ final class TableExtractor
         sort($out);
 
         return $out;
+    }
+
+    private static function withoutLeadingComments(string $sql): string
+    {
+        while (true) {
+            $sql = ltrim($sql);
+
+            if (str_starts_with($sql, '/*')) {
+                $end = strpos($sql, '*/');
+                $sql = $end === false ? '' : substr($sql, $end + 2);
+
+                continue;
+            }
+
+            if (str_starts_with($sql, '--')) {
+                $end = strpos($sql, "\n");
+                $sql = $end === false ? '' : substr($sql, $end + 1);
+
+                continue;
+            }
+
+            return $sql;
+        }
+    }
+
+    /** `$sql` with the contents of every quoted string and identifier replaced by `_`. */
+    private static function masked(string $sql): string
+    {
+        if (strpbrk($sql, '\'"`') === false) {
+            return $sql;
+        }
+
+        return (string) preg_replace_callback(
+            '/\'(?:[^\'\\\\]|\\\\.|\'\')*\'?|"(?:[^"]|"")*"?|`(?:[^`]|``)*`?/s',
+            static fn (array $m): string => $m[0][0] . str_repeat('_', max(0, strlen($m[0]) - 2)) . (strlen($m[0]) > 1 ? $m[0][strlen($m[0]) - 1] : ''),
+            $sql,
+        );
+    }
+
+    /**
+     * The comma-separated items of a list starting at `$offset` of `$masked`, as offset and
+     * length: up to a clause keyword, a `;`, or the `)` closing the list's own parenthesis.
+     *
+     * @return list<array{int, int}>
+     */
+    private static function listItems(string $masked, int $offset): array
+    {
+        $items = [];
+        $depth = 0;
+        $start = $offset;
+        $length = strlen($masked);
+        $i = $offset;
+
+        while ($i < $length) {
+            if ($depth > 0) {
+                $i += strcspn($masked, '()', $i);
+
+                if ($i >= $length) {
+                    break;
+                }
+
+                $depth += $masked[$i] === '(' ? 1 : -1;
+                $i++;
+
+                continue;
+            }
+
+            if (preg_match(self::LIST_TOKEN, $masked, $m, PREG_OFFSET_CAPTURE, $i) !== 1) {
+                $i = $length;
+
+                break;
+            }
+
+            [$token, $at] = $m[0];
+
+            if ($token === '(') {
+                $depth++;
+                $i = $at + 1;
+
+                continue;
+            }
+
+            if ($token === ',') {
+                $items[] = [$start, $at - $start];
+                $start = $at + 1;
+                $i = $start;
+
+                continue;
+            }
+
+            // `)`, `;` or a clause keyword: the list ends here.
+            $i = $at;
+
+            break;
+        }
+
+        $items[] = [$start, $i - $start];
+
+        return $items;
     }
 
     /** @return list<string> Table names referenced by `Schema::` calls, raw SQL, or `DB::table()`. */

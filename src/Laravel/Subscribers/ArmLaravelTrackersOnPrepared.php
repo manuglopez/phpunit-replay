@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Manuglopez\Replay\Laravel\Subscribers;
 
+use Manuglopez\Replay\Console\Runner\Warnings;
 use Manuglopez\Replay\Laravel\BladeTracker;
 use Manuglopez\Replay\Laravel\MigrationTables;
 use Manuglopez\Replay\Laravel\TableExtractor;
@@ -42,6 +43,8 @@ final class ArmLaravelTrackersOnPrepared implements PreparedSubscriber
     /** Set at `PreparationStarted` for a Laravel test case: its application should be armed early. */
     private bool $expectEarly = false;
 
+    private bool $warned = false;
+
     public function __construct(
         private readonly Recorder $recorder,
         private readonly UsesDatabaseCollector $usesDatabase,
@@ -61,16 +64,40 @@ final class ArmLaravelTrackersOnPrepared implements PreparedSubscriber
 
         if ($this->expectEarly && ($app === null || $this->markerOf($app) !== 'early')) {
             $this->recorder->linkTable(TableExtractor::UNKNOWN);
+            $this->warnDegradedOnce();
         }
 
         $this->expectEarly = false;
         $this->recordUsesDatabase($test);
     }
 
-    /** A Laravel test case is about to run `setUp()`: {@see self::notify()} checks how it was armed. */
-    public function expectEarlyArming(): void
+    /**
+     * At each test's `PreparationStarted`: whether {@see self::notify()} should check that the
+     * test's application was armed early (a Laravel test case). Set for every test, so that a
+     * test whose `setUp()` threw (no `Prepared`) leaves nothing to the next one.
+     */
+    public function expectEarlyArming(bool $expect = true): void
     {
-        $this->expectEarly = true;
+        $this->expectEarly = $expect;
+    }
+
+    /**
+     * Once per process: a test could not be armed before its `setUp()`, so its tables are
+     * recorded as unknown, and the most common cause is a cached configuration (Laravel then
+     * skips the providers this package merges).
+     */
+    private function warnDegradedOnce(): void
+    {
+        if ($this->warned) {
+            return;
+        }
+
+        $this->warned = true;
+        $cached = is_file(rtrim($this->projectRoot, '/') . '/bootstrap/cache/config.php');
+
+        Warnings::warn($cached
+            ? 'Laravel\'s configuration is cached (bootstrap/cache/config.php): tables touched before a test\'s body are not tracked, every test is recorded as touching unknown tables; run `php artisan config:clear` before recording'
+            : 'tables touched before a test\'s body could not be tracked (Laravel 10, or an application this package could not arm early): every such test is recorded as touching unknown tables');
     }
 
     public function recordUsesDatabase(Test $test): void

@@ -24,8 +24,8 @@ use Throwable;
  * point before the traits is the application's own bootstrap inside `createApplication()`.
  * At `Test\PreparationStarted` (before `setUp()`), for a Laravel test case, this merges
  * {@see TrackersServiceProvider} into the providers the next application registers
- * (`Illuminate\Foundation\Bootstrap\RegisterProviders::merge()`, Laravel 11+); its `boot()`
- * arms that application while it bootstraps, and marks it armed early.
+ * (`Illuminate\Foundation\Bootstrap\RegisterProviders::merge()`, Laravel 11+), whose
+ * `booting()` callback arms that application before any provider boots, and marks it armed early.
  *
  * Where that cannot happen (Laravel 10, which has no `merge()`; a configuration loaded from
  * cache, for which Laravel skips merged providers; an application created some other way), the
@@ -55,6 +55,7 @@ final readonly class ArmLaravelTrackersOnPreparationStarted implements Preparati
         }
 
         $this->arming->recordUsesDatabase($test);
+        $this->arming->expectEarlyArming(false);
 
         $testCase = self::runningTestCase();
 

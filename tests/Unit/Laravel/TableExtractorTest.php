@@ -95,6 +95,20 @@ final class TableExtractorTest extends TestCase
         self::assertSame(['users'], TableExtractor::fromSql('select * from users where id in (1, 2, 3)'), 'commas after the from list are not tables');
     }
 
+    public function test_the_shapes_a_review_found_missing(): void
+    {
+        self::assertSame(['users'], TableExtractor::fromSql('/* a comment */ select * from users'));
+        self::assertSame(['users'], TableExtractor::fromSql("-- a comment\nselect * from users"));
+        self::assertSame(['order', 'tags', 'users'], TableExtractor::fromSql('select * from `users`, `order`, `tags` where 1'), 'a reserved word quoted as a name');
+        self::assertSame(['a', 'b', 'c'], TableExtractor::fromSql('select * from a, (select id from b) x, c'));
+        self::assertSame(['posts', 'users'], TableExtractor::fromSql('TRUNCATE users, posts'));
+        self::assertSame(['users'], TableExtractor::fromSql('truncate "users" restart identity cascade'));
+        self::assertSame(['a', 'b'], TableExtractor::fromSql('update `a`, `b` set a.x = b.x'));
+        self::assertSame(['a', 'b'], TableExtractor::fromSql('delete from a using b where a.id = b.id'));
+        self::assertSame(['users'], TableExtractor::fromSql("select * from `users` where name = 'from posts'"), 'a string is not a table');
+        self::assertSame(['a', 'b'], TableExtractor::fromSql('select * from a join b using (id)'));
+    }
+
     public function test_a_statement_whose_tables_cannot_be_read_is_unknown(): void
     {
         self::assertSame([TableExtractor::UNKNOWN], TableExtractor::fromSql('call refresh_totals()'));

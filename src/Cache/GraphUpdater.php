@@ -8,6 +8,7 @@ use Manuglopez\Replay\Analysis\StaticEdges;
 use Manuglopez\Replay\Change\Git;
 use Manuglopez\Replay\Console\Runner\Warnings;
 use Manuglopez\Replay\Hermeticity\Quarantine;
+use Manuglopez\Replay\Laravel\TableExtractor;
 use Manuglopez\Replay\Record\RunPartial;
 use Manuglopez\Replay\Select\NonEdgeInputs;
 
@@ -154,9 +155,16 @@ final class GraphUpdater
             $this->graph->unionEdges($edgesToRecord);
             $this->graph->markKnownTestFiles($executed);
 
-            if ($partial->tables !== []) {
-                $this->graph->unionTestTables($partial->tables);
+            // `*` (tables nobody could name) is what this recording says, never accumulated:
+            // a recording made once with the configuration cached must not make every file a
+            // database test forever. The tables themselves still accumulate.
+            [$tables, $unknown] = self::splitUnknown($partial->tables);
+
+            if ($tables !== []) {
+                $this->graph->unionTestTables($tables);
             }
+
+            $this->graph->replaceTablesUnknown(self::withoutReplayed($executed, $replayed), $unknown);
 
             // Whether a file uses a database is a fact about its class, which this run saw for
             // every file it executed (Laravel\Subscribers\ArmLaravelTrackersOnPrepared). A file
@@ -551,6 +559,24 @@ final class GraphUpdater
         }
 
         return $out;
+    }
+
+    /**
+     * @param array<string, list<string>> $tables
+     * @return array{array<string, list<string>>, list<string>} the tables without `*`, and the files that had it
+     */
+    private static function splitUnknown(array $tables): array
+    {
+        $unknown = [];
+
+        foreach ($tables as $testFile => $names) {
+            if (in_array(TableExtractor::UNKNOWN, $names, true)) {
+                $unknown[] = (string) $testFile;
+                $tables[$testFile] = array_values(array_filter($names, static fn (string $name): bool => $name !== TableExtractor::UNKNOWN));
+            }
+        }
+
+        return [array_filter($tables, static fn (array $names): bool => $names !== []), $unknown];
     }
 
     /**

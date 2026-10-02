@@ -228,6 +228,27 @@ final class GraphTest extends TestCase
         self::assertSame(['comments'], $graph->testTables()['tests/BetaTest.php']);
     }
 
+    public function test_tables_unknown_is_what_the_latest_recording_of_each_file_says(): void
+    {
+        // One recording with the configuration cached marks every test `*`: the next
+        // recording without it must clear that, or every test is a database test forever.
+        $graph = new Graph($this->root);
+        $graph->replaceTablesUnknown(['tests/AT.php', 'tests/BT.php'], ['tests/AT.php', 'tests/BT.php']);
+        self::assertTrue($graph->tablesUnknown('tests/AT.php'));
+        self::assertContains('tests/AT.php', $graph->databaseTestFiles());
+
+        $graph->replaceTablesUnknown(['tests/AT.php'], []);
+        self::assertFalse($graph->tablesUnknown('tests/AT.php'));
+        self::assertNotContains('tests/AT.php', $graph->databaseTestFiles());
+        self::assertTrue($graph->tablesUnknown('tests/BT.php'), 'not recorded again: unchanged');
+
+        $json = $graph->encode();
+        self::assertIsString($json);
+        $decoded = Graph::decode($json, $this->root);
+        self::assertNotNull($decoded);
+        self::assertTrue($decoded->tablesUnknown('tests/BT.php'));
+    }
+
     public function test_uses_database_is_replaced_for_the_files_a_run_executed_only(): void
     {
         $graph = new Graph($this->root);

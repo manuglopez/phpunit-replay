@@ -105,7 +105,7 @@ final class SchemaDumpRule implements Rule
         }
 
         if ($old->normalisedHash() === $new->normalisedHash()) {
-            $context->selection->note(new Reason($this->name(), $rel, 'comments and whitespace only'));
+            $context->selection->note(new Reason($this->name(), $rel, 'comments, whitespace or migration ids only'));
 
             return;
         }

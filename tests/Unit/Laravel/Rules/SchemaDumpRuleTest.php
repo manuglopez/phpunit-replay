@@ -83,7 +83,7 @@ final class SchemaDumpRuleTest extends TestCase
 
             self::assertSame([], $selection->testFiles());
             self::assertSame([], $context->remaining);
-            self::assertEquals([new Reason('SchemaDump', self::DUMP, 'comments and whitespace only')], $selection->notes());
+            self::assertEquals([new Reason('SchemaDump', self::DUMP, 'comments, whitespace or migration ids only')], $selection->notes());
         }
     }
 
@@ -97,6 +97,18 @@ final class SchemaDumpRuleTest extends TestCase
             [$selection] = $this->apply($this->graph(), $rule);
 
             self::assertSame(self::ALL_DATABASE_TESTS, $selection->testFiles());
+        }
+    }
+
+    public function test_renumbered_migration_rows_select_nothing_in_either_mode(): void
+    {
+        // Regenerated after migrate:fresh: same names, new ids and batches.
+        $this->repo->write(self::DUMP, str_replace("VALUES (1,'2024_01_01_000000_create_users_table',1)", "VALUES (9,'2024_01_01_000000_create_users_table',4)", self::SCHEMA));
+
+        foreach ([new SchemaDumpRule(), new SchemaDumpRule('per-table')] as $rule) {
+            [$selection] = $this->apply($this->graph(), $rule);
+
+            self::assertSame([], $selection->testFiles());
         }
     }
 
@@ -207,8 +219,9 @@ final class SchemaDumpRuleTest extends TestCase
         $graph->replaceTestTables([
             'tests/UsersTest.php' => ['users'],
             'tests/ParcelsTest.php' => ['parcels'],
-            'tests/UnknownTest.php' => ['users', '*'],
+            'tests/UnknownTest.php' => ['users'],
         ]);
+        $graph->replaceTablesUnknown(['tests/UnknownTest.php'], ['tests/UnknownTest.php']);
         $graph->replaceUsesDatabase(['tests/NoTablesTest.php'], ['tests/NoTablesTest.php']);
 
         return $graph;

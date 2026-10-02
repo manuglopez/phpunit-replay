@@ -300,6 +300,49 @@ final class SchemaDumpTest extends TestCase
         self::assertSame($old->normalisedHash(), $whitespace->normalisedHash(), 'comments and whitespace only');
     }
 
+    public function test_mariadb_executes_its_versioned_comments(): void
+    {
+        $sql = "/*M!999999\\- enable the sandbox mode */\nCREATE TABLE `logs` (`id` int) /*M!100100 ENGINE=InnoDB */;\nINSERT INTO `migrations` VALUES (1,'x',1);\n";
+        $old = SchemaDump::parse($sql);
+        $new = SchemaDump::parse(str_replace('ENGINE=InnoDB', 'ENGINE=Aria', $sql));
+
+        self::assertNotNull($old);
+        self::assertNotNull($new);
+        self::assertSame(['logs'], $old->tables(), 'the sandbox line is still ignored');
+        self::assertStringContainsString('ENGINE=InnoDB', $old->block('logs'));
+        self::assertSame(['logs'], SchemaDump::changedTables($old, $new));
+    }
+
+    public function test_the_version_of_an_executable_comment_counts(): void
+    {
+        // `/*!99999 …*/` is a statement MySQL below 9.99.99 does not run.
+        $sql = "CREATE TABLE `users` (`id` int);\n/*!50001 CREATE VIEW `v` AS select `id` from `users` */;\n";
+        $old = SchemaDump::parse($sql);
+        $new = SchemaDump::parse(str_replace('/*!50001', '/*!99999', $sql));
+
+        self::assertNotNull($old);
+        self::assertNotNull($new);
+        self::assertSame(['v'], SchemaDump::changedTables($old, $new));
+        self::assertNotSame($old->normalisedHash(), $new->normalisedHash());
+    }
+
+    public function test_the_migration_rows_are_compared_by_name(): void
+    {
+        // Regenerating after migrate:fresh renumbers ids and batches; only the set of names says
+        // which migrations a test database runs.
+        $old = SchemaDump::parse("CREATE TABLE `users` (`id` int);\nINSERT INTO `migrations` VALUES (1,'a',1);\nINSERT INTO `migrations` VALUES (2,'b',1);\n");
+        $renumbered = SchemaDump::parse("CREATE TABLE `users` (`id` int);\nINSERT INTO `migrations` VALUES (7,'b',3);\nINSERT INTO `migrations` VALUES (8,'a',4);\n");
+        $added = SchemaDump::parse("CREATE TABLE `users` (`id` int);\nINSERT INTO `migrations` VALUES (1,'a',1);\nINSERT INTO `migrations` VALUES (2,'b',1);\nINSERT INTO `migrations` VALUES (3,'c',2);\n");
+
+        self::assertNotNull($old);
+        self::assertNotNull($renumbered);
+        self::assertNotNull($added);
+        self::assertSame($old->rowsHash(), $renumbered->rowsHash());
+        self::assertSame($old->normalisedHash(), $renumbered->normalisedHash());
+        self::assertNotSame($old->rowsHash(), $added->rowsHash());
+        self::assertNotSame($old->normalisedHash(), $added->normalisedHash());
+    }
+
     public function test_the_dump_path_shape(): void
     {
         self::assertTrue(SchemaDump::isDumpPath('database/schema/mysql-schema.sql'));

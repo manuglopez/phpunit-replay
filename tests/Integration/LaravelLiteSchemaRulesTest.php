@@ -164,6 +164,52 @@ final class LaravelLiteSchemaRulesTest extends TestCase
         self::assertContains('users', $graph->bootstrapTables(), 'written by the seeder RefreshDatabase runs');
     }
 
+    public function test_a_query_in_a_provider_s_boot_is_recorded_whatever_its_order(): void
+    {
+        // Laravel boots config('app.providers') before the providers it merges: arming in our
+        // provider's boot() would miss this query and still call the test armed early.
+        $fixture = $this->fixtures[] = FixtureProject::laravelLite();
+        $fixture->write('app/Providers/SettingsProvider.php', "<?php\n\nnamespace App\\Providers;\n\nuse Illuminate\\Support\\Facades\\DB;\nuse Illuminate\\Support\\ServiceProvider;\n\nclass SettingsProvider extends ServiceProvider\n{\n    public function boot(): void\n    {\n        DB::select('with settings as (select 1 as x) select x from settings');\n    }\n}\n");
+        $fixture->write('config/app.php', (string) preg_replace('/return \[/', "return [\n    'providers' => Illuminate\\Support\\ServiceProvider::defaultProviders()->merge([App\\Providers\\SettingsProvider::class])->toArray(),", $fixture->read('config/app.php'), 1));
+        $fixture->repo->commitAll('a provider that queries while booting');
+        $recorded = $fixture->replay(['record']);
+        self::assertSame(0, $recorded['exitCode'], $recorded['stdout'] . $recorded['stderr']);
+
+        $graph = ReplayAssert::loadGraph($fixture);
+        self::assertNotNull($graph);
+        self::assertContains('settings', $graph->testTables()['tests/Feature/HomePageTest.php'] ?? [], 'every test boots it');
+        self::assertFalse($graph->tablesUnknown('tests/Feature/HomePageTest.php'));
+    }
+
+    public function test_a_cached_configuration_marks_tables_unknown_for_that_recording_only(): void
+    {
+        // Laravel skips merged providers when its configuration is cached: nothing can arm
+        // before setUp(), so every test's tables are unknown, and the run says why. Once the
+        // cache is gone, the next recording replaces that.
+        $fixture = $this->fixtures[] = FixtureProject::laravelLite();
+        $cache = new \Symfony\Component\Process\Process(['php', 'artisan', 'config:cache'], $fixture->root(), [
+            'APP_ENV' => 'testing', 'DB_CONNECTION' => 'sqlite', 'DB_DATABASE' => ':memory:', 'CACHE_STORE' => 'array',
+            'SESSION_DRIVER' => 'array', 'APP_KEY' => 'base64:98efEiSEB2S5QVEvsmMo9ys9zawgJC351b/8PzhSZOg=',
+        ]);
+        $cache->run();
+        self::assertSame(0, $cache->getExitCode(), $cache->getOutput() . $cache->getErrorOutput());
+
+        $recorded = $fixture->replay(['record']);
+        self::assertSame(0, $recorded['exitCode'], $recorded['stdout'] . $recorded['stderr']);
+        self::assertStringContainsString('configuration is cached (bootstrap/cache/config.php)', $recorded['stdout'] . $recorded['stderr']);
+        $graph = ReplayAssert::loadGraph($fixture);
+        self::assertNotNull($graph);
+        self::assertTrue($graph->tablesUnknown('tests/Feature/HomePageTest.php'));
+
+        $fixture->delete('bootstrap/cache/config.php');
+        $recorded = $fixture->replay(['record']);
+        self::assertSame(0, $recorded['exitCode'], $recorded['stdout'] . $recorded['stderr']);
+        $graph = ReplayAssert::loadGraph($fixture);
+        self::assertNotNull($graph);
+        self::assertFalse($graph->tablesUnknown('tests/Feature/HomePageTest.php'), 'what the latest recording says');
+        self::assertNotContains('tests/Feature/HomePageTest.php', $graph->databaseTestFiles(), 'it never touches the database');
+    }
+
     public function test_the_wrapper_and_the_in_process_extension_record_the_same_tables_and_database_tests(): void
     {
         $wrapper = $this->recorded();

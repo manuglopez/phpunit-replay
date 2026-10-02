@@ -110,27 +110,28 @@ final readonly class SchemaDump
         $sequenceOwner = [];
         $global = [];
         $migrations = null;
-        $rows = [];
         $normalised = [];
 
-        foreach ($statements as [$statement, $copyRows]) {
+        foreach ($statements as [$statement, $copyRows, $version]) {
             if (preg_match(self::NOISE, $statement) === 1) {
                 continue;
             }
 
-            $normalised[] = $copyRows === [] ? $statement : $statement . "\n" . implode("\n", $copyRows);
+            // What is stored and compared keeps the executable-comment versions; what is
+            // matched below does not.
+            $text = $statement . $version;
 
             if (preg_match('/^INSERT\s+(?:IGNORE\s+)?INTO\s+' . self::QUALIFIED . '/i', $statement, $m) === 1) {
                 $table = self::name($m[1]);
 
                 if ($table === 'migrations') {
                     $migrations = [...$migrations ?? [], ...self::insertedNames($statement)];
-                    $rows[] = $statement;
 
                     continue;
                 }
 
-                $byTable[$table][] = $statement;
+                $byTable[$table][] = $text;
+                $normalised[] = $text;
 
                 continue;
             }
@@ -140,12 +141,12 @@ final readonly class SchemaDump
 
                 if ($table === 'migrations') {
                     $migrations = [...$migrations ?? [], ...self::copiedNames($m[3] ?? '', $copyRows)];
-                    $rows[] = $statement . "\n" . implode("\n", $copyRows);
 
                     continue;
                 }
 
-                $byTable[$table][] = $statement . "\n" . implode("\n", $copyRows);
+                $byTable[$table][] = $text . "\n" . implode("\n", $copyRows);
+                $normalised[] = $text . "\n" . implode("\n", $copyRows);
 
                 continue;
             }
@@ -156,15 +157,17 @@ final readonly class SchemaDump
                 return null;
             }
 
+            $normalised[] = $text;
+
             if ($table !== null) {
-                $byTable[$table][] = $statement;
+                $byTable[$table][] = $text;
 
                 continue;
             }
 
             if (preg_match('/^(?:CREATE|ALTER)\s+SEQUENCE\s+(?:IF\s+NOT\s+EXISTS\s+)?' . self::QUALIFIED . '(.*)$/is', $statement, $m) === 1) {
                 $sequence = self::name($m[1]);
-                $bySequence[$sequence][] = $statement;
+                $bySequence[$sequence][] = $text;
 
                 if (preg_match('/\bOWNED\s+BY\s+' . self::QUALIFIED . '/i', $m[2], $owner) === 1) {
                     $segments = self::segments($owner[1]);
@@ -177,7 +180,7 @@ final readonly class SchemaDump
                 continue;
             }
 
-            $global[] = $statement;
+            $global[] = $text;
         }
 
         // A sequence is its owner table's; one nothing owns belongs to no table.
@@ -202,7 +205,12 @@ final readonly class SchemaDump
         }
 
         ksort($blocks, SORT_STRING);
+
+        // Which migrations the rows say ran: the set of names, not their ids, batches or
+        // order, which regenerating the dump after `migrate:fresh` renumbers harmlessly.
+        $rows = array_values(array_unique($migrations ?? []));
         sort($rows);
+        $normalised[] = 'migrations: ' . implode(',', $rows);
 
         return new self(
             $blocks,
@@ -466,7 +474,7 @@ final readonly class SchemaDump
      * collapsed, MySQL executable-comment markers removed), with the data lines of a `COPY
      * ... FROM stdin`. Null on anything left open at the end of the file.
      *
-     * @return list<array{string, list<string>}>|null
+     * @return list<array{string, list<string>, string}>|null
      */
     private static function statements(string $sql, bool $backslashEscapes): ?array
     {
@@ -475,6 +483,8 @@ final readonly class SchemaDump
         $current = '';
         $delimiter = ';';
         $conditional = 0;
+        /** @var list<string> $versions the executable-comment versions of the statement being read */
+        $versions = [];
         $i = 0;
 
         while ($i < $length) {
@@ -520,14 +530,17 @@ final readonly class SchemaDump
             }
 
             if ($char === '/' && ($sql[$i + 1] ?? '') === '*') {
-                if (($sql[$i + 2] ?? '') === '!') {
-                    // MySQL executable comment: its content is SQL, the marker is not.
-                    $i += 3;
+                $mariadb = substr($sql, $i + 2, 2) === 'M!';
 
-                    while ($i < $length && ctype_digit($sql[$i])) {
-                        $i++;
-                    }
-
+                // MySQL `/*!NNNNN …*/` and MariaDB `/*M!NNNNNN …*/` run their content (on a
+                // server at least that version): it is SQL, and the version decides whether
+                // it runs, so it is kept beside the statement. MariaDB's sandbox line
+                // (`/*M!999999\- enable the sandbox mode */`) is a plain comment.
+                if ((($sql[$i + 2] ?? '') === '!' || $mariadb) && ! str_starts_with(substr($sql, $i, 12), '/*M!999999\\')) {
+                    $i += $mariadb ? 4 : 3;
+                    $digits = strspn($sql, '0123456789', $i);
+                    $versions[] = ($mariadb ? 'M!' : '!') . substr($sql, $i, $digits);
+                    $i += $digits;
                     $conditional++;
                     $current = self::spaced($current);
 
@@ -593,6 +606,8 @@ final readonly class SchemaDump
                 }
 
                 $current = '';
+                $version = $versions === [] ? '' : ' /*' . implode(' ', $versions) . '*/';
+                $versions = [];
 
                 if ($statement === '') {
                     continue;
@@ -624,7 +639,7 @@ final readonly class SchemaDump
                     }
                 }
 
-                $statements[] = [$statement, $rows];
+                $statements[] = [$statement, $rows, $version];
 
                 continue;
             }

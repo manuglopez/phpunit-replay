@@ -137,10 +137,17 @@ final class MigrationRule implements Rule
         $lowerTables = array_map(strtolower(...), $tables);
         $matched = false;
 
+        // A test file whose tables are not all known may use any of them.
+        foreach ($context->graph->databaseTestFiles() as $testFile) {
+            if ($context->graph->tablesUnknown($testFile)) {
+                $context->selection->add($testFile, new Reason($this->name(), $rel, 'a database test whose tables are not all known'));
+            }
+        }
+
         foreach ($testTables as $testFile => $testFileTables) {
             foreach ($testFileTables as $table) {
-                // `*`: tables nobody could name; `@t`: written while the database was built.
-                if ($table === TableExtractor::UNKNOWN || in_array(ltrim($table, TableExtractor::BOOTSTRAP), $lowerTables, true)) {
+                // `@t`: written while the database was built.
+                if (in_array(ltrim($table, TableExtractor::BOOTSTRAP), $lowerTables, true)) {
                     $context->selection->add((string) $testFile, new Reason($this->name(), $rel, implode(', ', $tables)));
                     $matched = true;
 

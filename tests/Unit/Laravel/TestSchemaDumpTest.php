@@ -113,6 +113,23 @@ final class TestSchemaDumpTest extends TestCase
         self::assertNull(TestSchemaDump::connection($this->root, null, []), 'an interpolated value');
     }
 
+    public function test_a_cached_configuration_is_what_laravel_reads(): void
+    {
+        // With bootstrap/cache/config.php, Laravel reads no env file and no env() default.
+        $this->write('phpunit.xml', '<phpunit><php><env name="DB_CONNECTION" value="sqlite"/></php></phpunit>');
+        $this->write('bootstrap/cache/config.php', "<?php return ['database' => ['default' => 'mariadb', 'migrations' => ['table' => 'migrations'], 'connections' => ['mariadb' => ['driver' => 'mariadb']]]];\n");
+        self::assertSame('mariadb', TestSchemaDump::connection($this->root, null, []));
+
+        $this->write('database/schema/mariadb-schema.sql', "CREATE TABLE `users` (`id` int);\nINSERT INTO `migrations` VALUES (1,'2024_01_01_000000_create_users_table',1);\n");
+        self::assertSame(['2024_01_01_000000_create_users_table' => true], TestSchemaDump::squashed($this->root, null, []));
+
+        $this->write('bootstrap/cache/config.php', "<?php return ['database' => ['default' => 'mariadb', 'migrations' => ['table' => 'schema_versions']]];\n");
+        self::assertNull(TestSchemaDump::squashed($this->root, null, []), 'another migrations table');
+
+        $this->write('bootstrap/cache/config.php', "<?php return 'not an array';\n");
+        self::assertNull(TestSchemaDump::connection($this->root, null, []), 'unreadable: unknown');
+    }
+
     public function test_sql_server_has_no_dump(): void
     {
         // Laravel's migrate never loads a schema dump on a SqlServerConnection.

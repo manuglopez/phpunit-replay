@@ -443,6 +443,24 @@ final class NonEdgeInputsTest extends TestCase
         self::assertSame($before['tests/BTest.php'], $after['tests/BTest.php']);
     }
 
+    public function test_per_table_unknown_tables_follow_the_latest_recording(): void
+    {
+        $this->repo->write('database/schema/sqlite-schema.sql', self::SQLITE_DUMP);
+        $this->graph->replaceTestTables(['tests/ATest.php' => ['users']]);
+        $this->graph->replaceTablesUnknown(['tests/ATest.php'], ['tests/ATest.php']);
+        $rules = ['schema' => new SchemaDumpRule('per-table')];
+
+        $before = $this->inputs(extraRules: $rules)->digestFor('tests/ATest.php');
+        $this->repo->write('database/schema/sqlite-schema.sql', str_replace('"title" varchar', '"title" varchar, "body" text', self::SQLITE_DUMP));
+        self::assertNotSame($before, $this->inputs(extraRules: $rules)->digestFor('tests/ATest.php'), 'unknown: every block');
+
+        // The next recording names every table: posts is no longer A's.
+        $this->graph->replaceTablesUnknown(['tests/ATest.php'], []);
+        $before = $this->inputs(extraRules: $rules)->digestFor('tests/ATest.php');
+        $this->repo->write('database/schema/sqlite-schema.sql', str_replace('"title" varchar', '"title" varchar, "lede" text', self::SQLITE_DUMP));
+        self::assertSame($before, $this->inputs(extraRules: $rules)->digestFor('tests/ATest.php'));
+    }
+
     public function test_per_table_a_foreign_key_carries_the_tables_it_ties(): void
     {
         $dump = "CREATE TABLE IF NOT EXISTS \"users\"(\"id\" integer primary key);\nCREATE TABLE IF NOT EXISTS \"posts\"(\"id\" integer, \"user_id\" integer, foreign key(\"user_id\") references \"users\"(\"id\") on delete cascade);\nCREATE TABLE IF NOT EXISTS \"tags\"(\"id\" integer);\nINSERT INTO migrations VALUES(1,'x',1);\n";
