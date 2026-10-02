@@ -8,6 +8,10 @@ All notable changes to this project will be documented in this file.
 
 - **Fix: PHPUnit 13.4 broke the wrapper and static analysis for everyone on `^13.0`.** 13.4.0 gave `XmlConfiguration\Loader`, `CliArguments\Builder` and `Configuration\Merger` a required `Event\Emitter` constructor argument; they used to take none. phpunit-replay constructed all three with no arguments, to read the project's PHPUnit configuration, so on 13.4 every wrapper command died with `phpunit-replay: unexpected error (Too few arguments to function PHPUnit\TextUI\XmlConfiguration\Loader::__construct(), 0 passed in …/ProjectLocator.php on line 77 and exactly 1 expected): degrading to a plain PHPUnit run`: tests ran, nothing was recorded or replayed. PHPStan reported the same thing on a fresh `composer update` (`Class PHPUnit\TextUI\XmlConfiguration\Loader constructor invoked with 0 parameters, 1 required`, and the same for `CliArguments\Builder` and `Configuration\Merger`). The three are now constructed in one place, `PHPUnit\ConfigurationReader`, which reads the installed constructor and passes PHPUnit's own emitter (`Event\Facade::emitter()`, what `TextUI\Application` passes) only when one is required; 11.5, 12 and 13.0-13.3 are constructed exactly as before.
 
+### Known
+
+- **Parallel runs (`--parallel`) on PHPUnit 13.4 need a ParaTest release that supports it.** ParaTest 7.25.0, the latest, accepts `phpunit/phpunit ^13.3.4` but still constructs `PhpHandler` with no arguments, so on 13.4 it dies with `ArgumentCountError`, exit 255, before any test runs (plain `vendor/bin/paratest` fails the same way). Until a fixed ParaTest ships, phpunit-replay prints `phpunit-replay: ParaTest <version> cannot run on PHPUnit <version> (an upstream incompatibility, not a test failure). Run without --parallel, or pin phpunit/phpunit below <version> until ParaTest supports it.` after ParaTest's output. The exit code stays non-zero and nothing is recorded or replayed from that pass. The message is printed only when output is captured; a run attached to a terminal shows ParaTest's own fatal alone.
+
 ## [0.12.3] — 2026-10-02
 
 ### Fixed

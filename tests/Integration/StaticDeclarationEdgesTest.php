@@ -262,9 +262,7 @@ final class StaticDeclarationEdgesTest extends TestCase
         // comes out *different* from the sequential one — the dependency list depends on the
         // runner and the worker distribution. With it on, both are identical, because an
         // edge now only ever comes from a called body or from a name written in source.
-        if (! FixtureProject::paratestAvailable()) {
-            self::markTestSkipped('vendor/bin/paratest is not installed in this package (composer install --no-dev?).');
-        }
+        FixtureProject::skipUnlessParatestUsable();
 
         $this->record(self::FLAG_ON);
         $sequential = $this->edgeSet();

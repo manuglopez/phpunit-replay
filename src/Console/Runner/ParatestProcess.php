@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Manuglopez\Replay\Console\Runner;
 
+use Closure;
 use Symfony\Component\Process\Process;
 
 /**
@@ -39,6 +40,11 @@ use Symfony\Component\Process\Process;
  */
 final class ParatestProcess
 {
+    /** @param ?Closure(string): void $report where the incompatibility sentence goes; default {@see Warnings::warn()} */
+    public function __construct(private readonly ?Closure $report = null)
+    {
+    }
+
     /**
      * @param list<string> $iniFlags e.g. ['-d', 'pcov.enabled=1', '-d', 'pcov.directory=<root>']
      * @param list<string> $phpunitArgs everything after the config file / --no-coverage flag
@@ -73,16 +79,29 @@ final class ParatestProcess
         $process = new Process($command, $cwd, $env);
         $process->setTimeout(null);
 
+        // Only the tail of the output is kept, to recognise ParaTest dying on a PHPUnit it
+        // cannot drive. A TTY run hands the terminal straight to the child and has no
+        // output to look at, so the sentence is not printed there.
+        $tail = '';
+
         if (stream_isatty(STDOUT) && Process::isTtySupported()) {
             $process->setTty(true);
             $process->run();
         } else {
-            $process->run(static function (string $type, string $data): void {
+            $process->run(static function (string $type, string $data) use (&$tail): void {
                 fwrite($type === Process::ERR ? STDERR : STDOUT, $data);
+                $tail = substr($tail . $data, -ParatestIncompatibility::TAIL_BYTES);
             });
         }
 
-        return $process->getExitCode() ?? 1;
+        $exitCode = $process->getExitCode() ?? 1;
+        $explanation = ParatestIncompatibility::detect($exitCode, $tail);
+
+        if ($explanation !== null) {
+            $this->report === null ? Warnings::warn($explanation) : ($this->report)($explanation);
+        }
+
+        return $exitCode;
     }
 
     /**

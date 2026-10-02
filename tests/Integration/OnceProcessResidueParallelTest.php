@@ -60,9 +60,7 @@ final class OnceProcessResidueParallelTest extends TestCase
             self::markTestSkipped('tests/Fixtures/Projects/laravel-lite/vendor is not installed — see its README.md.');
         }
 
-        if (! FixtureProject::paratestAvailable()) {
-            self::markTestSkipped('vendor/bin/paratest is not installed in this package (composer install --no-dev?).');
-        }
+        FixtureProject::skipUnlessParatestUsable(dirname(__DIR__) . '/Fixtures/Projects/laravel-lite/vendor');
 
         $serial = FixtureProject::laravelLite();
         $parallel = FixtureProject::laravelLite();

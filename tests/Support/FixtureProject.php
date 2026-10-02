@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Manuglopez\Replay\Tests\Support;
 
+use PHPUnit\Framework\Assert;
 use RuntimeException;
 use Symfony\Component\Process\Process;
 
@@ -164,6 +165,81 @@ final class FixtureProject
     public static function paratestAvailable(): bool
     {
         return is_file(dirname(__DIR__, 2) . '/vendor/brianium/paratest/bin/paratest');
+    }
+
+    /**
+     * Null when ParaTest can drive the installed PHPUnit; otherwise why not, as a skip message.
+     *
+     * Detects ONE upstream incompatibility precisely, and lifts itself once ParaTest is fixed:
+     * PHPUnit 13.4 gave `TextUI\Configuration\PhpHandler` a required constructor argument,
+     * and ParaTest 7.25.0 still does `new PhpHandler()`. Both halves are checked (the
+     * constructor, and the installed ParaTest's own source), so a PHPUnit that kept the bare
+     * constructor, or a ParaTest that passes the argument, never skips. A literal source
+     * search is fine here because it only gates tests.
+     *
+     * `$vendorDir` defaults to this package's own `vendor`; a fixture project with a vendor
+     * of its own (laravel-lite) is checked by passing that one.
+     */
+    public static function paratestIncompatibility(?string $vendorDir = null): ?string
+    {
+        $vendorDir ??= dirname(__DIR__, 2) . '/vendor';
+        $handler = $vendorDir . '/phpunit/phpunit/src/TextUI/Configuration/PhpHandler.php';
+        $paratestSrc = $vendorDir . '/brianium/paratest/src';
+
+        if (! is_file($handler) || ! is_dir($paratestSrc)) {
+            return null;
+        }
+
+        if (preg_match('/function\s+__construct\s*\(\s*[^)\s]/', (string) file_get_contents($handler)) !== 1) {
+            return null;
+        }
+
+        $files = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($paratestSrc, \FilesystemIterator::SKIP_DOTS),
+        );
+
+        foreach ($files as $file) {
+            if ($file instanceof \SplFileInfo
+                && $file->getExtension() === 'php'
+                && preg_match('/new\s+PhpHandler\s*(\(\s*\))?\s*[\)\->;]/', (string) file_get_contents($file->getPathname())) === 1
+            ) {
+                return sprintf(
+                    'ParaTest %s is incompatible with PHPUnit %s (upstream): PhpHandler constructor',
+                    self::installedVersion($vendorDir, 'brianium/paratest'),
+                    self::installedVersion($vendorDir, 'phpunit/phpunit'),
+                );
+            }
+        }
+
+        return null;
+    }
+
+    /** Skips the calling test when ParaTest is missing or cannot drive the installed PHPUnit (here or in `$vendorDir`). */
+    public static function skipUnlessParatestUsable(?string $vendorDir = null): void
+    {
+        if (! self::paratestAvailable()) {
+            Assert::markTestSkipped('vendor/bin/paratest is not installed in this package (composer install --no-dev?).');
+        }
+
+        $reason = self::paratestIncompatibility() ?? ($vendorDir === null ? null : self::paratestIncompatibility($vendorDir));
+
+        if ($reason !== null) {
+            Assert::markTestSkipped($reason);
+        }
+    }
+
+    private static function installedVersion(string $vendorDir, string $package): string
+    {
+        $json = @file_get_contents($vendorDir . '/composer/installed.json');
+        $data = $json === false ? null : json_decode($json, true);
+
+        foreach (is_array($data) ? ($data['packages'] ?? []) : [] as $entry) {
+            if (is_array($entry) && ($entry['name'] ?? null) === $package) {
+                return (string) ($entry['version'] ?? 'unknown');
+            }
+        }
+
+        return 'unknown';
     }
 
     /** Copies an overlay file from plain-variants onto the working copy. */

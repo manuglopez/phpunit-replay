@@ -39,6 +39,8 @@ final class LaravelLiteParallelDatabaseTest extends TestCase
                 'tests/Fixtures/Projects/laravel-lite/vendor is not installed — see its README.md.',
             );
         }
+
+        FixtureProject::skipUnlessParatestUsable(dirname(__DIR__) . '/Fixtures/Projects/laravel-lite/vendor');
     }
 
     protected function tearDown(): void

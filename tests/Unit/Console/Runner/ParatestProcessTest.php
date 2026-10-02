@@ -301,6 +301,59 @@ final class ParatestProcessTest extends TestCase
      * Path to a tiny PHP script that dumps `array_slice($argv, 1)` as JSON to
      * `getenv('CAPTURE_FILE')` and exits with `(int) getenv('EXIT_CODE')`, or 0.
      */
+    #[Test]
+    public function explains_a_paratest_that_cannot_drive_the_installed_phpunit_and_keeps_exit_255(): void
+    {
+        $reported = [];
+
+        $exitCode = (new ParatestProcess(static function (string $line) use (&$reported): void {
+            $reported[] = $line;
+        }))->run(
+            $this->fakeBin('paratest.php'),
+            $this->fakeBin('never-called.php'),
+            null,
+            [],
+            [],
+            false,
+            [
+                'CAPTURE_FILE' => $this->dir . '/captured.json',
+                'EXIT_CODE' => '255',
+                'STDERR_TEXT' => 'PHP Fatal error:  Uncaught ArgumentCountError: Too few arguments to function '
+                    . 'PHPUnit\TextUI\Configuration\PhpHandler::__construct(), 0 passed',
+            ],
+            $this->dir,
+            2,
+        );
+
+        self::assertSame(255, $exitCode);
+        self::assertCount(1, $reported);
+        self::assertStringContainsString('cannot run on PHPUnit', $reported[0]);
+        self::assertStringContainsString('upstream incompatibility, not a test failure', $reported[0]);
+    }
+
+    #[Test]
+    public function says_nothing_about_an_ordinary_failing_paratest_run(): void
+    {
+        $reported = [];
+
+        $exitCode = (new ParatestProcess(static function (string $line) use (&$reported): void {
+            $reported[] = $line;
+        }))->run(
+            $this->fakeBin('paratest.php'),
+            $this->fakeBin('never-called.php'),
+            null,
+            [],
+            [],
+            false,
+            ['CAPTURE_FILE' => $this->dir . '/captured.json', 'EXIT_CODE' => '255', 'STDERR_TEXT' => 'some other fatal'],
+            $this->dir,
+            2,
+        );
+
+        self::assertSame(255, $exitCode);
+        self::assertSame([], $reported);
+    }
+
     private function fakeBin(string $name): string
     {
         $path = $this->dir . '/bin/' . $name;
@@ -312,6 +365,12 @@ final class ParatestProcessTest extends TestCase
 
         $capture = getenv('CAPTURE_FILE');
         file_put_contents((string) $capture, (string) json_encode(array_slice($argv, 1)));
+
+        $stderrText = getenv('STDERR_TEXT');
+
+        if ($stderrText !== false) {
+            fwrite(STDERR, $stderrText . PHP_EOL);
+        }
 
         $exitCode = getenv('EXIT_CODE');
         exit($exitCode === false ? 0 : (int) $exitCode);
