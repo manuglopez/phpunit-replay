@@ -7,6 +7,7 @@ namespace Manuglopez\Replay\Tests\Unit\Cache;
 use Manuglopez\Replay\Cache\Fingerprint;
 use Manuglopez\Replay\Coverage\CoverageFormat;
 use Manuglopez\Replay\Tests\Support\GitRepo;
+use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\TestCase;
 
 final class FingerprintTest extends TestCase
@@ -114,6 +115,29 @@ final class FingerprintTest extends TestCase
         self::assertSame('conservative', $structural['migrations']);
         self::assertSame('per-table', $structural['schema_dump']);
         self::assertContains('schema_dump', Fingerprint::structuralDrift(['structural' => [...$structural, 'schema_dump' => 'conservative']], ['structural' => $structural]), 'named in the drift report');
+    }
+
+    #[Group('AC-I1-d')]
+    public function test_the_translations_mode_is_structural_only_with_laravel_active(): void
+    {
+        self::assertArrayNotHasKey('translations', Fingerprint::compute($this->repo->root, 'pcov', false)['structural'], 'not a Laravel project');
+
+        $this->repo->write('phpunit-replay.php', "<?php\nreturn ['translations' => 'conservative'];\n");
+        self::assertArrayNotHasKey('translations', Fingerprint::compute($this->repo->root, 'pcov', false)['structural'], 'still not a Laravel project');
+
+        $this->repo->write('artisan', "#!/usr/bin/env php\n");
+        $conservative = Fingerprint::compute($this->repo->root, 'pcov', false);
+        self::assertSame('conservative', $conservative['structural']['translations']);
+
+        $this->repo->write('phpunit-replay.php', "<?php\nreturn [];\n");
+        $perKey = Fingerprint::compute($this->repo->root, 'pcov', false);
+        self::assertSame('per-key', $perKey['structural']['translations'], 'the default');
+
+        self::assertSame(['translations'], Fingerprint::structuralDrift($conservative, $perKey), 'switching mode re-records, and drift names it');
+        self::assertFalse(Fingerprint::structuralMatches($conservative, $perKey));
+
+        $this->repo->write('phpunit-replay.php', "<?php\nreturn ['laravel' => 'off', 'translations' => 'conservative'];\n");
+        self::assertArrayNotHasKey('translations', Fingerprint::compute($this->repo->root, 'pcov', false)['structural'], 'laravel off: nothing is armed');
     }
 
     /**
