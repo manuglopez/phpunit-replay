@@ -25,7 +25,7 @@ final class LaravelLiteTranslationsTest extends TestCase
      * fallback chain shows: `en` is the fallback of `es`, so every `es` lookup is also an `en`
      * one (`trans_choice` included); a lookup in `en` records `en` alone (fallback = locale).
      */
-    private const EXPECTED = [
+    public const EXPECTED = [
         'tests/Feature/Translations/GroupKeyTest.php' => ['en:messages.welcome', 'es:messages.welcome'],
         'tests/Feature/Translations/GroupSubtreeTest.php' => ['en:messages.nested'],
         'tests/Feature/Translations/JsonKeyTest.php' => ['en:Greetings, :name', 'es:Greetings, :name'],

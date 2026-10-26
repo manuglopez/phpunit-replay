@@ -55,7 +55,7 @@ final class TranslationRule implements Rule
 {
     public const UNTRACKABLE = 'resolved translations untrackably';
 
-    public const FORMATTING_ONLY = 'only formatting/order/comments: selects nothing';
+    public const FORMATTING_ONLY = 'only formatting/order/comments';
 
     /** How many changed keys a reason names before it counts the rest. */
     private const KEYS_SHOWN = 3;
