@@ -64,6 +64,8 @@ final readonly class StatusReport
          * key) forces exactly one full re-record, and nothing adds such an edge afterwards.
          */
         public int $excludedEdges = 0,
+        /** Distinct `<locale>:<key>` entries recorded across all tests (`Graph::stats()['translations']`); untraceable `*` marks are not counted. */
+        public int $translations = 0,
     ) {
     }
 
@@ -106,6 +108,7 @@ final readonly class StatusReport
         $lines[] = 'edges:      ' . $this->edges
             . ($this->excludedEdges > 0 ? sprintf(' (%d gitignored, stale — record to clean up)', $this->excludedEdges) : '');
         $lines[] = 'tables:     ' . $this->tables;
+        $lines[] = 'translations: ' . $this->translations;
         $lines[] = 'graph.json: ' . Format::bytes($this->graphBytes);
         $lines[] = '';
         $lines[] = 'results:';

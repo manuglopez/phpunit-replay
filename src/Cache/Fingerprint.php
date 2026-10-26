@@ -218,6 +218,11 @@ final readonly class Fingerprint
             $structural['tables_raw'] = true;
             $structural['migrations'] = $config->migrations;
             $structural['schema_dump'] = $config->schemaDump;
+            // Every test of the graph was recorded with translation tracking on (`per-key`) or
+            // not at all (`conservative`, nothing is armed): a graph recorded under the other
+            // mode has no entries to narrow on, and "no entry = used no translation" would be
+            // a false green. One full re-record at the switch, named in the drift report.
+            $structural['translations'] = $config->translations;
         }
 
         return [

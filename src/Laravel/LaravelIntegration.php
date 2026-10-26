@@ -75,7 +75,7 @@ final class LaravelIntegration
         $usesDatabase = new UsesDatabaseCollector();
         ReplayState::collectUsesDatabase($usesDatabase);
 
-        $arming = new ArmLaravelTrackersOnPrepared($recorder, $usesDatabase, $projectRoot);
+        $arming = new ArmLaravelTrackersOnPrepared($recorder, $usesDatabase, $projectRoot, self::tracksTranslations($projectRoot));
 
         return [
             $arming,
@@ -97,9 +97,23 @@ final class LaravelIntegration
         $usesDatabase = new UsesDatabaseCollector();
         ReplayState::collectUsesDatabase($usesDatabase);
 
-        $arming = new ArmLaravelTrackersOnPrepared($recorder, $usesDatabase, $projectRoot);
+        $arming = new ArmLaravelTrackersOnPrepared($recorder, $usesDatabase, $projectRoot, self::tracksTranslations($projectRoot));
 
         return [$arming, new ArmLaravelTrackersOnPreparationStarted($arming)];
+    }
+
+    /**
+     * Whether the translation keys each test resolves are recorded: `translations` is
+     * `per-key` (the default; `conservative` arms nothing, `lang/**` keeps selecting every
+     * test) and the Laravel integration is on (`laravel => 'off'` arms nothing). Read from
+     * `phpunit-replay.php`, like `Cache\Fingerprint` does, so the wrapper's child, the
+     * in-process extension and the fingerprint always agree.
+     */
+    private static function tracksTranslations(string $projectRoot): bool
+    {
+        $config = Config::load($projectRoot);
+
+        return $config->translations === 'per-key' && LaravelDetector::enabled($projectRoot, $config);
     }
 
     /**

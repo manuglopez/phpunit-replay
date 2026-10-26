@@ -76,6 +76,17 @@ final readonly class ArmLaravelTrackersOnPreparationStarted implements Preparati
         $register(static function () use ($arming): void {
             $arming->armTrackers();
         });
+
+        // The end of the test, while the application still exists: a translator swapped by
+        // the test (`Lang::swap()`, a mock) makes it untraceable (D-2 case (c)). Laravel runs
+        // these callbacks first thing in its `tearDown()`, before it flushes the container.
+        if ($arming->tracksTranslations() && method_exists($testCase, 'beforeApplicationDestroyed')) {
+            (function () use ($arming): void {
+                $this->beforeApplicationDestroyed(static function () use ($arming): void {
+                    $arming->verifyTranslations();
+                });
+            })->call($testCase);
+        }
     }
 
     /** @param \Closure(object): void $arm */

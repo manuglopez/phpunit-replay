@@ -21,6 +21,8 @@ use Manuglopez\Replay\Record\RunPartial;
 use Manuglopez\Replay\Tests\Support\TempDir;
 use Manuglopez\Replay\Tests\Unit\Record\FakeCoverageDriver;
 use PHPUnit\Framework\Attributes\After;
+use PHPUnit\Framework\Attributes\DataProvider;
+use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\Attributes\RunInSeparateProcess;
 use PHPUnit\Framework\TestCase;
 
@@ -80,6 +82,43 @@ final class LaravelIntegrationTest extends TestCase
         self::assertInstanceOf(ArmLaravelTrackersOnPrepared::class, $subscribers[0]);
         self::assertInstanceOf(FlushUsesDatabaseOnExecutionFinished::class, $subscribers[1]);
         self::assertInstanceOf(ArmLaravelTrackersOnPreparationStarted::class, $subscribers[2], 'arms inside setUp(), for the tables it queries');
+    }
+
+    /**
+     * @return iterable<string, array{string|null, bool, bool}> config file body, artisan present, tracked
+     */
+    public static function translationTrackingProvider(): iterable
+    {
+        yield 'default (per-key) on a Laravel project' => ["<?php\nreturn [];\n", true, true];
+        yield 'explicit per-key' => ["<?php\nreturn ['translations' => 'per-key'];\n", true, true];
+        yield 'conservative arms nothing' => ["<?php\nreturn ['translations' => 'conservative'];\n", true, false];
+        yield 'laravel off arms nothing' => ["<?php\nreturn ['laravel' => 'off'];\n", true, false];
+        yield 'not a Laravel project (no artisan)' => ["<?php\nreturn [];\n", false, false];
+        yield 'no config file at all' => [null, true, true];
+    }
+
+    #[DataProvider('translationTrackingProvider')]
+    #[Group('AC-I1-d')]
+    public function test_translation_tracking_follows_the_config_and_the_laravel_detection(?string $config, bool $artisan, bool $tracked): void
+    {
+        if ($config !== null) {
+            TempDir::write($this->root . '/phpunit-replay.php', $config);
+        }
+
+        if ($artisan) {
+            TempDir::write($this->root . '/artisan', '#!/usr/bin/env php');
+        }
+
+        ReplayState::boot(Mode::Record, $this->root, $this->root . '/.phpunit-replay', 'run-1', new FakeCoverageDriver([]));
+        $recorder = new Recorder(new FakeCoverageDriver([]));
+
+        $wrapper = LaravelIntegration::subscribers($recorder, $this->root)[0];
+        $inProcess = LaravelIntegration::inProcessSubscribers($recorder, $this->root)[0];
+
+        self::assertInstanceOf(ArmLaravelTrackersOnPrepared::class, $wrapper);
+        self::assertInstanceOf(ArmLaravelTrackersOnPrepared::class, $inProcess);
+        self::assertSame($tracked, $wrapper->tracksTranslations(), 'the wrapper child');
+        self::assertSame($tracked, $inProcess->tracksTranslations(), 'the in-process extension');
     }
 
     public function test_augment_returns_the_partial_unchanged_when_no_test_uses_the_database(): void

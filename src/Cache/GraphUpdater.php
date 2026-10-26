@@ -166,6 +166,12 @@ final class GraphUpdater
 
             $this->graph->replaceTablesUnknown(self::withoutReplayed($executed, $replayed), $unknown);
 
+            // Translation keys accumulate like tables (which test file resolves a key moves
+            // with what a static cached), but `*` is what the latest recording of each file
+            // that really ran says: {@see Graph::unionTestTranslations()}. A replayed file
+            // never ran, so its entries stay as they were.
+            $this->graph->unionTestTranslations($partial->translations, self::withoutReplayed($executed, $replayed));
+
             // Whether a file uses a database is a fact about its class, which this run saw for
             // every file it executed (Laravel\Subscribers\ArmLaravelTrackersOnPrepared). A file
             // it only replayed never got that far, and keeps what the graph already says.

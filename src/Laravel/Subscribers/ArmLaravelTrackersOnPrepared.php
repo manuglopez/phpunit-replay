@@ -9,6 +9,7 @@ use Manuglopez\Replay\Laravel\BladeTracker;
 use Manuglopez\Replay\Laravel\MigrationTables;
 use Manuglopez\Replay\Laravel\TableExtractor;
 use Manuglopez\Replay\Laravel\TableTracker;
+use Manuglopez\Replay\Laravel\TranslationTracker;
 use Manuglopez\Replay\Laravel\UsesDatabaseCollector;
 use Manuglopez\Replay\PHPUnit\TestMethodFile;
 use Manuglopez\Replay\Record\Recorder;
@@ -18,8 +19,8 @@ use PHPUnit\Event\Test\Prepared;
 use PHPUnit\Event\Test\PreparedSubscriber;
 
 /**
- * Laravel integration entry point (SPEC.md §10). The trackers (`TableTracker`, `BladeTracker`)
- * are armed once per `Illuminate\Container\Container` instance, guarded by a marker binding
+ * Laravel integration entry point (SPEC.md §10). The trackers (`TableTracker`, `BladeTracker`
+ * and, with `translations => 'per-key'`, `TranslationTracker`) are armed once per `Illuminate\Container\Container` instance, guarded by a marker binding
  * (`phpunit-replay.armed`) whose value says when: `early`, while Laravel bootstraps the test's
  * application, before `setUp()` runs a single testing trait
  * ({@see ArmLaravelTrackersOnPreparationStarted}, `Laravel\TrackersServiceProvider`), or
@@ -49,7 +50,38 @@ final class ArmLaravelTrackersOnPrepared implements PreparedSubscriber
         private readonly Recorder $recorder,
         private readonly UsesDatabaseCollector $usesDatabase,
         private readonly string $projectRoot,
+        private readonly bool $trackTranslations = false,
     ) {
+    }
+
+    /** Whether the translation keys each test resolves are recorded (`translations => 'per-key'`). */
+    public function tracksTranslations(): bool
+    {
+        return $this->trackTranslations;
+    }
+
+    /**
+     * At the end of the test, before Laravel tears its application down
+     * ({@see ArmLaravelTrackersOnPreparationStarted} registers it as a
+     * `beforeApplicationDestroyed()` callback): a translator the test swapped for another
+     * makes the test untraceable ({@see TranslationTracker::verify()}).
+     */
+    public function verifyTranslations(?object $app = null): void
+    {
+        if (! $this->trackTranslations) {
+            return;
+        }
+
+        $containerClass = self::CONTAINER_CLASS;
+
+        if ($app === null && class_exists($containerClass)) {
+            /** @var object $app */
+            $app = $containerClass::getInstance();
+        }
+
+        if ($app !== null) {
+            TranslationTracker::verify($app, $this->recorder);
+        }
     }
 
     public function notify(Prepared $event): void
@@ -138,6 +170,10 @@ final class ArmLaravelTrackersOnPrepared implements PreparedSubscriber
 
         TableTracker::arm($app, $this->recorder);
         BladeTracker::arm($app, $this->recorder, $this->projectRoot);
+
+        if ($this->trackTranslations) {
+            TranslationTracker::arm($app, $this->recorder);
+        }
 
         return $app;
     }

@@ -566,6 +566,7 @@ final class ReplayState
             ['truncated' => $truncated],
             usesDatabase: $recordsEdges ? self::relativeList(self::$usesDatabase?->all() ?? [], $root) : [],
             notCacheable: self::$notCacheable?->all() ?? [],
+            translations: $recordsEdges && $recorder !== null ? self::relativiseMap($recorder->perTestTranslations(), $root, false) : [],
         );
 
         // Laravel integration (SPEC.md §10): the same partial the wrapper folds

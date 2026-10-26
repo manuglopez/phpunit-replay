@@ -23,6 +23,9 @@ final class Recorder
     /** @var array<string, array<string, true>> */
     private array $perTestTables = [];
 
+    /** @var array<string, array<string, true>> */
+    private array $perTestTranslations = [];
+
     /**
      * `$facts` is the `static_declaration_edges` opt-in (SPEC.md §4.3.1). When null — the
      * default, and every existing caller — {@see self::filesWithExecutedLines()} behaves
@@ -97,6 +100,35 @@ final class Recorder
         $this->perTestTables[$this->currentTestFile][strtolower($table)] = true;
     }
 
+    /**
+     * A translation key the open test resolved, for one locale (`Laravel\RecordingTranslator`
+     * links every locale of the fallback chain it looked the key up in). Stored as
+     * `<locale>:<key>`, split by the FIRST `:` when read back (a namespaced key such as
+     * `pkg::messages.title` keeps its own).
+     */
+    public function linkTranslation(string $locale, string $key): void
+    {
+        if ($this->currentTestFile === null || $locale === '' || $key === '') {
+            return;
+        }
+
+        $this->perTestTranslations[$this->currentTestFile][$locale . ':' . $key] = true;
+    }
+
+    /**
+     * The open test may have resolved translation keys nobody could see (`Lang::swap()`, a
+     * mock, a translator this package could not wrap): recorded as the single entry `*`,
+     * which `Cache\Graph::translationsUntrackable()` reads back.
+     */
+    public function markTranslationsUntrackable(): void
+    {
+        if ($this->currentTestFile === null) {
+            return;
+        }
+
+        $this->perTestTranslations[$this->currentTestFile]['*'] = true;
+    }
+
     /** @return array<string, list<string>> test file (abs) => source files (abs) */
     public function perTestFiles(): array
     {
@@ -123,11 +155,31 @@ final class Recorder
         return $out;
     }
 
+    /**
+     * Per test file, the `<locale>:<key>` entries its translator resolved, sorted, plus `*`
+     * when some could not be seen ({@see self::markTranslationsUntrackable()}).
+     *
+     * @return array<string, list<string>>
+     */
+    public function perTestTranslations(): array
+    {
+        $out = [];
+
+        foreach ($this->perTestTranslations as $testFile => $entries) {
+            $names = array_map(strval(...), array_keys($entries));
+            sort($names, SORT_STRING);
+            $out[$testFile] = $names;
+        }
+
+        return $out;
+    }
+
     public function reset(): void
     {
         $this->currentTestFile = null;
         $this->perTestFiles = [];
         $this->perTestTables = [];
+        $this->perTestTranslations = [];
     }
 
     /**
