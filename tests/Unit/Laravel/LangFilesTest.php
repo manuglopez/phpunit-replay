@@ -215,6 +215,10 @@ final class LangFilesTest extends TestCase
         $flat = LangFiles::flatten("<?php\n\ndeclare(strict_types=1);\n\nreturn array('a' => array('b' => 'c'));\n", self::messages());
 
         self::assertSame(['messages.a.b' => '"c"'], $flat);
+        self::assertSame(
+            ['messages.a' => '"b"'],
+            LangFiles::flatten("<?php\n\ndeclare(strict_types=1);\ndeclare(ticks=1);\n\nreturn ['a' => 'b'];\n", self::messages()),
+        );
     }
 
     #[Group('I2-b')]

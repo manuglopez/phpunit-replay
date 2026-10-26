@@ -253,7 +253,7 @@ final class LangFiles
 
         $return = $statements[0] ?? null;
 
-        if (count($statements) !== 1 || ! $return instanceof Return_ || ! $return->expr instanceof Array_) {
+        if (count($statements) > 1 || ! $return instanceof Return_ || ! $return->expr instanceof Array_) {
             throw new UnexpectedValueException('Not `return <array literal>;`.');
         }
 
