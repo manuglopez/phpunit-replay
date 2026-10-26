@@ -752,6 +752,7 @@ final class GraphTest extends TestCase
             'branches' => 2,
             'results' => 3,
             'tables' => 2,
+            'translations' => 0,
         ], $graph->stats());
     }
 
