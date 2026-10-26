@@ -6,6 +6,7 @@ namespace Manuglopez\Replay\Tests\Unit\Record;
 
 use Manuglopez\Replay\Record\RunPartial;
 use Manuglopez\Replay\Tests\Support\TempDir;
+use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\Attributes\Test;
 use PHPUnit\Framework\TestCase;
 
@@ -148,6 +149,102 @@ final class RunPartialTest extends TestCase
     }
 
     #[Test]
+    #[Group('AC-I1-b')]
+    public function load_merges_translations_across_workers_by_union_per_test_file(): void
+    {
+        $this->writeWorker(1, [
+            'edges' => [],
+            'results' => ['App\Tests\A::testA' => self::resultFixture(0)],
+            'tables' => [],
+            'meta' => ['driver' => 'piggyback', 'truncated' => false],
+            'translations' => ['tests/ATest.php' => ['en:messages.a'], 'tests/SharedTest.php' => ['en:x']],
+        ]);
+
+        $this->writeWorker(2, [
+            'edges' => [],
+            'results' => ['App\Tests\B::testB' => self::resultFixture(0)],
+            'tables' => [],
+            'meta' => ['driver' => 'piggyback', 'truncated' => false],
+            'translations' => ['tests/BTest.php' => ['*'], 'tests/SharedTest.php' => ['en:x', 'es:y']],
+        ]);
+
+        $partial = RunPartial::load($this->runDir);
+        self::assertNotNull($partial);
+
+        self::assertSame(
+            [
+                'tests/ATest.php' => ['en:messages.a'],
+                'tests/SharedTest.php' => ['en:x', 'es:y'],
+                'tests/BTest.php' => ['*'],
+            ],
+            $partial->translations,
+        );
+    }
+
+    #[Test]
+    #[Group('AC-I1-b')]
+    public function a_worker_that_recorded_no_translations_does_not_hide_the_others(): void
+    {
+        // `[]` (an empty list to json_decode) sorts first: it must not decide the merge shape.
+        $this->writeWorker(1, [
+            'edges' => [],
+            'results' => ['App\Tests\A::testA' => self::resultFixture(0)],
+            'tables' => [],
+            'meta' => ['driver' => 'piggyback', 'truncated' => false],
+            'translations' => [],
+        ]);
+        $this->writeWorker(2, [
+            'edges' => [],
+            'results' => ['App\Tests\B::testB' => self::resultFixture(0)],
+            'tables' => [],
+            'meta' => ['driver' => 'piggyback', 'truncated' => false],
+            'translations' => ['tests/BTest.php' => ['en:messages.b']],
+        ]);
+
+        $partial = RunPartial::load($this->runDir);
+        self::assertNotNull($partial);
+
+        self::assertSame(['tests/BTest.php' => ['en:messages.b']], $partial->translations);
+    }
+
+    #[Test]
+    #[Group('AC-I1-b')]
+    public function load_ignores_malformed_translation_entries(): void
+    {
+        $this->writeWorker(1, [
+            'edges' => [],
+            'results' => ['App\Tests\A::testA' => self::resultFixture(0)],
+            'tables' => [],
+            'meta' => ['driver' => 'piggyback', 'truncated' => false],
+        ]);
+        file_put_contents($this->runDir . '/worker-1-translations.json', (string) json_encode([
+            'tests/ATest.php' => ['en:ok', 7, null],
+            'tests/BTest.php' => 'not a list',
+            5 => ['en:numeric-file-key'],
+        ]));
+
+        $partial = RunPartial::load($this->runDir);
+        self::assertNotNull($partial);
+
+        self::assertSame(['tests/ATest.php' => ['en:ok']], $partial->translations);
+    }
+
+    #[Test]
+    public function load_defaults_translations_to_empty_when_their_file_is_missing(): void
+    {
+        $this->writeWorker(1, [
+            'edges' => [],
+            'results' => ['App\Tests\A::testA' => self::resultFixture(0)],
+            'tables' => [],
+            'meta' => ['driver' => 'piggyback', 'truncated' => false],
+        ]);
+
+        $partial = RunPartial::load($this->runDir);
+        self::assertNotNull($partial);
+        self::assertSame([], $partial->translations);
+    }
+
+    #[Test]
     public function load_defaults_coverage_to_empty_when_its_file_is_missing(): void
     {
         $this->writeWorker(1, [
@@ -210,6 +307,7 @@ final class RunPartialTest extends TestCase
      *     tables: array<string, list<string>>,
      *     meta: array<string, mixed>,
      *     usesDatabase?: list<string>,
+     *     translations?: array<string, list<string>>,
      *     coverage?: array<string, string>,
      * } $data
      */
@@ -218,6 +316,10 @@ final class RunPartialTest extends TestCase
         file_put_contents($this->runDir . '/worker-' . $token . '-edges.json', (string) json_encode($data['edges']));
         file_put_contents($this->runDir . '/worker-' . $token . '-results.json', (string) json_encode($data['results']));
         file_put_contents($this->runDir . '/worker-' . $token . '-tables.json', (string) json_encode($data['tables']));
+
+        if (isset($data['translations'])) {
+            file_put_contents($this->runDir . '/worker-' . $token . '-translations.json', (string) json_encode($data['translations']));
+        }
 
         if (isset($data['coverage'])) {
             file_put_contents($this->runDir . '/worker-' . $token . '-coverage.json', (string) json_encode($data['coverage']));

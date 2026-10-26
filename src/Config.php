@@ -37,6 +37,9 @@ final readonly class Config
     /** @var list<string> how a schema dump change selects (docs/configuration.md `schema_dump`) */
     private const SCHEMA_DUMP_MODES = ['conservative', 'per-table'];
 
+    /** @var list<string> how a translation file change selects (docs/configuration.md `translations`) */
+    private const TRANSLATIONS_MODES = ['per-key', 'conservative'];
+
     /** Laravel's own migrations directory: always one of {@see self::$migrationPaths}' defaults. */
     public const DEFAULT_MIGRATION_PATHS = ['database/migrations'];
 
@@ -48,6 +51,10 @@ final readonly class Config
      *        (`Laravel\MigrationPaths`, which adds `database/migrations` and what it detects)
      * @param string $migrations `precise` or `conservative` (`Laravel\Rules\MigrationRule`)
      * @param string $schemaDump `conservative` or `per-table` (`Laravel\Rules\SchemaDumpRule`)
+     * @param string $translations `per-key` or `conservative`: whether the keys each test resolves
+     *        are recorded (`Laravel\TranslationTracker`) so that a translation file change selects
+     *        only the tests that use a changed key; `conservative` keeps `lang/**` selecting every
+     *        test. No environment override, like `migrations`.
      */
     public function __construct(
         public ?string $stateDir,
@@ -71,6 +78,7 @@ final readonly class Config
         public array $migrationPaths = self::DEFAULT_MIGRATION_PATHS,
         public string $migrations = 'precise',
         public string $schemaDump = 'conservative',
+        public string $translations = 'per-key',
     ) {
     }
 
@@ -98,6 +106,7 @@ final readonly class Config
             migrationPaths: self::DEFAULT_MIGRATION_PATHS,
             migrations: 'precise',
             schemaDump: 'conservative',
+            translations: 'per-key',
         );
     }
 
@@ -134,6 +143,7 @@ final readonly class Config
             migrationPaths: is_array($values['migration_paths'] ?? null) ? self::stringListOrDefault($values['migration_paths']) : $defaults->migrationPaths,
             migrations: self::enumOrDefault($values['migrations'] ?? null, self::MIGRATIONS_MODES, $defaults->migrations),
             schemaDump: self::enumOrDefault($values['schema_dump'] ?? null, self::SCHEMA_DUMP_MODES, $defaults->schemaDump),
+            translations: self::enumOrDefault($values['translations'] ?? null, self::TRANSLATIONS_MODES, $defaults->translations),
         );
     }
 
@@ -183,6 +193,7 @@ final readonly class Config
             migrationPaths: $defaults->migrationPaths,
             migrations: $defaults->migrations,
             schemaDump: $defaults->schemaDump,
+            translations: $defaults->translations,
         );
     }
 
@@ -248,6 +259,7 @@ final readonly class Config
      *     migrationPaths?: list<string>,
      *     migrations?: string,
      *     schemaDump?: string,
+     *     translations?: string,
      * } $overrides
      */
     public function with(array $overrides): self
@@ -274,6 +286,7 @@ final readonly class Config
             migrationPaths: array_key_exists('migrationPaths', $overrides) ? $overrides['migrationPaths'] : $this->migrationPaths,
             migrations: array_key_exists('migrations', $overrides) ? $overrides['migrations'] : $this->migrations,
             schemaDump: array_key_exists('schemaDump', $overrides) ? $overrides['schemaDump'] : $this->schemaDump,
+            translations: array_key_exists('translations', $overrides) ? $overrides['translations'] : $this->translations,
         );
     }
 

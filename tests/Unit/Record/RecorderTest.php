@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Manuglopez\Replay\Tests\Unit\Record;
 
 use Manuglopez\Replay\Record\Recorder;
+use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\Attributes\Test;
 use PHPUnit\Framework\TestCase;
 
@@ -166,6 +167,88 @@ final class RecorderTest extends TestCase
 
         self::assertSame([], $recorder->perTestFiles());
         self::assertSame([], $recorder->perTestTables());
+    }
+
+    #[Test]
+    #[Group('AC-I1-a')]
+    public function link_translation_records_locale_key_entries_sorted_and_unique_for_the_open_test(): void
+    {
+        $recorder = new Recorder(new FakeCoverageDriver([[], []]));
+
+        $recorder->beginTest('/project/tests/FooTest.php');
+        $recorder->linkTranslation('es', 'messages.welcome');
+        $recorder->linkTranslation('en', 'messages.welcome');
+        $recorder->linkTranslation('es', 'messages.welcome');
+        $recorder->linkTranslation('en', 'Hello :name');
+        $recorder->endTest();
+
+        $recorder->beginTest('/project/tests/BarTest.php');
+        $recorder->linkTranslation('en', 'pkg::messages.only.here');
+        $recorder->endTest();
+
+        self::assertSame(
+            [
+                '/project/tests/FooTest.php' => ['en:Hello :name', 'en:messages.welcome', 'es:messages.welcome'],
+                '/project/tests/BarTest.php' => ['en:pkg::messages.only.here'],
+            ],
+            $recorder->perTestTranslations(),
+        );
+    }
+
+    #[Test]
+    #[Group('AC-I1-a')]
+    public function link_translation_ignores_an_empty_locale_or_key_and_a_call_outside_a_test(): void
+    {
+        $recorder = new Recorder(new FakeCoverageDriver([[]]));
+
+        $recorder->linkTranslation('en', 'messages.welcome');
+        $recorder->markTranslationsUntrackable();
+
+        $recorder->beginTest('/project/tests/FooTest.php');
+        $recorder->linkTranslation('', 'messages.welcome');
+        $recorder->linkTranslation('en', '');
+        $recorder->endTest();
+
+        self::assertSame([], $recorder->perTestTranslations());
+    }
+
+    #[Test]
+    #[Group('AC-I1-e')]
+    public function mark_translations_untrackable_records_the_star_entry_alongside_the_keys(): void
+    {
+        $recorder = new Recorder(new FakeCoverageDriver([[], []]));
+
+        $recorder->beginTest('/project/tests/SwapTest.php');
+        $recorder->linkTranslation('en', 'messages.welcome');
+        $recorder->markTranslationsUntrackable();
+        $recorder->markTranslationsUntrackable();
+        $recorder->endTest();
+
+        $recorder->beginTest('/project/tests/OnlyStarTest.php');
+        $recorder->markTranslationsUntrackable();
+        $recorder->endTest();
+
+        self::assertSame(
+            [
+                '/project/tests/SwapTest.php' => ['*', 'en:messages.welcome'],
+                '/project/tests/OnlyStarTest.php' => ['*'],
+            ],
+            $recorder->perTestTranslations(),
+        );
+    }
+
+    #[Test]
+    #[Group('AC-I1-a')]
+    public function reset_forgets_the_translations_too(): void
+    {
+        $recorder = new Recorder(new FakeCoverageDriver([[]]));
+        $recorder->beginTest('/project/tests/FooTest.php');
+        $recorder->linkTranslation('en', 'messages.welcome');
+        $recorder->endTest();
+
+        $recorder->reset();
+
+        self::assertSame([], $recorder->perTestTranslations());
     }
 
     #[Test]

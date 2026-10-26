@@ -5,7 +5,9 @@ declare(strict_types=1);
 namespace Manuglopez\Replay\Tests\Unit;
 
 use Manuglopez\Replay\Config;
+use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Runner\Extension\ParameterCollection;
 
 /** `migration_paths` and `migrations` (docs/configuration.md). */
 final class ConfigMigrationsTest extends TestCase
@@ -39,5 +41,27 @@ final class ConfigMigrationsTest extends TestCase
         self::assertSame('conservative', Config::fromArray(['migrations' => 'conservative'])->migrations);
         self::assertSame('precise', Config::fromArray(['migrations' => 'loose'])->migrations);
         self::assertSame('conservative', Config::defaults()->with(['migrations' => 'conservative'])->migrations);
+    }
+
+    #[Group('AC-I1-d')]
+    public function test_translations_mode_defaults_to_per_key_and_accepts_conservative(): void
+    {
+        self::assertSame('per-key', Config::defaults()->translations);
+        self::assertSame('per-key', Config::fromArray([])->translations);
+        self::assertSame('per-key', Config::fromArray(['translations' => 'per-key'])->translations);
+        self::assertSame('conservative', Config::fromArray(['translations' => 'conservative'])->translations);
+        self::assertSame('per-key', Config::fromArray(['translations' => 'loose'])->translations, 'an unknown value: the default');
+        self::assertSame('per-key', Config::fromArray(['translations' => true])->translations, 'not a string: the default');
+        self::assertSame('conservative', Config::defaults()->with(['translations' => 'conservative'])->translations);
+        self::assertSame('per-key', Config::defaults()->with(['laravel' => 'off'])->translations, 'with() keeps what it is not asked to change');
+    }
+
+    #[Group('AC-I1-d')]
+    public function test_the_extension_parameters_and_the_environment_leave_translations_alone(): void
+    {
+        $config = Config::fromArray(['translations' => 'conservative']);
+
+        self::assertSame('conservative', $config->mergeEnv(['PHPUNIT_REPLAY_MODE' => 'record'])->translations, 'no environment override');
+        self::assertSame('per-key', Config::fromExtensionParameters(ParameterCollection::fromArray([]))->translations);
     }
 }

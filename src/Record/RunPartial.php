@@ -23,6 +23,9 @@ final readonly class RunPartial
      * @param list<string> $notCacheable project-relative test files and `Class::method` ids
      * @param array<string, string> $coverage project-relative test file => coverage snapshot
      *        key (Record\CoverageSnapshots, SPEC.md §3.2 last paragraph)
+     * @param array<string, list<string>> $translations project-relative test file => sorted
+     *        `<locale>:<key>` entries its translator resolved, or `*` when not trackable
+     *        (Laravel\TranslationTracker, Cache\Graph::testTranslations())
      */
     public function __construct(
         public array $edges,
@@ -32,6 +35,7 @@ final readonly class RunPartial
         public array $usesDatabase = [],
         public array $notCacheable = [],
         public array $coverage = [],
+        public array $translations = [],
     ) {
     }
 
@@ -66,6 +70,9 @@ final readonly class RunPartial
         $coverageJson = self::readMerged($runDir, 'coverage.json');
         $rawCoverage = $coverageJson !== null ? Json::decodeArray($coverageJson) : null;
 
+        $translationsJson = self::readMerged($runDir, 'translations.json');
+        $rawTranslations = $translationsJson !== null ? Json::decodeArray($translationsJson) : null;
+
         return new self(
             self::normalizeStringListMap($rawEdges ?? []),
             self::normalizeResults($rawResults),
@@ -74,6 +81,7 @@ final readonly class RunPartial
             self::normalizeStringList($rawUsesDatabase ?? []),
             self::normalizeStringList($rawNotCacheable ?? []),
             self::normalizeStringMap($rawCoverage ?? []),
+            self::normalizeStringListMap($rawTranslations ?? []),
         );
     }
 
@@ -195,7 +203,9 @@ final readonly class RunPartial
         $mapOut = [];
 
         foreach ($partials as $partial) {
-            if (! is_array($partial)) {
+            // `[]` is both an empty list and an empty map: a worker that recorded nothing must
+            // not decide the shape (it would drop every other worker's map).
+            if (! is_array($partial) || $partial === []) {
                 continue;
             }
 

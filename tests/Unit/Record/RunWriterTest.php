@@ -9,6 +9,7 @@ use Manuglopez\Replay\Record\ResultCollector;
 use Manuglopez\Replay\Record\RunPartial;
 use Manuglopez\Replay\Record\RunWriter;
 use Manuglopez\Replay\Tests\Support\TempDir;
+use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\Attributes\Test;
 use PHPUnit\Framework\TestCase;
 
@@ -89,6 +90,35 @@ final class RunWriterTest extends TestCase
 
         self::assertSame('fake', $partial->meta['driver']);
         self::assertFalse($partial->meta['truncated']);
+    }
+
+    #[Test]
+    #[Group('AC-I1-a')]
+    public function flush_writes_relativised_translations_and_drops_test_files_outside_the_root(): void
+    {
+        $recorder = new Recorder(new FakeCoverageDriver([[], []]));
+
+        $recorder->beginTest($this->projectRoot . '/tests/FooTest.php');
+        $recorder->linkTranslation('es', 'messages.welcome');
+        $recorder->linkTranslation('en', 'messages.welcome');
+        $recorder->markTranslationsUntrackable();
+        $recorder->endTest();
+
+        $recorder->beginTest('/elsewhere/tests/OutsideTest.php');
+        $recorder->linkTranslation('en', 'messages.outside');
+        $recorder->endTest();
+
+        $ok = (new RunWriter($this->runDir, $this->projectRoot))->flush($recorder, new ResultCollector(), ['driver' => 'fake']);
+
+        self::assertTrue($ok);
+        self::assertFileExists($this->runDir . '/translations.json');
+
+        $partial = RunPartial::load($this->runDir);
+        self::assertNotNull($partial);
+        self::assertSame(
+            ['tests/FooTest.php' => ['*', 'en:messages.welcome', 'es:messages.welcome']],
+            $partial->translations,
+        );
     }
 
     #[Test]
@@ -281,6 +311,7 @@ final class RunWriterTest extends TestCase
         self::assertFileExists($this->runDir . '/worker-3-edges.json');
         self::assertFileExists($this->runDir . '/worker-3-results.json');
         self::assertFileExists($this->runDir . '/worker-3-tables.json');
+        self::assertFileExists($this->runDir . '/worker-3-translations.json');
         self::assertFileExists($this->runDir . '/worker-3-meta.json');
         self::assertFileExists($this->runDir . '/worker-3-uses_database.json');
     }

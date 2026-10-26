@@ -57,7 +57,7 @@ final class RunWriter
     }
 
     /**
-     * Writes edges.json, results.json, tables.json, not_cacheable.json, coverage.json and
+     * Writes edges.json, results.json, tables.json, translations.json, not_cacheable.json, coverage.json and
      * meta.json atomically. `$notCacheable` and `$coverageSnapshots` are optional so every
      * existing caller keeps working unchanged; omitting either simply writes an empty
      * list/map.
@@ -70,6 +70,7 @@ final class RunWriter
     {
         $edges = $this->relativiseEdges($recorder->perTestFiles());
         $tables = $this->relativiseTables($recorder->perTestTables());
+        $translations = $this->relativiseTables($recorder->perTestTranslations());
         $results = $this->relativiseResults($collector->all());
         $notCacheableList = $notCacheable?->all() ?? [];
         $coverageMap = $coverageSnapshots ?? [];
@@ -79,17 +80,19 @@ final class RunWriter
         $edgesJson = Json::encode($edges);
         $resultsJson = Json::encode($results);
         $tablesJson = Json::encode($tables);
+        $translationsJson = Json::encode($translations);
         $notCacheableJson = Json::encode($notCacheableList);
         $coverageJson = Json::encode($coverageMap);
         $metaJson = Json::encode($meta);
 
-        if ($edgesJson === null || $resultsJson === null || $tablesJson === null || $notCacheableJson === null || $coverageJson === null || $metaJson === null) {
+        if ($edgesJson === null || $resultsJson === null || $tablesJson === null || $translationsJson === null || $notCacheableJson === null || $coverageJson === null || $metaJson === null) {
             return false;
         }
 
         $ok = AtomicFile::write($this->pathFor('edges.json'), $edgesJson);
         $ok = AtomicFile::write($this->pathFor('results.json'), $resultsJson) && $ok;
         $ok = AtomicFile::write($this->pathFor('tables.json'), $tablesJson) && $ok;
+        $ok = AtomicFile::write($this->pathFor('translations.json'), $translationsJson) && $ok;
         $ok = AtomicFile::write($this->pathFor('not_cacheable.json'), $notCacheableJson) && $ok;
         $ok = AtomicFile::write($this->pathFor('coverage.json'), $coverageJson) && $ok;
         $ok = AtomicFile::write($this->pathFor('meta.json'), $metaJson) && $ok;
