@@ -82,7 +82,6 @@ final readonly class ArmLaravelTrackersOnPreparationStarted implements Preparati
         // these callbacks first thing in its `tearDown()`, before it flushes the container.
         if ($arming->tracksTranslations() && method_exists($testCase, 'beforeApplicationDestroyed')) {
             (function () use ($arming): void {
-                /** @phpstan-ignore method.notFound */
                 $this->beforeApplicationDestroyed(static function () use ($arming): void {
                     $arming->verifyTranslations();
                 });

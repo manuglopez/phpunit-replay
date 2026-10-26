@@ -28,3 +28,40 @@ class RegisterProviders
     {
     }
 }
+
+namespace Illuminate\Translation;
+
+// The part of Laravel's translator `Laravel\RecordingTranslator` extends: `get()`'s signature as
+// Illuminate declares it, and the protected `localeArray()` that honours `determineLocalesUsing()`.
+class Translator
+{
+    /** @var string */
+    protected $locale;
+
+    /**
+     * @param string $key
+     * @param array<string, mixed> $replace
+     * @param string|null $locale
+     * @param bool $fallback
+     * @return string|array<mixed>
+     */
+    public function get($key, array $replace = [], $locale = null, $fallback = true)
+    {
+        return '';
+    }
+
+    /** @return string */
+    public function getLocale()
+    {
+        return '';
+    }
+
+    /**
+     * @param string|null $locale
+     * @return array<int, string>
+     */
+    protected function localeArray($locale)
+    {
+        return [];
+    }
+}

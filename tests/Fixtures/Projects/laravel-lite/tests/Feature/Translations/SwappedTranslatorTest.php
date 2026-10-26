@@ -11,7 +11,7 @@ class SwappedTranslatorTest extends TestCase
 {
     public function test_a_swapped_translator_cannot_be_traced(): void
     {
-        Lang::swap(new class {
+        Lang::swap(new class () {
             public function get(string $key): string
             {
                 return 'swapped:' . $key;

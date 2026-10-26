@@ -82,7 +82,7 @@ final class TranslationTrackerTest extends TestCase
     #[Group('AC-I1-e')]
     public function test_case_b_a_subclass_of_the_translator_is_left_alone_and_not_traceable(): void
     {
-        $custom = new class(new \stdClass(), 'es') extends Translator {};
+        $custom = new class (new \stdClass(), 'es') extends Translator {};
         $app = new FakeTranslatorApp(static fn (): object => $custom);
         TranslationTracker::arm($app, $this->recorder);
 
@@ -114,7 +114,7 @@ final class TranslationTrackerTest extends TestCase
     #[Group('AC-I1-e')]
     public function test_a_container_that_cannot_say_whether_it_resolved_is_not_traceable(): void
     {
-        $app = new class {
+        $app = new class () {
             public function extend(string $abstract, Closure $closure): void
             {
             }
