@@ -129,8 +129,11 @@ final class RecordingTranslatorTest extends TestCase
         $original->setFallback('en');
         $original->preload(['es' => ['a' => 'b']]);
         $original->determineLocalesUsing($callback = static fn (array $locales): array => $locales);
+        $original->remember('state of a parent class, private to it');
 
         $wrapped = RecordingTranslator::wrapping($original, $this->recorder);
+
+        self::assertSame('state of a parent class, private to it', $wrapped->remembered());
 
         self::assertInstanceOf(Translator::class, $wrapped);
         self::assertNotSame($original, $wrapped);

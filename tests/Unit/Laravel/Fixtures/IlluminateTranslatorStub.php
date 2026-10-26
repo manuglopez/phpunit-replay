@@ -14,7 +14,30 @@ declare(strict_types=1);
 
 namespace Illuminate\Translation;
 
-class Translator
+/**
+ * Laravel's `Translator` extends `NamespacedItemResolver`, which holds the parsed-key cache.
+ * The private property is an addition of this stand-in: state that only a walk up the class
+ * hierarchy can copy (a Laravel upgrade could add one).
+ */
+class NamespacedItemResolver
+{
+    /** @var array<string, mixed> */
+    protected $parsed = [];
+
+    private string $resolverMemo = '';
+
+    public function remember(string $memo): void
+    {
+        $this->resolverMemo = $memo;
+    }
+
+    public function remembered(): string
+    {
+        return $this->resolverMemo;
+    }
+}
+
+class Translator extends NamespacedItemResolver
 {
     /** @var array<string, array<string, string>> */
     protected $loaded = [];
@@ -27,9 +50,6 @@ class Translator
 
     /** @var (callable(array<int, string>): array<int, string>)|null */
     protected $determineLocalesUsing;
-
-    /** @var array<string, mixed> */
-    protected $parsed = [];
 
     /** @var object */
     protected $loader;

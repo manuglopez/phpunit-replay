@@ -47,7 +47,7 @@ final class RecordingTranslator extends Translator
 
         for ($class = new ReflectionClass(Translator::class); $class !== false; $class = $class->getParentClass()) {
             foreach ($class->getProperties() as $property) {
-                if (! $property->isStatic() && $property->getDeclaringClass()->getName() === $class->getName()) {
+                if (! $property->isStatic()) {
                     $property->setValue($wrapper, $property->getValue($original));
                 }
             }
@@ -68,9 +68,7 @@ final class RecordingTranslator extends Translator
             $requested = is_string($locale) && $locale !== '' ? $locale : $this->getLocale();
 
             foreach ($fallback ? $this->localeArray($requested) : [$requested] as $candidate) {
-                if (is_string($candidate)) {
-                    $this->recorder->linkTranslation($candidate, $key);
-                }
+                $this->recorder->linkTranslation($candidate, $key);
             }
         }
 

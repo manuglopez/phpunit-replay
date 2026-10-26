@@ -185,6 +185,32 @@ final class TranslationTrackerTest extends TestCase
     }
 
     #[Group('AC-I1-e')]
+    public function test_a_container_with_resolved_but_without_make_is_not_traceable_when_verifying(): void
+    {
+        TranslationTracker::verify(new class () {
+            public function resolved(string $abstract): bool
+            {
+                return false;
+            }
+        }, $this->recorder);
+
+        self::assertSame(['*'], $this->recorded());
+    }
+
+    #[Group('AC-I1-e')]
+    public function test_a_container_with_make_but_without_resolved_is_not_traceable_when_verifying(): void
+    {
+        TranslationTracker::verify(new class () {
+            public function make(string $abstract): object
+            {
+                return new \stdClass();
+            }
+        }, $this->recorder);
+
+        self::assertSame(['*'], $this->recorded());
+    }
+
+    #[Group('AC-I1-e')]
     public function test_a_translator_that_cannot_be_resolved_is_not_traceable(): void
     {
         $app = new FakeTranslatorApp(static fn (): never => throw new RuntimeException('boom'));
