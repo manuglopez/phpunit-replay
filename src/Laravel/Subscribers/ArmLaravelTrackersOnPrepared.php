@@ -20,7 +20,8 @@ use PHPUnit\Event\Test\PreparedSubscriber;
 
 /**
  * Laravel integration entry point (SPEC.md §10). The trackers (`TableTracker`, `BladeTracker`
- * and, with `translations => 'per-key'`, `TranslationTracker`) are armed once per `Illuminate\Container\Container` instance, guarded by a marker binding
+ * and, with `translations => 'per-key'`, `TranslationTracker`) are armed once per
+ * `Illuminate\Container\Container` instance, guarded by a marker binding
  * (`phpunit-replay.armed`) whose value says when: `early`, while Laravel bootstraps the test's
  * application, before `setUp()` runs a single testing trait
  * ({@see ArmLaravelTrackersOnPreparationStarted}, `Laravel\TrackersServiceProvider`), or
