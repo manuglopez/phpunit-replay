@@ -162,6 +162,7 @@ final class LangFilesTest extends TestCase
             'a string' => ['"hola"'],
             'a number' => ['12'],
             'null' => ['null'],
+            'a number PHP cannot encode back' => ['{"a": 1e999}'],
             'a bom' => ["\xEF\xBB\xBF{\"a\": \"b\"}"],
         ];
     }
