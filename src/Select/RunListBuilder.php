@@ -27,7 +27,7 @@ final class RunListBuilder
     private ?array $candidates = null;
 
     /**
-     * @param array{migration?: Rule, schema?: Rule, sibling?: Rule, blade?: Rule} $extraRules Laravel-only rules, docs/INTERNALS.md "Laravel"
+     * @param array{migration?: Rule, schema?: Rule, sibling?: Rule, blade?: Rule, translation?: Rule} $extraRules Laravel-only rules, docs/INTERNALS.md "Laravel"
      * @param bool $staticDeclarationEdges the `static_declaration_edges` opt-in (SPEC.md §4.3.1);
      *        turns on the unattributed half of the {@see ResiduePatterns} fallback, and nothing
      *        else here

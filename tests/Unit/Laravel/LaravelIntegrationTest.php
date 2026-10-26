@@ -11,6 +11,7 @@ use Manuglopez\Replay\Laravel\Rules\BladeRule;
 use Manuglopez\Replay\Laravel\Rules\MigrationRule;
 use Manuglopez\Replay\Laravel\Rules\SchemaDumpRule;
 use Manuglopez\Replay\Laravel\Rules\SiblingRule;
+use Manuglopez\Replay\Laravel\Rules\TranslationRule;
 use Manuglopez\Replay\Laravel\Subscribers\ArmLaravelTrackersOnPreparationStarted;
 use Manuglopez\Replay\Laravel\Subscribers\ArmLaravelTrackersOnPrepared;
 use Manuglopez\Replay\Laravel\Subscribers\FlushUsesDatabaseOnExecutionFinished;
@@ -44,15 +45,23 @@ final class LaravelIntegrationTest extends TestCase
         ReplayState::reset();
     }
 
-    public function test_rules_returns_migration_schema_sibling_and_blade_in_that_order(): void
+    public function test_rules_returns_migration_schema_sibling_blade_and_translation_in_that_order(): void
     {
         $rules = LaravelIntegration::rules(new Graph($this->root), $this->root);
 
-        self::assertSame(['migration', 'schema', 'sibling', 'blade'], array_keys($rules));
+        self::assertSame(['migration', 'schema', 'sibling', 'blade', 'translation'], array_keys($rules));
         self::assertInstanceOf(MigrationRule::class, $rules['migration']);
         self::assertInstanceOf(SchemaDumpRule::class, $rules['schema']);
         self::assertInstanceOf(SiblingRule::class, $rules['sibling']);
         self::assertInstanceOf(BladeRule::class, $rules['blade']);
+        self::assertInstanceOf(TranslationRule::class, $rules['translation']);
+    }
+
+    public function test_conservative_translations_register_no_translation_rule(): void
+    {
+        $rules = LaravelIntegration::rules(new Graph($this->root), $this->root, null, Config::defaults()->with(['translations' => 'conservative']));
+
+        self::assertSame(['migration', 'schema', 'sibling', 'blade'], array_keys($rules));
     }
 
     /**

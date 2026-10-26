@@ -10,6 +10,7 @@ use Manuglopez\Replay\Laravel\Rules\BladeRule;
 use Manuglopez\Replay\Laravel\Rules\MigrationRule;
 use Manuglopez\Replay\Laravel\Rules\SchemaDumpRule;
 use Manuglopez\Replay\Laravel\Rules\SiblingRule;
+use Manuglopez\Replay\Laravel\Rules\TranslationRule;
 use Manuglopez\Replay\Laravel\Subscribers\ArmLaravelTrackersOnPreparationStarted;
 use Manuglopez\Replay\Laravel\Subscribers\ArmLaravelTrackersOnPrepared;
 use Manuglopez\Replay\Laravel\Subscribers\FlushUsesDatabaseOnExecutionFinished;
@@ -36,24 +37,33 @@ final class LaravelIntegration
     }
 
     /**
-     * @return array{migration: Rule, schema: Rule, sibling: Rule, blade: Rule} inserted per
-     *         SPEC.md §7.2 order: Migration and SchemaDump first, Sibling/Blade after TestFile
-     *         and before Watch. `$graph` is part of the contract for symmetry with the rest of
-     *         the chain, but unused here — these rules read it from the `Context` each
-     *         `apply()` call carries. `$projectRoot` and `$config` say where the migrations
-     *         are and how they select (`MigrationPaths`, `migrations`); `$stateDir` is where
-     *         `BladeRule` keeps its template references across runs.
+     * @return array{migration: Rule, schema: Rule, sibling: Rule, blade: Rule, translation?: Rule} inserted per
+     *         SPEC.md §7.2 order: Migration and SchemaDump first, Sibling/Blade/Translation
+     *         after TestFile and before Watch. `$graph` is part of the contract for symmetry
+     *         with the rest of the chain, but unused here — these rules read it from the
+     *         `Context` each `apply()` call carries. `$projectRoot` and `$config` say where the
+     *         migrations are and how they select (`MigrationPaths`, `migrations`); `$stateDir`
+     *         is where `BladeRule` keeps its template references across runs.
+     *         `TranslationRule` only with `translations => 'per-key'` (the default): with
+     *         `conservative` no key is recorded, and `lang/**` stays a watch default
+     *         (`Select\WatchDefaults\Laravel`) that runs every test.
      */
     public static function rules(Graph $graph, string $projectRoot, ?string $stateDir = null, ?Config $config = null): array
     {
         $config ??= Config::defaults();
 
-        return [
+        $rules = [
             'migration' => new MigrationRule(MigrationPaths::for($projectRoot, $config), $config->migrations),
             'schema' => new SchemaDumpRule($config->schemaDump),
             'sibling' => new SiblingRule(),
             'blade' => new BladeRule(BladeRule::cacheFileIn($stateDir)),
         ];
+
+        if ($config->translations === 'per-key') {
+            $rules['translation'] = new TranslationRule();
+        }
+
+        return $rules;
     }
 
     /**
@@ -62,7 +72,7 @@ final class LaravelIntegration
      * (`Select\RunListBuilder`/`Console\Runner\RunPipeline`, `PHPUnit\ReplayState::bootInProcess()`
      * via its `prepareReplay()`, `Console\Commands\ExplainCommand`).
      *
-     * @return array{migration: Rule, schema: Rule, sibling: Rule, blade: Rule}|array{}
+     * @return array{migration: Rule, schema: Rule, sibling: Rule, blade: Rule, translation?: Rule}|array{}
      */
     public static function rulesFor(Graph $graph, string $projectRoot, Config $config, ?string $stateDir = null): array
     {
