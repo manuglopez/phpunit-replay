@@ -103,7 +103,7 @@ final class LaravelLiteParallelDatabaseTest extends TestCase
      * exact fixture crashes with exit code 1 and ZERO tests ever attempted (no PHPUnit
      * summary at all, just that exception). The wrapper must never do that: it should warn
      * and fall back to running Paratest without the `--runner` injection, so PHPUnit still
-     * gets to run all 4 tests (each individually erroring, since `bootstrap/app.php` is also
+     * gets to run all 12 tests (each individually erroring, since `bootstrap/app.php` is also
      * what every ordinary test's own `createApplication()` needs — unrelated to this fix,
      * just a side effect of this contrived setup) instead of the whole process crashing
      * before a single test starts.
@@ -120,6 +120,6 @@ final class LaravelLiteParallelDatabaseTest extends TestCase
             $result['stderr'],
         );
         self::assertStringNotContainsString('Parallel Runner unable to resolve application', $result['stdout']);
-        self::assertStringContainsString('Tests: 4', $result['stdout']);
+        self::assertStringContainsString('Tests: 12', $result['stdout']);
     }
 }
