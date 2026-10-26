@@ -168,6 +168,40 @@ final class NonEdgeInputsTranslationsTest extends TestCase
         }
     }
 
+    /**
+     * An entry without a locale (a hand-edited graph) reaches nothing, and one whose locale
+     * has no file reaches nothing until that file exists — when the rule, which cannot
+     * compare a new file, selects every test.
+     */
+    public function test_entries_that_reach_no_file_are_no_input_until_their_file_exists(): void
+    {
+        $this->graph->unionTestTranslations(['tests/PlainTest.php' => ['Hello', 'fr:Hello']]);
+        $before = $this->digests();
+
+        $this->repo->write('lang/en.json', str_replace('"Hello": "Hello"', '"Hello": "Hi"', self::EN_JSON));
+        $edited = $this->digests();
+
+        self::assertSame($before['tests/PlainTest.php'], $edited['tests/PlainTest.php']);
+
+        [$moved, $bySelection] = $this->change(['lang/fr.json' => "{\"Hello\": \"Bonjour\"}\n"]);
+
+        self::assertContains('tests/PlainTest.php', $moved);
+        self::assertSame(self::sorted(self::TESTS), $bySelection);
+    }
+
+    /** A tracked file that matches an ignore pattern is no input: no diff ever reports it. */
+    public function test_a_tracked_language_file_git_ignores_is_no_input(): void
+    {
+        $this->repo->write('lang/ignored.json', "{\"Hello\": \"x\"}\n");
+        $this->repo->git('add', '-f', 'lang/ignored.json');
+        $this->base = $this->repo->commitAll('tracked though ignored');
+
+        [$moved, $bySelection] = $this->change(['lang/ignored.json' => "{\"Hello\": \"y\"}\n"]);
+
+        self::assertSame([], $moved);
+        self::assertSame([], $bySelection);
+    }
+
     public function test_without_the_rule_no_language_scope_exists(): void
     {
         $before = $this->digests([]);

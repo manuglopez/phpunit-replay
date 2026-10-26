@@ -249,6 +249,25 @@ final class TranslationRuleTest extends TestCase
         }
     }
 
+    public function test_a_file_that_cannot_be_read_cannot_be_compared(): void
+    {
+        if (function_exists('posix_geteuid') && posix_geteuid() === 0) {
+            self::markTestSkipped('root reads a file whatever its mode');
+        }
+
+        $this->repo->write('lang/en.json', str_replace('"Hello": "Hello"', '"Hello": "Hi"', self::EN_JSON));
+        chmod($this->repo->path('lang/en.json'), 0o000);
+
+        try {
+            [$selection] = $this->apply();
+        } finally {
+            chmod($this->repo->path('lang/en.json'), 0o644);
+        }
+
+        self::assertSame(self::ALL_TESTS, $selection->testFiles());
+        self::assertEquals([new Reason('Translation', 'lang/en.json', 'cannot compare (cannot be read): every test')], $selection->reasons()['tests/JsonTest.php']);
+    }
+
     public function test_without_a_base_nothing_can_be_compared(): void
     {
         $this->repo->write('lang/en.json', str_replace('"Hello": "Hello"', '"Hello": "Hi"', self::EN_JSON));
