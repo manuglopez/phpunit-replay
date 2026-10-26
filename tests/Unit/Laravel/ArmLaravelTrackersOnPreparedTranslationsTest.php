@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Manuglopez\Replay\Tests\Unit\Laravel;
 
+use Illuminate\Container\Container;
 use Illuminate\Translation\Translator;
 use Manuglopez\Replay\Laravel\RecordingTranslator;
 use Manuglopez\Replay\Laravel\Subscribers\ArmLaravelTrackersOnPrepared;
@@ -24,6 +25,7 @@ final class ArmLaravelTrackersOnPreparedTranslationsTest extends TestCase
     protected function setUp(): void
     {
         require_once __DIR__ . '/Fixtures/IlluminateTranslatorStub.php';
+        require_once __DIR__ . '/Fixtures/IlluminateContainerStub.php';
 
         $this->recorder = new Recorder(new FakeCoverageDriver([[]]));
         $this->recorder->beginTest(self::TEST_FILE);
@@ -73,13 +75,22 @@ final class ArmLaravelTrackersOnPreparedTranslationsTest extends TestCase
     }
 
     #[Group('AC-I1-e')]
-    public function test_verify_without_an_application_does_nothing(): void
+    public function test_verify_finds_the_global_container_when_it_is_not_given_an_application(): void
     {
-        self::assertFalse(class_exists('Illuminate\\Container\\Container', false), 'no container in this process');
+        $app = new FakeTranslatorApp(static fn (): Translator => new Translator(new \stdClass(), 'en'));
+        $arming = $this->arming(true);
+        $arming->armTrackers($app);
+        $app->swap('translator', new \stdClass());
 
-        $this->arming(true)->verifyTranslations();
+        Container::$instance = $app;
 
-        self::assertSame([], $this->recorded());
+        try {
+            $arming->verifyTranslations();
+        } finally {
+            Container::$instance = null;
+        }
+
+        self::assertSame(['*'], $this->recorded());
     }
 
     private function arming(bool $trackTranslations): ArmLaravelTrackersOnPrepared
