@@ -63,6 +63,26 @@ final class RecordingTranslatorTest extends TestCase
     }
 
     #[Group('AC-I1-a')]
+    public function test_an_empty_locale_means_the_current_one_like_in_illuminate(): void
+    {
+        $translator = $this->wrap('es', 'en');
+
+        $translator->get('messages.welcome', [], '', false);
+
+        self::assertSame(['es:messages.welcome'], $this->recorded());
+    }
+
+    #[Group('AC-I1-a')]
+    public function test_an_empty_locale_with_fallback_records_the_whole_chain(): void
+    {
+        $translator = $this->wrap('es', 'en');
+
+        $translator->get('messages.welcome', [], '');
+
+        self::assertSame(['en:messages.welcome', 'es:messages.welcome'], $this->recorded());
+    }
+
+    #[Group('AC-I1-a')]
     public function test_a_locale_equal_to_the_fallback_is_recorded_once(): void
     {
         $translator = $this->wrap('en', 'en');

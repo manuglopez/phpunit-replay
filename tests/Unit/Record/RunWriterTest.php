@@ -19,9 +19,16 @@ final class RunWriterTest extends TestCase
 
     private string $runDir;
 
+    private string|false $originalTestToken;
+
     protected function setUp(): void
     {
         parent::setUp();
+
+        // Paratest defines TEST_TOKEN per worker, which makes RunWriter name its files
+        // `worker-N-*.json`; these tests assert on the single-process names.
+        $this->originalTestToken = getenv('TEST_TOKEN');
+        putenv('TEST_TOKEN');
 
         $this->projectRoot = TempDir::make('run-writer-root');
         $this->runDir = TempDir::make('run-writer-run');
@@ -31,7 +38,7 @@ final class RunWriterTest extends TestCase
     {
         TempDir::remove($this->projectRoot);
         TempDir::remove($this->runDir);
-        putenv('TEST_TOKEN');
+        putenv($this->originalTestToken === false ? 'TEST_TOKEN' : 'TEST_TOKEN=' . $this->originalTestToken);
 
         parent::tearDown();
     }
