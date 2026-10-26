@@ -2,6 +2,44 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+
+- **A change to a language file now selects the tests that read the changed key, not every test.** Until 0.13, `lang/**` and `resources/lang/**` were watch patterns: editing any translation, even a single word of a Spanish validation message, ran the whole suite, because coverage cannot tell which key a test read (a JSON file is never executed, and a PHP one is executed by every test that loads its group, whichever key it reads). On emasex PR #1005 that meant 12,673 of 12,686 tests for a handful of lines in `lang/`. <!-- emasex figures: added at CIERRE-LOCAL -->
+  - **Recording.** `translations => 'per-key'` (the default) wraps the application's translator while a test runs (`Laravel\TranslationTracker` + `Laravel\RecordingTranslator`, which extends Illuminate's `Translator` and records in `get()`). Every `__()`, `trans()`, `trans_choice()`, `Lang::get()`, `@lang`, `has()` and validator message ends there. The graph stores, per test file, the `<locale>:<key>` pairs it asked for (`test_translations`, unioned across recordings like `test_tables`; `status` prints `translations: <n>`).
+  - **Selection.** The new `Translation` rule (`Laravel\Rules\TranslationRule`) compares each changed file under `lang/` or `resources/lang/` with its version at the base, without running it, and selects the test files that recorded one of the keys that changed in that file's locale. A key matches itself, the group or subtree that holds it (a test that asked for `messages.nested` reads every leaf under it), and the keys under it. Adding, deleting or editing a value counts; reordering, re-indenting or editing comments does not (`only formatting/order/comments: selects nothing`). `--explain` and `--dry-run` name the key: `Translation lang/es/messages.php (key "messages.welcome" (es))`.
+  - **Locale fallback.** The translator records the key for every locale the lookup may be served from (the requested locale, then `fallback_locale`, plus whatever `determineLocalesUsing()` adds), so a test that asks for `es` is also selected when only the `en` line it falls back to changes.
+  - **`*`: what cannot be traced runs for any change.** A test that swaps the translator (`Lang::swap()`, `$this->app->instance('translator', …)`, a mock), runs on a translator that is a subclass of Illuminate's or a custom one, or finds the translator already built by someone else before the trackers armed, is recorded as `*` and selected by any key change (`resolved translations untrackably`). The latest recording of a file decides, so fixing the test clears it.
+  - **What the rule cannot compare keeps the broad rule, for that file only.** A vendor package's translations (`lang/vendor/**`), a file under a language root that is not a translation file, a file that cannot be read without running it (invalid JSON, PHP that is not `return [<literals>];`: a function call, a constant, a variable, an interpolated string), a file created or deleted since the base, no base, or a graph that recorded no key yet, selects every test of the testsuites (`cannot compare (<why>): every test`), plus any test file that resolved a translation, wherever it lives. Other language files in the same change are still compared by key. PHP language files are parsed, never `include`d.
+  - **A test that loads a PHP group file without asking the translator for any of its keys** (a `require` of `lang/en/messages.php`, a loader this package cannot see) keeps its coverage edge to that file, so it still runs when the file changes.
+
+  **`translations => 'conservative'`** restores the 0.13 behaviour: no key is recorded, and `lang/**` and `resources/lang/**` run every test. Switch to it if a project resolves translations in a way the tracker cannot see (see the limits below) and cannot be fixed.
+
+  Measured on the `laravel-lite` fixture (11 test files, 12 tests; one of the files swaps the translator, so it is recorded as `*`), changing one file in a throwaway copy and running `run --dry-run` after a `record` (`translations => 'conservative'` stands for 0.13.0, which it reproduces: every language path is a watch pattern):
+
+  | change | 0.13.0 | per-key |
+  |---|---|---|
+  | a JSON key one test reads (`lang/es.json` `Greetings, :name`) | 11 | 2 (`JsonKeyTest`, and the swapped-translator file) |
+  | a PHP key two tests read (`lang/es/messages.php` `messages.welcome`) | 11 | 3 (`GroupKeyTest`, `PluralFallbackTest`, the swapped-translator file) |
+  | a nested key a test reads as a subtree (`messages.nested.title`) | 11 | 2 (`GroupSubtreeTest`, the swapped-translator file) |
+  | `en` line that `es` falls back to (`messages.only_en`) | 11 | 2 (`PluralFallbackTest`, the swapped-translator file) |
+  | a key no test reads (`Nobody uses this JSON key`) | 11 | 1 (only the swapped-translator file) |
+  | reorder the keys of `lang/en.json` | 11 | 0 (`only formatting/order/comments: selects nothing`) |
+  | a new file under `lang/vendor/` | 11 | 11 (`cannot compare (vendor package translations): every test`) |
+
+  Reproduce: copy `tests/Fixtures/Projects/laravel-lite` (symlinking its `vendor/`) to a temporary directory under a temporary `HOME`, `git init` and commit it, run `bin/phpunit-replay record`, apply one change, then `bin/phpunit-replay run --dry-run`; the last line reads `Replay  <n> test files would run`. The `conservative` column is the same with `<?php return ['translations' => 'conservative'];` as `phpunit-replay.php` before the `record`. The changes are one-line edits of the fixture's own files (`sed` on a value), except the reorder (`lang/en.json` rewritten with its two keys swapped) and the vendor row (a new `lang/vendor/pkg/en/messages.php`).
+
+  **One-time cost: the first run after upgrading records the whole suite again on a Laravel project.** The structural fingerprint gains `translations` (Laravel only, next to `tables_raw`, `migrations` and `schema_dump`): a graph recorded without the keys has no entries to narrow on, and "no entry" would read as "used no translation". `status` names the key, and switching `translations` later records again, deliberately. On every project, the non-edge input digest's version token moves from `n4` to `n5` (new `trans@1`, `lang@1` and `lang:uncomparable@1` scopes), so no result stamped by an earlier version matches: a cached result recorded before upgrading is executed once more, then stamped.
+
+  **Known limits (review point):**
+  - A translation resolved in a service provider's `register()`, before the tracker armed (a provider that keeps `app('translator')` in a property), is not recorded for the test that triggered it.
+  - A translated value one test cached in a static (a memoized label, a `once()` value) is resolved only by the first test of the process that needs it, so only that test file records the key. The union across recordings converges on every file that was ever first, but a single run can miss a reader.
+  - Lines read straight from the loader (`app('translation.loader')`) or from `lang/*.php` with `require` are not seen by the translator; the `require` case keeps its coverage edge (above), the loader case is not covered.
+  - The application's `locale` and `fallback_locale` are not translation keys: changing either in `config/app.php` already selects every test through `config/**`, as before.
+
+  `conservative` avoids all of these at the 0.13 price.
+
 ## [0.13.0] — 2026-10-02
 
 ### Changed
