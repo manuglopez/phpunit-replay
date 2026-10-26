@@ -108,6 +108,39 @@ final class TranslationRuleTest extends TestCase
         self::assertEquals([new Reason('Translation', 'lang/en/messages.php', 'key "messages.welcome" (en)')], $selection->reasons()['tests/WelcomeTest.php']);
     }
 
+    /**
+     * The reason names three changed keys, then counts the rest.
+     *
+     * @param list<string> $changed
+     */
+    #[DataProvider('manyKeys')]
+    public function test_a_reason_names_three_keys_and_counts_the_rest(array $changed, string $detail): void
+    {
+        $data = [];
+
+        foreach (['a', 'b', 'c', 'd', 'e'] as $key) {
+            $data[$key] = in_array($key, $changed, true) ? 'changed' : $key;
+        }
+
+        $this->repo->write('lang/en.json', json_encode($data, JSON_THROW_ON_ERROR));
+        $this->base = $this->repo->commitAll('five keys');
+        $this->repo->write('lang/en.json', json_encode(array_map(static fn (string $value): string => $value === 'changed' ? 'x' : $value, $data), JSON_THROW_ON_ERROR));
+        $graph = $this->graph();
+        $graph->unionTestTranslations(['tests/JsonTest.php' => ['en:a', 'en:b', 'en:c', 'en:d', 'en:e']]);
+
+        [$selection] = $this->apply($graph);
+
+        self::assertEquals([new Reason('Translation', 'lang/en.json', $detail)], $selection->reasons()['tests/JsonTest.php']);
+    }
+
+    /** @return iterable<string, array{list<string>, string}> */
+    public static function manyKeys(): iterable
+    {
+        yield 'three' => [['a', 'b', 'c'], 'keys "a", "b", "c" (en)'];
+        yield 'four' => [['a', 'b', 'c', 'd'], 'keys "a", "b", "c" and 1 more (en)'];
+        yield 'five' => [['a', 'b', 'c', 'd', 'e'], 'keys "a", "b", "c" and 2 more (en)'];
+    }
+
     #[Group('AC-1')]
     public function test_a_nested_key_selects_who_asked_for_it_or_for_its_subtree(): void
     {

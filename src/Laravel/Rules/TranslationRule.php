@@ -108,7 +108,8 @@ final class TranslationRule implements Rule
             return 'vendor package translations';
         }
 
-        if ($path->kind === LangPath::OTHER || $path->locale === null) {
+        // `other` (and `vendor`, handled above) carry no locale (`LangPath`).
+        if ($path->locale === null) {
             return 'not a translation file';
         }
 

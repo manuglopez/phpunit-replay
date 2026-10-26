@@ -189,6 +189,21 @@ final class NonEdgeInputsTranslationsTest extends TestCase
         self::assertSame(self::sorted(self::TESTS), $bySelection);
     }
 
+    /**
+     * A key asked for below a leaf (`messages.welcome.short`, absent: the translator answered
+     * with the leaf above it or the key itself) depends on that leaf.
+     */
+    #[Group('AC-1')]
+    public function test_a_key_below_a_leaf_reaches_the_leaf(): void
+    {
+        $this->graph->unionTestTranslations(['tests/PlainTest.php' => ['en:messages.welcome.short']]);
+
+        [$moved, $bySelection] = $this->change(['lang/en/messages.php' => str_replace("'Welcome'", "'Welcome!'", self::EN_MESSAGES)]);
+
+        self::assertSame(['tests/PlainTest.php', 'tests/StarTest.php', 'tests/WelcomeTest.php'], $bySelection);
+        self::assertSame($bySelection, $moved);
+    }
+
     /** A tracked file that matches an ignore pattern is no input: no diff ever reports it. */
     public function test_a_tracked_language_file_git_ignores_is_no_input(): void
     {
