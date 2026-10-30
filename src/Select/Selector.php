@@ -21,9 +21,11 @@ final class Selector
     }
 
     /**
-     * @param array{migration?: Rule, schema?: Rule, sibling?: Rule, blade?: Rule} $extraRules Laravel-only
+     * @param array{migration?: Rule, schema?: Rule, sibling?: Rule, blade?: Rule, translation?: Rule} $extraRules Laravel-only
      *        rules (SPEC.md §7.2, docs/INTERNALS.md "Laravel"), inserted in SPEC order:
-     *        Migration and SchemaDump first, PhpEdge, TestFile, then Sibling and Blade, then Watch last.
+     *        Migration and SchemaDump first, PhpEdge, TestFile, then Sibling, Blade and
+     *        Translation, then Watch last (Translation consumes every language path, so that
+     *        no fallback and no residue runs every test for one).
      *        Absent keys are simply skipped, so `[]` (the default, and every non-Laravel
      *        project) reproduces the plain chain.
      */
@@ -41,6 +43,7 @@ final class Selector
             new Rules\TestFileRule(),
             ...(isset($extraRules['sibling']) ? [$extraRules['sibling']] : []),
             ...(isset($extraRules['blade']) ? [$extraRules['blade']] : []),
+            ...(isset($extraRules['translation']) ? [$extraRules['translation']] : []),
             new Rules\WatchRule(),
         ]);
     }

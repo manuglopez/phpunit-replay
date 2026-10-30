@@ -67,7 +67,8 @@ final class LaravelLiteFixtureTest extends TestCase
         $result = $fixture->phpunit();
 
         self::assertSame(0, $result['exitCode'], $result['stdout'] . $result['stderr']);
-        self::assertStringContainsString('OK (4 tests', $result['stdout']);
+        // 4 original Feature tests + 8 under tests/Feature/Translations (translation-key recording).
+        self::assertStringContainsString('OK (12 tests', $result['stdout']);
     }
 
     public function test_record_mode_writes_tables_edges_and_uses_database(): void

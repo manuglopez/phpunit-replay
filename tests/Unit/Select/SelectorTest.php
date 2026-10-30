@@ -5,6 +5,9 @@ declare(strict_types=1);
 namespace Manuglopez\Replay\Tests\Unit\Select;
 
 use Manuglopez\Replay\Cache\Graph;
+use Manuglopez\Replay\Select\Context;
+use Manuglopez\Replay\Select\Reason;
+use Manuglopez\Replay\Select\Rule;
 use Manuglopez\Replay\Select\Selector;
 use Manuglopez\Replay\Select\TestPaths;
 use Manuglopez\Replay\Select\WatchPatterns;
@@ -193,5 +196,43 @@ final class SelectorTest extends TestCase
         $reason = $selection->reasons()['tests/FooTest.php'][0];
         self::assertSame('Watch', $reason->rule);
         self::assertSame('routes/**', str_replace(' → tests', '', $reason->detail));
+    }
+
+    public function test_the_translation_rule_runs_after_blade_and_before_watch(): void
+    {
+        /** @var \ArrayObject<int, string> $log */
+        $log = new \ArrayObject();
+        $rule = static fn (string $name, ?string $consumes = null): Rule => new class ($name, $consumes, $log) implements Rule {
+            /** @param \ArrayObject<int, string> $log */
+            public function __construct(private string $label, private ?string $consumes, private \ArrayObject $log)
+            {
+            }
+
+            public function name(): string
+            {
+                return $this->label;
+            }
+
+            public function apply(Context $context): void
+            {
+                $this->log[] = $this->label;
+
+                if ($this->consumes !== null) {
+                    $context->consume($this->consumes);
+                    $context->selection->add('tests/FooTest.php', new Reason($this->label, $this->consumes));
+                }
+            }
+        };
+        $watch = new WatchPatterns();
+        $watch->addFallback(['lang/**' => ['tests']]);
+
+        $selection = Selector::default($this->graphWithSelfEdge(), $this->testPaths(), $watch, $this->root, [
+            'translation' => $rule('Translation', 'lang/en.json'),
+            'blade' => $rule('Blade'),
+            'sibling' => $rule('Sibling'),
+        ])->affected(['lang/en.json']);
+
+        self::assertSame(['Sibling', 'Blade', 'Translation'], $log->getArrayCopy());
+        self::assertSame(['tests/FooTest.php'], $selection->testFiles(), 'consumed before Watch: the fallback never fires');
     }
 }

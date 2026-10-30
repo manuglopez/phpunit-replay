@@ -20,6 +20,10 @@ use PHPUnit\Framework\TestCase;
  * ({@see self::setUp()}), so each scenario only ever has to reason about a single edit
  * against a clean baseline — no reverts, no interaction with `LastRunTree` between
  * scenarios.
+ *
+ * Counts: the fixture has 12 tests in 11 files (the 4 original Feature tests plus the 8 under
+ * `tests/Feature/Translations/`, which never touch the database nor a view): "replayed" figures
+ * are those 12 minus the ones that ran.
  */
 final class LaravelLiteScenariosTest extends TestCase
 {
@@ -54,7 +58,7 @@ final class LaravelLiteScenariosTest extends TestCase
     }
 
     /**
-     * (a) record: 4 test files known, PostsIndexTest with the tables it queried (since 0.13
+     * (a) record: the original 4 test files known (plus the translation ones), PostsIndexTest with the tables it queried (since 0.13
      * no longer widened to every migration table, SPEC.md §10) and recorded as using a
      * database, HomePageTest with neither (it never touches the database), and HomePageTest
      * has a PhpEdge into the Blade view it renders (BladeTracker). `status` reports the
@@ -93,7 +97,7 @@ final class LaravelLiteScenariosTest extends TestCase
         $result = $this->fixture->replay([]);
         self::assertSame(0, $result['exitCode'], $result['stdout'] . $result['stderr']);
         self::assertSame(0, ReplayAssert::executedCount($result['stdout']));
-        self::assertSame(4, ReplayAssert::replayedCount($result['stdout']));
+        self::assertSame(12, ReplayAssert::replayedCount($result['stdout']));
     }
 
     /**
@@ -134,7 +138,7 @@ final class LaravelLiteScenariosTest extends TestCase
         }
 
         self::assertStringContainsString(
-            '3 test files would run (3 affected, 0 uncached, 0 quarantined), 1 tests would replay',
+            '3 test files would run (3 affected, 0 uncached, 0 quarantined), 9 tests would replay',
             $explain['stdout'],
         );
 
@@ -153,7 +157,7 @@ final class LaravelLiteScenariosTest extends TestCase
         self::assertSame(3, ReplayAssert::executedCount($result['stdout']));
         self::assertSame(3, ReplayAssert::affectedCount($result['stdout']));
         self::assertSame(0, ReplayAssert::uncachedCount($result['stdout']));
-        self::assertSame(1, ReplayAssert::replayedCount($result['stdout']));
+        self::assertSame(9, ReplayAssert::replayedCount($result['stdout']));
         self::assertStringNotContainsString('HomePageTest', $result['stdout']);
     }
 
@@ -171,7 +175,7 @@ final class LaravelLiteScenariosTest extends TestCase
         self::assertStringContainsString('tests/Feature/HomePageTest.php', $explain['stdout']);
         self::assertStringContainsString('PhpEdge', $explain['stdout']);
         self::assertStringContainsString(
-            '1 test files would run (1 affected, 0 uncached, 0 quarantined), 3 tests would replay',
+            '1 test files would run (1 affected, 0 uncached, 0 quarantined), 11 tests would replay',
             $explain['stdout'],
         );
 
@@ -179,7 +183,7 @@ final class LaravelLiteScenariosTest extends TestCase
         self::assertSame(0, $result['exitCode'], $result['stdout'] . $result['stderr']);
         self::assertSame(1, ReplayAssert::executedCount($result['stdout']));
         self::assertSame(1, ReplayAssert::affectedCount($result['stdout']));
-        self::assertSame(3, ReplayAssert::replayedCount($result['stdout']));
+        self::assertSame(11, ReplayAssert::replayedCount($result['stdout']));
         self::assertStringNotContainsString('PostsIndexTest', $result['stdout']);
         self::assertStringNotContainsString('UserModelTest', $result['stdout']);
         self::assertStringNotContainsString('PostJsonTest', $result['stdout']);
@@ -235,7 +239,7 @@ final class LaravelLiteScenariosTest extends TestCase
         self::assertStringContainsString('tests/Feature/PostsIndexTest.php', $explain['stdout']);
         self::assertStringContainsString('PhpEdge', $explain['stdout']);
         self::assertStringContainsString(
-            '1 test files would run (1 affected, 0 uncached, 0 quarantined), 3 tests would replay',
+            '1 test files would run (1 affected, 0 uncached, 0 quarantined), 11 tests would replay',
             $explain['stdout'],
         );
 
@@ -306,7 +310,7 @@ final class LaravelLiteScenariosTest extends TestCase
         $explain = $this->fixture->replay(['--explain', '--dry-run']);
         self::assertSame(0, $explain['exitCode'], $explain['stdout'] . $explain['stderr']);
         self::assertStringContainsString(
-            '0 test files would run (0 affected, 0 uncached, 0 quarantined), 4 tests would replay',
+            '0 test files would run (0 affected, 0 uncached, 0 quarantined), 12 tests would replay',
             $explain['stdout'],
         );
 
@@ -317,7 +321,7 @@ final class LaravelLiteScenariosTest extends TestCase
         $result = $this->fixture->replay([]);
         self::assertSame(0, $result['exitCode'], $result['stdout'] . $result['stderr']);
         self::assertSame(0, ReplayAssert::executedCount($result['stdout']));
-        self::assertSame(4, ReplayAssert::replayedCount($result['stdout']));
+        self::assertSame(12, ReplayAssert::replayedCount($result['stdout']));
     }
 
     /** @return array<string, string> test file => its `--explain` line, insertion order */

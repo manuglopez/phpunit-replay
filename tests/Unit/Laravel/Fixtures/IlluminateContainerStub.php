@@ -13,4 +13,11 @@ namespace Illuminate\Container;
 
 class Container
 {
+    /** What a test wants the arming subscriber to find as "the application" (see `getInstance()`). */
+    public static ?object $instance = null;
+
+    public static function getInstance(): object
+    {
+        return self::$instance ??= new self();
+    }
 }

@@ -10,6 +10,7 @@ use Manuglopez\Replay\Laravel\Rules\BladeRule;
 use Manuglopez\Replay\Laravel\Rules\MigrationRule;
 use Manuglopez\Replay\Laravel\Rules\SchemaDumpRule;
 use Manuglopez\Replay\Laravel\Rules\SiblingRule;
+use Manuglopez\Replay\Laravel\Rules\TranslationRule;
 use Manuglopez\Replay\Laravel\Subscribers\ArmLaravelTrackersOnPreparationStarted;
 use Manuglopez\Replay\Laravel\Subscribers\ArmLaravelTrackersOnPrepared;
 use Manuglopez\Replay\Laravel\Subscribers\FlushUsesDatabaseOnExecutionFinished;
@@ -36,24 +37,33 @@ final class LaravelIntegration
     }
 
     /**
-     * @return array{migration: Rule, schema: Rule, sibling: Rule, blade: Rule} inserted per
-     *         SPEC.md §7.2 order: Migration and SchemaDump first, Sibling/Blade after TestFile
-     *         and before Watch. `$graph` is part of the contract for symmetry with the rest of
-     *         the chain, but unused here — these rules read it from the `Context` each
-     *         `apply()` call carries. `$projectRoot` and `$config` say where the migrations
-     *         are and how they select (`MigrationPaths`, `migrations`); `$stateDir` is where
-     *         `BladeRule` keeps its template references across runs.
+     * @return array{migration: Rule, schema: Rule, sibling: Rule, blade: Rule, translation?: Rule} inserted per
+     *         SPEC.md §7.2 order: Migration and SchemaDump first, Sibling/Blade/Translation
+     *         after TestFile and before Watch. `$graph` is part of the contract for symmetry
+     *         with the rest of the chain, but unused here — these rules read it from the
+     *         `Context` each `apply()` call carries. `$projectRoot` and `$config` say where the
+     *         migrations are and how they select (`MigrationPaths`, `migrations`); `$stateDir`
+     *         is where `BladeRule` keeps its template references across runs.
+     *         `TranslationRule` only with `translations => 'per-key'` (the default): with
+     *         `conservative` no key is recorded, and `lang/**` stays a watch default
+     *         (`Select\WatchDefaults\Laravel`) that runs every test.
      */
     public static function rules(Graph $graph, string $projectRoot, ?string $stateDir = null, ?Config $config = null): array
     {
         $config ??= Config::defaults();
 
-        return [
+        $rules = [
             'migration' => new MigrationRule(MigrationPaths::for($projectRoot, $config), $config->migrations),
             'schema' => new SchemaDumpRule($config->schemaDump),
             'sibling' => new SiblingRule(),
             'blade' => new BladeRule(BladeRule::cacheFileIn($stateDir)),
         ];
+
+        if ($config->translations === 'per-key') {
+            $rules['translation'] = new TranslationRule();
+        }
+
+        return $rules;
     }
 
     /**
@@ -62,7 +72,7 @@ final class LaravelIntegration
      * (`Select\RunListBuilder`/`Console\Runner\RunPipeline`, `PHPUnit\ReplayState::bootInProcess()`
      * via its `prepareReplay()`, `Console\Commands\ExplainCommand`).
      *
-     * @return array{migration: Rule, schema: Rule, sibling: Rule, blade: Rule}|array{}
+     * @return array{migration: Rule, schema: Rule, sibling: Rule, blade: Rule, translation?: Rule}|array{}
      */
     public static function rulesFor(Graph $graph, string $projectRoot, Config $config, ?string $stateDir = null): array
     {
@@ -75,7 +85,7 @@ final class LaravelIntegration
         $usesDatabase = new UsesDatabaseCollector();
         ReplayState::collectUsesDatabase($usesDatabase);
 
-        $arming = new ArmLaravelTrackersOnPrepared($recorder, $usesDatabase, $projectRoot);
+        $arming = new ArmLaravelTrackersOnPrepared($recorder, $usesDatabase, $projectRoot, self::tracksTranslations($projectRoot));
 
         return [
             $arming,
@@ -97,9 +107,23 @@ final class LaravelIntegration
         $usesDatabase = new UsesDatabaseCollector();
         ReplayState::collectUsesDatabase($usesDatabase);
 
-        $arming = new ArmLaravelTrackersOnPrepared($recorder, $usesDatabase, $projectRoot);
+        $arming = new ArmLaravelTrackersOnPrepared($recorder, $usesDatabase, $projectRoot, self::tracksTranslations($projectRoot));
 
         return [$arming, new ArmLaravelTrackersOnPreparationStarted($arming)];
+    }
+
+    /**
+     * Whether the translation keys each test resolves are recorded: `translations` is
+     * `per-key` (the default; `conservative` arms nothing, `lang/**` keeps selecting every
+     * test) and the Laravel integration is on (`laravel => 'off'` arms nothing). Read from
+     * `phpunit-replay.php`, like `Cache\Fingerprint` does, so the wrapper's child, the
+     * in-process extension and the fingerprint always agree.
+     */
+    private static function tracksTranslations(string $projectRoot): bool
+    {
+        $config = Config::load($projectRoot);
+
+        return $config->translations === 'per-key' && LaravelDetector::enabled($projectRoot, $config);
     }
 
     /**
@@ -112,6 +136,10 @@ final class LaravelIntegration
      */
     public static function augment(RunPartial $partial, string $projectRoot, Config $config): RunPartial
     {
+        if ($config->translations === 'per-key') {
+            $partial = self::withoutLanguageEdges($partial);
+        }
+
         if ($config->migrations !== 'conservative' || $partial->usesDatabase === []) {
             return $partial;
         }
@@ -143,6 +171,88 @@ final class LaravelIntegration
             usesDatabase: $partial->usesDatabase,
             notCacheable: $partial->notCacheable,
             coverage: $partial->coverage,
+            translations: $partial->translations,
         );
+    }
+
+    /**
+     * `translations => 'per-key'` only: removes the coverage edges to language files
+     * (`LangFiles::classify() !== null`) before they reach the graph.
+     *
+     * Laravel's `FileLoader` `require`s `lang/<locale>/<group>.php`, so coverage credits the
+     * group file to every test that loaded it, the fallback locale's included. Kept, that
+     * edge makes `Select\Rules\PhpEdge` select every such test on any change to the group,
+     * and it is part of `Cache\ContentKey`, so the result of a test the per-key selection
+     * left out would not be served either: per key would degrade to per file. Language files
+     * are covered by `Rules\TranslationRule` (selection) and by the `trans@1`, `lang@1` and
+     * `lang:uncomparable@1` scopes of `Select\NonEdgeInputs` (stamp) instead.
+     *
+     * One exception keeps the edge, so a file read some other way is never lost: a PHP
+     * group file that the test loaded without its translator resolving any key of that
+     * group in that locale (nor `*`) — a test that `require`s the file itself, or a loader
+     * this package cannot see. Such a test keeps today's per-file behaviour for that file.
+     * `vendor` and `other` files always go: the rule selects every test for any change to
+     * them.
+     */
+    private static function withoutLanguageEdges(RunPartial $partial): RunPartial
+    {
+        $edges = [];
+        $dropped = false;
+
+        foreach ($partial->edges as $testFile => $sources) {
+            $kept = [];
+
+            foreach ($sources as $source) {
+                $path = LangFiles::classify($source);
+
+                if ($path === null || self::readOutsideTheTranslator($path, $partial->translations[$testFile] ?? [])) {
+                    $kept[] = $source;
+
+                    continue;
+                }
+
+                $dropped = true;
+            }
+
+            $edges[$testFile] = $kept;
+        }
+
+        if (! $dropped) {
+            return $partial;
+        }
+
+        return new RunPartial(
+            edges: $edges,
+            results: $partial->results,
+            tables: $partial->tables,
+            meta: $partial->meta,
+            usesDatabase: $partial->usesDatabase,
+            notCacheable: $partial->notCacheable,
+            coverage: $partial->coverage,
+            translations: $partial->translations,
+        );
+    }
+
+    /**
+     * Whether a test that executed the PHP group file `$path` resolved no key of that group
+     * in that locale (`$entries`, its `<locale>:<key>` translations) and is not marked `*`.
+     *
+     * @param list<string> $entries
+     */
+    private static function readOutsideTheTranslator(LangPath $path, array $entries): bool
+    {
+        if ($path->kind !== LangPath::PHP || in_array('*', $entries, true)) {
+            return false;
+        }
+
+        $prefix = $path->locale . ':';
+
+        foreach ($entries as $entry) {
+            if (str_starts_with($entry, $prefix) && LangFiles::matches(substr($entry, strlen($prefix)), (string) $path->group)) {
+                return false;
+            }
+        }
+
+        return true;
     }
 }

@@ -4,8 +4,10 @@ declare(strict_types=1);
 
 namespace Manuglopez\Replay\Tests\Unit\Select;
 
+use Manuglopez\Replay\Config;
 use Manuglopez\Replay\Select\WatchPatterns;
 use Manuglopez\Replay\Tests\Support\TempDir;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 final class WatchPatternsTest extends TestCase
@@ -75,6 +77,38 @@ final class WatchPatternsTest extends TestCase
         $watch->useDefaults($this->root, ['tests']);
 
         self::assertSame(['tests'], $watch->patterns()['routes/**']);
+    }
+
+    /** @return iterable<string, array{string, bool}> config file body, `lang/**` watched for every test */
+    public static function translationModes(): iterable
+    {
+        yield 'per-key (the default): TranslationRule claims them' => ["<?php\nreturn [];\n", false];
+        yield 'conservative: as before' => ["<?php\nreturn ['translations' => 'conservative'];\n", true];
+        yield 'laravel off: as before' => ["<?php\nreturn ['laravel' => 'off'];\n", true];
+    }
+
+    #[DataProvider('translationModes')]
+    public function test_the_laravel_language_roots_are_watched_unless_translations_are_per_key(string $config, bool $watched): void
+    {
+        TempDir::write($this->root . '/artisan', '#!/usr/bin/env php');
+        TempDir::write($this->root . '/phpunit-replay.php', $config);
+
+        $watch = WatchPatterns::forProject($this->root, ['tests'], Config::load($this->root));
+
+        self::assertSame($watched, isset($watch->patterns()['lang/**']));
+        self::assertSame($watched, isset($watch->patterns()['resources/lang/**']));
+        self::assertSame([], $watch->fallbackMatches('lang/en.json'), 'never a fallback: the rule claims every language path');
+        self::assertSame(['tests'], $watch->patterns()['config/**']);
+    }
+
+    public function test_a_configured_pattern_on_lang_keeps_adding_with_per_key_translations(): void
+    {
+        TempDir::write($this->root . '/artisan', '#!/usr/bin/env php');
+        TempDir::write($this->root . '/phpunit-replay.php', "<?php\nreturn ['watch' => ['lang/**' => 'tests/Feature']];\n");
+
+        $watch = WatchPatterns::forProject($this->root, ['tests'], Config::load($this->root));
+
+        self::assertSame(['lang/**' => ['tests/Feature']], $watch->matches('lang/en.json'));
     }
 
     // -- matches() ---------------------------------------------------------

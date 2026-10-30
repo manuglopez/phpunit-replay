@@ -56,7 +56,7 @@ final class NonEdgeInputsTest extends TestCase
 
         self::assertNotNull($digest);
         self::assertStringStartsWith(NonEdgeInputs::VERSION . ':', $digest);
-        self::assertSame('n4', NonEdgeInputs::VERSION);
+        self::assertSame('n5', NonEdgeInputs::VERSION);
         self::assertSame($digest, $this->inputs()->digestFor('tests/ATest.php'));
     }
 

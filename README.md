@@ -155,6 +155,7 @@ Each rule consumes what earlier ones didn't claim, except `BladeRule` and your w
 | 3 | `TestFileRule` | a changed file that is itself a test | itself |
 | 4 | `SiblingRule` *(Laravel)* | a new `.php` in a provider/listener/policy/command/factory/seeder directory | tests with an edge to a neighbour in that directory; in a new subdirectory, tests with an edge under the nearest ancestor that has one |
 | 5 | `BladeRule` *(Laravel)* | any changed `.blade.php` | walks `@include`/`@extends`/`view()`/`<x-…>` up to the Blade files tests render, then those files' tests |
+| 5b | `TranslationRule` *(Laravel)* | a changed file under `lang/` or `resources/lang/` | the tests that resolved a changed key in that file's locale (`<locale>:<key>` pairs recorded from the translator, fallback locales included), plus those whose translations cannot be traced; a file it cannot compare (vendor package, not literal PHP, created or deleted) runs every test, for that file only. `translations => 'conservative'` keeps 0.13's every-test rule |
 | 6 | `WatchRule` | every changed file | glob → test-directory patterns: built-in defaults, framework defaults when detected, plus your own `watch` config; and, for what nothing claimed, the residue: a `.php` file `<source><exclude>` keeps out of coverage (or, with `static_declaration_edges`, any `.php` file without an edge) runs every test |
 
 Two more categories always run, regardless of rules: **test files new to the graph**, and any cached result that **must be re-checked** — a failure or error always re-runs; a risky, incomplete or skipped result re-runs only if your PHPUnit config would actually surface it.
@@ -166,7 +167,7 @@ Two more categories always run, regardless of rules: **test files new to the gra
 | Framework | Detected by | Patterns |
 |---|---|---|
 | Generic | always on | `.env*`, `phpunit.xml*`, `docker-compose*.y*ml`, `tests/**/Fixtures/**`, `tests/**/__snapshots__/**` |
-| Laravel | `artisan` exists | `config/**`, `routes/**`, `lang/**`, `resources/lang/**`, `app/** !*.php`, `bootstrap/*.php`; `database/migrations/**` and `resources/views/**` only with `laravel => 'off'` (otherwise the Migration and Blade rules cover them) |
+| Laravel | `artisan` exists | `config/**`, `routes/**`, `app/** !*.php`, `bootstrap/*.php`; `lang/**` and `resources/lang/**` only with `laravel => 'off'` or `translations => 'conservative'`, `database/migrations/**` and `resources/views/**` only with `laravel => 'off'` (otherwise the Translation, Migration and Blade rules cover them) |
 | Symfony | `config/bundles.php` exists | `config/**`, `migrations/**`, `templates/**`, `translations/**` |
 
 On a project that is neither, the generic row is all that applies — and the graph does the rest of the work, since a recorded edge doesn't care what framework produced it.
@@ -433,11 +434,12 @@ And if you would rather express the boundary in the store itself — the team wr
 
 Enabled when `artisan` exists, unless you set `laravel` to `off`. There's no `illuminate/*` dependency — Laravel is reached through `class_exists()`, string class names and duck-typed calls.
 
-Three extra things get tracked while recording:
+Four extra things get tracked while recording:
 
 - **Tables.** A query listener links every table a test's queries touch, `setUp()` and its factories included.
 - **Blade views.** A view composer on `'*'` links every rendered view as a dependency, exactly like a PHP file.
 - **Database tests.** Any test file using `RefreshDatabase`, `DatabaseMigrations`, `DatabaseTransactions` or `DatabaseTruncation` (directly or through another trait) is recorded as using a database. A migration the test database runs selects all of them; one already squashed into the schema dump selects none; a change to the dump selects every database test (or, with `schema_dump => 'per-table'`, the tests that use what it changed). `migrations => 'conservative'` widens every such test to every table any migration names instead, as before 0.13.
+- **Translation keys.** The application's translator is wrapped while a test runs, and every `<locale>:<key>` it is asked for (the fallback locales included) is linked to the test file. A change to a language file then selects the tests that read the changed keys; a test whose translator was swapped or mocked is selected by any change. `translations => 'conservative'` goes back to running every test for any change under `lang/`. See [configuration](docs/configuration.md#selection).
 
 The package's own `laravel-lite` fixture shows the effect:
 

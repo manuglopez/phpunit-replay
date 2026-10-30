@@ -74,6 +74,6 @@ final class LaravelLiteRemoteMigrationTest extends TestCase
 
         self::assertSame(0, $result['exitCode'], $result['stdout'] . $result['stderr']);
         self::assertSame(3, ReplayAssert::executedCount($result['stdout']), ReplayAssert::lastLine($result['stdout']));
-        self::assertSame(1, ReplayAssert::replayedCount($result['stdout']), ReplayAssert::lastLine($result['stdout']));
+        self::assertSame(9, ReplayAssert::replayedCount($result['stdout']), ReplayAssert::lastLine($result['stdout']));
     }
 }

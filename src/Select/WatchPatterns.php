@@ -46,12 +46,14 @@ final class WatchPatterns
      * @param bool $laravelRules whether the Laravel rules run (`LaravelDetector::enabled()`):
      *        they attribute Blade templates and migrations themselves, so the defaults for
      *        those two directories are left out ({@see WatchDefaults\Laravel})
+     * @param bool $perKeyTranslations `translations => 'per-key'`: with the Laravel rules on,
+     *        `Laravel\Rules\TranslationRule` claims the language roots, which are left out too
      */
-    public function useDefaults(string $projectRoot, array $testDirectories, bool $laravelRules = false, ?MigrationPaths $migrationPaths = null): void
+    public function useDefaults(string $projectRoot, array $testDirectories, bool $laravelRules = false, ?MigrationPaths $migrationPaths = null, bool $perKeyTranslations = false): void
     {
         $defaults = [
             new WatchDefaults\Php(),
-            new WatchDefaults\Laravel($laravelRules, ($migrationPaths ?? MigrationPaths::default())->fallbackPatterns()),
+            new WatchDefaults\Laravel($laravelRules, ($migrationPaths ?? MigrationPaths::default())->fallbackPatterns(), $perKeyTranslations),
             new WatchDefaults\Symfony(),
         ];
 
@@ -78,7 +80,7 @@ final class WatchPatterns
     {
         $laravel = LaravelDetector::enabled($projectRoot, $config);
         $watch = new self();
-        $watch->useDefaults($projectRoot, $testDirectories, $laravel, $laravel ? MigrationPaths::for($projectRoot, $config) : null);
+        $watch->useDefaults($projectRoot, $testDirectories, $laravel, $laravel ? MigrationPaths::for($projectRoot, $config) : null, $config->translations === 'per-key');
 
         if ($config->watch !== []) {
             $watch->add($config->watch);

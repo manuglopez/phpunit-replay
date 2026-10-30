@@ -174,6 +174,7 @@ final class StatusCommand extends Command
             edges: $stats['edges'],
             excludedEdges: $excludedEdges,
             tables: $stats['tables'],
+            translations: $stats['translations'],
             graphBytes: $graphBytes !== false ? $graphBytes : 0,
             graphFingerprint: $graph->fingerprint(),
             currentFingerprint: $currentFingerprint,

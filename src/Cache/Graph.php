@@ -40,6 +40,17 @@ final class Graph
     /** @var array<string, list<string>> */
     private array $testTables = [];
 
+    /**
+     * Per test file, the `<locale>:<key>` translation entries its translator resolved
+     * (`Laravel\TranslationTracker`), sorted and unique; `*` = some could not be seen. Split
+     * by the FIRST `:` (a namespaced key keeps its own). Encoded as `test_translations` only
+     * when non-empty. A file with no entry used no translation: every graph test was recorded
+     * with tracking on.
+     *
+     * @var array<string, list<string>>
+     */
+    private array $testTranslations = [];
+
     /** @var list<string> */
     private array $notCacheable = [];
 
@@ -425,6 +436,78 @@ final class Graph
     public function testTables(): array
     {
         return $this->testTables;
+    }
+
+    /**
+     * Adds a recording's translation entries to what each file already holds, like
+     * {@see self::unionTestTables()} (which test file resolves a key depends on what a
+     * static cached, so the union converges on every file that ever did). The `*` entry is the
+     * exception: it is what the latest recording of a file says, so for every file of
+     * `$executed` the old `*` is dropped before the new entries are added — a recording made
+     * with a swapped translator must not make a file untrackable forever.
+     *
+     * @param array<string, list<string>> $testToEntries `<locale>:<key>` entries and/or `*`
+     * @param list<string> $executed test files this recording ran (their old `*` is replaced)
+     */
+    public function unionTestTranslations(array $testToEntries, array $executed = []): void
+    {
+        foreach ($executed as $testFile) {
+            $rel = $this->relative($testFile);
+
+            if ($rel !== null && isset($this->testTranslations[$rel])) {
+                $this->setTestTranslations($rel, array_diff($this->testTranslations[$rel], ['*']));
+            }
+        }
+
+        foreach ($testToEntries as $testFile => $entries) {
+            $rel = $this->relative((string) $testFile);
+
+            if ($rel !== null) {
+                $this->setTestTranslations($rel, [...$this->testTranslations[$rel] ?? [], ...$entries]);
+            }
+        }
+
+        ksort($this->testTranslations, SORT_STRING);
+    }
+
+    /** @return array<string, list<string>> test file (relative) => `<locale>:<key>` entries and/or `*` */
+    public function testTranslations(): array
+    {
+        return $this->testTranslations;
+    }
+
+    /** @return list<string> the `<locale>:<key>` entries the file's translator resolved (no `*`) */
+    public function translationsOf(string $testFile): array
+    {
+        return array_values(array_diff($this->testTranslations[$testFile] ?? [], ['*']));
+    }
+
+    /** The file's latest recording resolved translations nobody could name (`Lang::swap()`, a mock…). */
+    public function translationsUntrackable(string $testFile): bool
+    {
+        return in_array('*', $this->testTranslations[$testFile] ?? [], true);
+    }
+
+    /** @param iterable<string> $entries */
+    private function setTestTranslations(string $rel, iterable $entries): void
+    {
+        $unique = [];
+
+        foreach ($entries as $entry) {
+            if ($entry !== '') {
+                $unique[$entry] = true;
+            }
+        }
+
+        if ($unique === []) {
+            unset($this->testTranslations[$rel]);
+
+            return;
+        }
+
+        $names = array_map(strval(...), array_keys($unique));
+        sort($names, SORT_STRING);
+        $this->testTranslations[$rel] = $names;
     }
 
     /**
@@ -903,6 +986,7 @@ final class Graph
         $known = array_unique(array_merge(
             array_keys($this->edges),
             array_keys($this->testTables),
+            array_map(strval(...), array_keys($this->testTranslations)),
             $this->usesDatabase,
             array_map(strval(...), array_keys($this->tablesUnknown)),
         ));
@@ -920,6 +1004,7 @@ final class Graph
             }
 
             unset($this->testTables[$testRel]);
+            unset($this->testTranslations[$testRel]);
             $this->usesDatabase = array_values(array_diff($this->usesDatabase, [$testRel]));
             unset($this->tablesUnknown[$testRel]);
 
@@ -1100,7 +1185,7 @@ final class Graph
         return array_keys($keys);
     }
 
-    /** @return array{files:int, test_files:int, edges:int, branches:int, results:int, tables:int} */
+    /** @return array{files:int, test_files:int, edges:int, branches:int, results:int, tables:int, translations:int} */
     public function stats(): array
     {
         $edgeCount = 0;
@@ -1125,6 +1210,16 @@ final class Graph
             }
         }
 
+        $translations = [];
+
+        foreach ($this->testTranslations as $entries) {
+            foreach ($entries as $entry) {
+                if ($entry !== '*') {
+                    $translations[$entry] = true;
+                }
+            }
+        }
+
         return [
             'files' => count($this->files),
             'test_files' => count($this->edges),
@@ -1134,6 +1229,9 @@ final class Graph
             // Distinct table names across every test file (Laravel, SPEC.md §10) — 0 on a
             // non-Laravel project.
             'tables' => count($tables),
+            // Distinct `<locale>:<key>` entries across every test file (Laravel) — 0 without
+            // tracking.
+            'translations' => count($translations),
         ];
     }
 
@@ -1151,6 +1249,12 @@ final class Graph
         $graph->fileIds = array_flip($graph->files);
         $graph->edges = self::decodeEdges($data['edges'] ?? null);
         $graph->testTables = self::decodeStringMap($data['test_tables'] ?? null);
+
+        foreach (self::decodeStringMap($data['test_translations'] ?? null) as $testRel => $entries) {
+            $graph->setTestTranslations($testRel, $entries);
+        }
+
+        ksort($graph->testTranslations, SORT_STRING);
         $graph->notCacheable = self::decodeStringList($data['not_cacheable'] ?? null);
         $graph->usesDatabase = self::decodeStringList($data['uses_database'] ?? null);
         $graph->tablesUnknown = array_fill_keys(self::decodeStringList($data['tables_unknown'] ?? null), true);
@@ -1499,6 +1603,10 @@ final class Graph
 
         if ($this->configuration !== null) {
             $payload['configuration'] = $this->configuration;
+        }
+
+        if ($this->testTranslations !== []) {
+            $payload['test_translations'] = $this->testTranslations;
         }
 
         if ($this->usesDatabase !== []) {

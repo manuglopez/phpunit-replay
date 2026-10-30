@@ -16,6 +16,7 @@ use Manuglopez\Replay\Select\TestPaths;
 use Manuglopez\Replay\Select\WatchPatterns;
 use Manuglopez\Replay\Tests\Support\GitRepo;
 use Manuglopez\Replay\Tests\Support\TempDir;
+use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\TestCase;
 
 final class GraphUpdaterTest extends TestCase
@@ -801,6 +802,81 @@ final class GraphUpdaterTest extends TestCase
         self::assertTrue($quarantine->isQuarantined('Foo::test_it'));
 
         $repo->destroy();
+    }
+
+    #[Group('AC-I1-c')]
+    public function test_translations_accumulate_across_recordings_and_star_is_what_the_latest_one_says(): void
+    {
+        $this->write('tests/AT.php');
+        $this->write('tests/BT.php');
+        $graph = new Graph($this->root);
+
+        $first = new RunPartial(
+            edges: ['tests/AT.php' => [], 'tests/BT.php' => []],
+            results: [],
+            tables: [],
+            meta: [],
+            translations: ['tests/AT.php' => ['*', 'en:a'], 'tests/BT.php' => ['*']],
+        );
+        $this->updater($graph)->apply($first, 'main', recordsEdges: true, complete: false);
+
+        self::assertSame(['tests/AT.php' => ['*', 'en:a'], 'tests/BT.php' => ['*']], $graph->testTranslations());
+
+        // Both files run again: A resolves another key and no longer swaps the translator; B
+        // resolves nothing at all.
+        $second = new RunPartial(
+            edges: ['tests/AT.php' => [], 'tests/BT.php' => []],
+            results: [],
+            tables: [],
+            meta: [],
+            translations: ['tests/AT.php' => ['en:z']],
+        );
+        $this->updater($graph)->apply($second, 'main', recordsEdges: true, complete: false);
+
+        self::assertSame(['tests/AT.php' => ['en:a', 'en:z']], $graph->testTranslations());
+        self::assertFalse($graph->translationsUntrackable('tests/BT.php'));
+    }
+
+    #[Group('AC-I1-c')]
+    public function test_a_file_that_was_replayed_keeps_its_untrackable_star(): void
+    {
+        $this->write('tests/AT.php');
+        $this->write('tests/BT.php');
+        $graph = new Graph($this->root);
+        $graph->unionTestTranslations(['tests/AT.php' => ['*', 'en:a'], 'tests/BT.php' => ['*']]);
+
+        // The run only served B from the cache (in-process): it never ran, so says nothing.
+        $partial = new RunPartial(
+            edges: ['tests/AT.php' => []],
+            results: ['B::test_it' => $this->makeResult(file: 'tests/BT.php')],
+            tables: [],
+            meta: [],
+            translations: [],
+        );
+        $replayed = ['B::test_it' => $this->makeResult(file: 'tests/BT.php')];
+
+        $this->updater($graph)->apply($partial, 'main', recordsEdges: true, complete: false, replayed: $replayed);
+
+        self::assertFalse($graph->translationsUntrackable('tests/AT.php'), 'A ran and says nothing');
+        self::assertTrue($graph->translationsUntrackable('tests/BT.php'), 'B was replayed: unchanged');
+    }
+
+    #[Group('AC-I1-c')]
+    public function test_translations_are_not_recorded_when_the_run_does_not_record_edges(): void
+    {
+        $this->write('tests/AT.php');
+        $graph = new Graph($this->root);
+
+        $partial = new RunPartial(
+            edges: ['tests/AT.php' => []],
+            results: [],
+            tables: [],
+            meta: [],
+            translations: ['tests/AT.php' => ['en:a']],
+        );
+        $this->updater($graph)->apply($partial, 'main', recordsEdges: false, complete: false);
+
+        self::assertSame([], $graph->testTranslations());
     }
 
     private function inputsFor(Graph $graph, string $root): NonEdgeInputs

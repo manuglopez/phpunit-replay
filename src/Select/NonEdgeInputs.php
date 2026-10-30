@@ -9,6 +9,8 @@ use Manuglopez\Replay\Cache\Graph;
 use Manuglopez\Replay\Change\Git;
 use Manuglopez\Replay\Config;
 use Manuglopez\Replay\Laravel\BladeReferences;
+use Manuglopez\Replay\Laravel\LangFiles;
+use Manuglopez\Replay\Laravel\LangPath;
 use Manuglopez\Replay\Laravel\LaravelIntegration;
 use Manuglopez\Replay\Laravel\MigrationPaths;
 use Manuglopez\Replay\Laravel\Rules\BladeRule;
@@ -54,6 +56,20 @@ use Manuglopez\Replay\Support\Paths;
  * | `sibling-tree:<dir>@1` | `Laravel\Rules\SiblingRule`, a new subdirectory | sibling candidates whose own directory no test has an edge into, and whose nearest ancestor that one has is `<dir>` | T depends on a file under `<dir>` |
  * | `fallback:<pattern>@1` | `Rules\WatchRule`, fallback patterns (the Laravel `resources/views/**` and `database/migrations/**` while the Laravel rules run) | files matching the pattern that no rule claims | T is under one of its targets |
  * | `residue@3` | `ResiduePatterns`, `static_declaration_edges` only | `.php` files no test has an edge to that no rule claims | T is under the residue targets |
+ * | `trans@1` | `Laravel\Rules\TranslationRule` | for each `<locale>:<key>` T recorded, the entries of the comparable language files of that locale the key {@see LangFiles::matches()}: the key, the subtree under it, the leaves above it; one member per file, key and value | T recorded a translation key |
+ * | `lang@1` | `Laravel\Rules\TranslationRule` | every language file: what it holds when it is comparable (key and value pairs, so that formatting, order and comments do not count), its content when not | T's translations are untrackable (`*`) |
+ * | `lang:uncomparable@1` | `Laravel\Rules\TranslationRule` | the language files it cannot compare (`vendor/**`, not a translation file, not readable without running it); every one while the graph records no translation key | T is under the residue targets |
+ *
+ * The three language scopes exist only while `TranslationRule` runs (`translations =>
+ * 'per-key'`); with `conservative`, `lang/**` is a watch pattern like any other. Every path
+ * under a language root is theirs, and no unattributed-file scope (sibling, fallback, residue)
+ * holds one, as the rule consumes them. A translation member is a key and its value, not a
+ * file: after a change to one comparable language file, T's digest moves exactly when the
+ * rule selects T, so a result recorded on another value of a key T never asked for keeps
+ * being served. `trans@1` and `lang@1` keep T's own dependencies (a PHP language file T
+ * executes): the rule reads every changed path, whatever has an edge to it. What the rule
+ * cannot compare it selects every test for, so a digest that moves then (a file created,
+ * deleted, or that stops flattening) moves for a selected test.
  *
  * **Every member set excludes T's own dependencies and T itself**: those are T's key inputs,
  * and the key already covers them. For the first four scopes what a scope holds for T is a
@@ -73,7 +89,7 @@ use Manuglopez\Replay\Support\Paths;
  * {@see self::claimedByBlade()}.
  *
  * ```
- * digest(T)       = "n4:" . xxh128("nonedge@4\n" . Σ sorted "<scope id>=<scope digest>\n")
+ * digest(T)       = "n5:" . xxh128("nonedge@5\n" . Σ sorted "<scope id>=<scope digest>\n")
  *                   over the scopes T carries that have at least one member
  * scope digest(T) = hex(⊕ xxh128(path . "\0" . ContentHash(path))) . ":" . |members|
  * ```
@@ -81,9 +97,10 @@ use Manuglopez\Replay\Support\Paths;
  * A scope digest is an XOR over its members, so a scope shared by hundreds of test files is
  * hashed once and each test file's own dependencies are taken out of it in constant time per
  * dependency. A `schema:` scope's members are its blocks, each hashed with the dump's path and
- * its table, so that a test file's digest moves only for a block it carries. `n4` (0.13) is
- * the version token: anything that changes what a digest means changes
- * it, and a stamp with another version never matches. A null digest means it could not be
+ * its table, so that a test file's digest moves only for a block it carries; a `trans@1`
+ * member is a translation entry, hashed with its locale, file, key and value. `n5` (the
+ * language scopes; `n4` was 0.13) is the version token: anything that changes what a digest
+ * means changes it, and a stamp with another version never matches. A null digest means it could not be
  * computed (git failed): nothing is stamped with it and nothing stamped validates against it.
  *
  * One instance per graph per pass. Every file is hashed through the pass's {@see FileHashes},
@@ -94,9 +111,9 @@ use Manuglopez\Replay\Support\Paths;
  */
 final class NonEdgeInputs
 {
-    public const VERSION = 'n4';
+    public const VERSION = 'n5';
 
-    private const MATERIAL = "nonedge@4\n";
+    private const MATERIAL = "nonedge@5\n";
 
     /** @var list<string>|null|false present files, false until listed, null when git failed */
     private array|false|null $tree = false;
@@ -125,6 +142,9 @@ final class NonEdgeInputs
     /** @var array<string, string> path => its member hash (binary xxh128) */
     private array $elements = [];
 
+    /** @var array<string, ?array<string, string>> "<path>\0<content hash>" => the flattened file, null when it cannot be */
+    private array $langFlat = [];
+
     /**
      * @var array{
      *     shared: array<string, array{acc: string, count: int, members: list<string>}>,
@@ -136,6 +156,7 @@ final class NonEdgeInputs
      *     databaseFiles: array<string, true>,
      *     dumps: array<string, array{whole: ?string, normalised: string, rows: string, global: ?string, blocks: array<string, string>, dump: ?SchemaDump, perTable: bool, carriedByAll: bool}>,
      *     bootstrap: list<string>,
+     *     translations: array{byLocale: array<string, array<string, list<array{string, string}>>>, sorted: array<string, list<string>>, all: array{acc: string, count: int, members: list<string>}}|null,
      * }|null|false false until computed, null when the tree could not be listed
      */
     private array|false|null $state = false;
@@ -154,7 +175,7 @@ final class NonEdgeInputs
     private readonly ResiduePatterns $residue;
 
     /**
-     * @param array{migration?: Rule, schema?: Rule, sibling?: Rule, blade?: Rule} $extraRules the
+     * @param array{migration?: Rule, schema?: Rule, sibling?: Rule, blade?: Rule, translation?: Rule} $extraRules the
      *        Laravel rules the pass runs, as for {@see RunListBuilder}: their presence, and the
      *        migration rule's paths and mode
      * @param WatchPatterns $watch the configured patterns only — never an instance
@@ -294,6 +315,10 @@ final class NonEdgeInputs
             return true;
         }
 
+        if (isset($this->extraRules['translation']) && LangFiles::classify($relative) !== null) {
+            return true;
+        }
+
         if ($this->staticDeclarationEdges && ResiduePatterns::hasResidueShape($relative, $this->testPaths)) {
             return true;
         }
@@ -405,6 +430,20 @@ final class NonEdgeInputs
             }
         }
 
+        // TranslationRule: the entries the keys this test file resolved reach, and every
+        // language file when its translations could not be traced.
+        if ($state['translations'] !== null) {
+            $trans = $this->translationScope($testFile, $state['translations']);
+
+            if ($trans !== null) {
+                $scopes['trans@1'] = $trans;
+            }
+
+            if (in_array('*', $this->graph->testTranslations()[$testFile] ?? [], true)) {
+                $scopes['lang@1'] = $state['translations']['all'];
+            }
+        }
+
         return array_filter($scopes, static fn (array $scope): bool => $scope['count'] > 0);
     }
 
@@ -465,6 +504,7 @@ final class NonEdgeInputs
      *     databaseFiles: array<string, true>,
      *     dumps: array<string, array{whole: ?string, normalised: string, rows: string, global: ?string, blocks: array<string, string>, dump: ?SchemaDump, perTable: bool, carriedByAll: bool}>,
      *     bootstrap: list<string>,
+     *     translations: array{byLocale: array<string, array<string, list<array{string, string}>>>, sorted: array<string, list<string>>, all: array{acc: string, count: int, members: list<string>}}|null,
      * }|null
      */
     private function state(): ?array
@@ -510,6 +550,11 @@ final class NonEdgeInputs
         }
 
         $claimedByBlade = $bladeActive ? $this->claimedByBlade() : [];
+        $translationActive = isset($this->extraRules['translation']);
+        $noKeysRecorded = $this->graph->testTranslations() === [];
+
+        /** @var array<string, LangPath> $langFiles */
+        $langFiles = [];
 
         /** @var array<string, list<string>> $sets scope id => members */
         $sets = [];
@@ -536,6 +581,17 @@ final class NonEdgeInputs
             // A file coverage cannot see: additive, whatever else claims it or has an edge to it.
             if ($this->residue->isUnattributable($rel)) {
                 $sets['unattributable@3'][] = $rel;
+            }
+
+            // Laravel\Rules\TranslationRule consumes every path under a language root.
+            if ($translationActive && ($langPath = LangFiles::classify($rel)) !== null) {
+                if ($noKeysRecorded || $this->langEntries($rel, $langPath) === null) {
+                    $sets['lang:uncomparable@1'][] = $rel;
+                }
+
+                $langFiles[$rel] = $langPath;
+
+                continue;
             }
 
             // Laravel\Rules\MigrationRule runs first and consumes every `.php` migration.
@@ -618,6 +674,7 @@ final class NonEdgeInputs
             ...array_map(strval(...), array_keys($byTable)),
             ...array_map(strval(...), array_keys($templates)),
             ...$dumpPaths,
+            ...array_map(strval(...), array_keys($langFiles)),
         ]);
 
         /** @var array<string, true> $members */
@@ -682,7 +739,183 @@ final class NonEdgeInputs
             'databaseFiles' => array_fill_keys($this->graph->databaseTestFiles(), true),
             'dumps' => $dumps,
             'bootstrap' => $this->graph->bootstrapTables(),
+            'translations' => $translationActive ? $this->translationIndex($langFiles, $ignored) : null,
         ];
+    }
+
+    /**
+     * What `TranslationRule` compares, indexed for the `trans@1` and `lang@1` scopes: each
+     * comparable file's entries by locale and key, sorted to find a subtree by binary search,
+     * and every language file as one part of `lang@1` (its entries when it is comparable, so
+     * that formatting, order and comments do not count; its content when not).
+     *
+     * @param array<string, LangPath> $langFiles
+     * @param array<string, true> $ignored
+     * @return array{byLocale: array<string, array<string, list<array{string, string}>>>, sorted: array<string, list<string>>, all: array{acc: string, count: int, members: list<string>}}
+     */
+    private function translationIndex(array $langFiles, array $ignored): array
+    {
+        $byLocale = [];
+        $all = str_repeat("\0", 16);
+        $members = [];
+
+        foreach ($langFiles as $rel => $langPath) {
+            $rel = (string) $rel;
+
+            if (isset($ignored[$rel])) {
+                continue;
+            }
+
+            $members[] = $rel;
+            $entries = $this->langEntries($rel, $langPath);
+
+            if ($entries === null || $langPath->locale === null) {
+                $all ^= $this->element($rel);
+
+                continue;
+            }
+
+            $file = str_repeat("\0", 16);
+
+            foreach ($entries as $key => $value) {
+                $key = (string) $key;
+                $hash = hash('xxh128', $langPath->locale . "\0" . $rel . "\0" . $key . "\0" . $value, true);
+                $byLocale[$langPath->locale][$key][] = [$rel, $hash];
+                $file ^= $hash;
+            }
+
+            $all ^= hash('xxh128', $rel . "\0entries\0" . bin2hex($file) . ':' . count($entries), true);
+        }
+
+        $sorted = [];
+
+        foreach ($byLocale as $locale => $keys) {
+            $list = array_map(strval(...), array_keys($keys));
+            sort($list, SORT_STRING);
+            $sorted[(string) $locale] = $list;
+        }
+
+        return ['byLocale' => $byLocale, 'sorted' => $sorted, 'all' => ['acc' => $all, 'count' => count($members), 'members' => $members]];
+    }
+
+    /**
+     * The entries `$testFile`'s recorded keys reach, per {@see TranslationRule}: for each
+     * `<locale>:<key>`, every entry of that locale whose key {@see LangFiles::matches()} it —
+     * the key itself, the leaves under it and the leaves above it.
+     *
+     * @param array{byLocale: array<string, array<string, list<array{string, string}>>>, sorted: array<string, list<string>>} $index
+     * @return array{acc: string, count: int, members: list<string>}|null
+     */
+    private function translationScope(string $testFile, array $index): ?array
+    {
+        $reached = [];
+
+        foreach ($this->graph->translationsOf($testFile) as $entry) {
+            $colon = strpos($entry, ':');
+
+            if ($colon === false) {
+                continue;
+            }
+
+            $locale = substr($entry, 0, $colon);
+            $recorded = substr($entry, $colon + 1);
+            $keys = $index['byLocale'][$locale] ?? [];
+
+            if ($keys === []) {
+                continue;
+            }
+
+            foreach (self::keysMatching($recorded, $keys, $index['sorted'][$locale] ?? []) as $key) {
+                $reached[$locale . "\0" . $key] = $keys[$key];
+            }
+        }
+
+        if ($reached === []) {
+            return null;
+        }
+
+        $acc = str_repeat("\0", 16);
+        $count = 0;
+        $paths = [];
+
+        foreach ($reached as $entries) {
+            foreach ($entries as [$path, $hash]) {
+                $acc ^= $hash;
+                $count++;
+                $paths[$path] = true;
+            }
+        }
+
+        return ['acc' => $acc, 'count' => $count, 'members' => array_map(strval(...), array_keys($paths))];
+    }
+
+    /**
+     * The keys of `$keys` that {@see LangFiles::matches()} `$recorded`: itself, the ones above
+     * it (each prefix of it ending before a `.`) and the ones under it (`$recorded.` prefix,
+     * a contiguous run of `$sorted`).
+     *
+     * @param array<string, mixed> $keys
+     * @param list<string> $sorted the same keys, sorted
+     * @return list<string>
+     */
+    private static function keysMatching(string $recorded, array $keys, array $sorted): array
+    {
+        $found = [];
+
+        if (isset($keys[$recorded])) {
+            $found[] = $recorded;
+        }
+
+        for ($dot = strpos($recorded, '.'); $dot !== false; $dot = strpos($recorded, '.', $dot + 1)) {
+            $above = substr($recorded, 0, $dot);
+
+            if (isset($keys[$above])) {
+                $found[] = $above;
+            }
+        }
+
+        $prefix = $recorded . '.';
+        $low = 0;
+        $high = count($sorted);
+
+        while ($low < $high) {
+            $mid = intdiv($low + $high, 2);
+
+            if (strcmp($sorted[$mid], $prefix) < 0) {
+                $low = $mid + 1;
+            } else {
+                $high = $mid;
+            }
+        }
+
+        for ($i = $low; $i < count($sorted) && str_starts_with($sorted[$i], $prefix); $i++) {
+            $found[] = $sorted[$i];
+        }
+
+        return $found;
+    }
+
+    /**
+     * A language file's entries as `TranslationRule` compares them, read without running it,
+     * once per path and content; null when the rule cannot compare it (a vendor package's or
+     * not a translation file, or not readable).
+     *
+     * @return array<string, string>|null
+     */
+    private function langEntries(string $rel, LangPath $langPath): ?array
+    {
+        if (($langPath->kind !== LangPath::JSON && $langPath->kind !== LangPath::PHP) || $langPath->locale === null) {
+            return null;
+        }
+
+        $key = $rel . "\0" . ($this->hashes->of($rel) ?? '');
+
+        if (! array_key_exists($key, $this->langFlat)) {
+            $content = @file_get_contents(Paths::join($this->projectRoot, $rel));
+            $this->langFlat[$key] = $content === false ? null : LangFiles::flatten($content, $langPath);
+        }
+
+        return $this->langFlat[$key];
     }
 
     /**

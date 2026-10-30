@@ -31,8 +31,14 @@ final class Laravel implements WatchDefault
      * `.php` view, a `.sql` file a migration reads. So with the rules on, those two patterns
      * are {@see self::fallbacks()}: they fire only for a changed file no rule claimed, and run
      * every test for it. With the rules off (`laravel => 'off'`) they are ordinary defaults.
-     */
-    /**
+     *
+     * `$perKeyTranslations`: `translations => 'per-key'` (the default). `lang/**` and
+     * `resources/lang/**` are not defaults at all then, not even fallbacks, while the Laravel
+     * rules run: `Laravel\Rules\TranslationRule` claims every path under them, selecting by
+     * translation key what it can compare and every test for what it cannot. With
+     * `conservative`, or with the rules off, they run every test, as they always did. A
+     * configured `watch` pattern on them still adds its targets (`Rules\WatchRule`).
+     *
      * @param list<string> $migrationPatterns the fallback for each migration path
      *        (`Laravel\MigrationPaths::fallbackPatterns()`), `database/migrations/**` and any
      *        other: a non-`.php` file under any of them is what `MigrationRule` cannot claim
@@ -40,6 +46,7 @@ final class Laravel implements WatchDefault
     public function __construct(
         private readonly bool $rulesAttribute = false,
         private readonly array $migrationPatterns = ['database/migrations/**'],
+        private readonly bool $perKeyTranslations = false,
     ) {
     }
 
@@ -55,8 +62,7 @@ final class Laravel implements WatchDefault
             'config/**',
             'routes/**',
             ...($this->rulesAttribute ? [] : self::ATTRIBUTED),
-            'lang/**',
-            'resources/lang/**',
+            ...($this->rulesAttribute && $this->perKeyTranslations ? [] : ['lang/**', 'resources/lang/**']),
             'app/** !*.php',
             'bootstrap/*.php',
         ];

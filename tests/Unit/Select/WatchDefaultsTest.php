@@ -77,6 +77,20 @@ final class WatchDefaultsTest extends TestCase
         self::assertSame(['tests'], $defaults['bootstrap/*.php']);
     }
 
+    public function test_laravel_leaves_the_language_roots_to_the_translation_rule_only_when_it_runs(): void
+    {
+        $perKey = (new Laravel(true, ['database/migrations/**'], true))->defaults($this->root, ['tests']);
+
+        self::assertArrayNotHasKey('lang/**', $perKey);
+        self::assertArrayNotHasKey('resources/lang/**', $perKey);
+        self::assertSame(['tests'], $perKey['config/**']);
+
+        $rulesOff = (new Laravel(false, ['database/migrations/**'], true))->defaults($this->root, ['tests']);
+
+        self::assertSame(['tests'], $rulesOff['lang/**'], 'no rule claims them with the Laravel rules off');
+        self::assertSame(['tests'], (new Laravel(true))->defaults($this->root, ['tests'])['resources/lang/**'], 'conservative');
+    }
+
     // -- Symfony -------------------------------------------------------------
 
     public function test_symfony_is_not_applicable_without_a_bundles_file(): void

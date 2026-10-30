@@ -271,3 +271,88 @@ remote URL equal to `origin`.
 `remote:init --same-repo` implements this shape, and prints the clone-size cost in its own
 output rather than leaving it in a document — a setup command that hides the one reason not to
 use what it just configured is worse than no command.
+
+## D-046 — A language file change selects by translation key, recorded by decorating `Translator::get()`
+
+Until 0.13, `lang/**` and `resources/lang/**` were watch patterns, so any edit to a translation
+ran every test. Measured on a real project's PR (emasex #1005): 12,673 of 12,686 tests. The
+files are not executable dependencies in the sense coverage understands: a JSON file is never
+run, and a PHP group file is `require`d by `FileLoader` once per translator, so coverage credits
+it to every test that loads *any* key of the group. A per-file edge can only ever give back the
+broad rule, and it is the edge, not the rule, that holds the cost: `PhpEdgeRule` and
+`Cache\ContentKey` both read it.
+
+**Why by key and not by file.** What a test depends on is the string it asks for, and a diff of a
+language file says exactly which strings changed: `LangFiles::changedKeys()` flattens the file at
+the change set's base and in the working tree and returns the keys added, deleted or given
+another value. A test reads a small part of a project's keys. Reordering, re-indenting and
+comments change none, so they select nothing.
+A key matches itself, the group or subtree that holds it and the keys under it
+(`LangFiles::matches()`, `.` as the separator, so `a.b` does not match `a.bc`), because a test
+that asks for `messages.nested` or `trans('messages')` reads everything below.
+
+**Why decorate `get()`.** `__()`, `trans()`, `trans_choice()`, `Lang::get()`, `@lang`, `choice()`,
+`has()`, `hasForLocale()` and the validator's messages all end in `Translator::get()`, so one
+override sees every lookup, with the key as the test spelled it. The alternatives see less:
+the **loader** is asked for a locale, a group and a namespace, never for a key, so it can say
+which file was read but not which line, which is the per-file answer again; and Laravel
+dispatches **no event** for a resolved key (there is only the `handleMissingKeysUsing()` callback,
+for a key that is missing, and only when one is registered). `TranslationTracker::arm()` does not resolve the translator itself: it asks the
+container to `extend('translator', …)`, so the replacement is built when the application first
+needs it, in the order it always would have been, and the container's shared instance is the
+recording one for every consumer. `RecordingTranslator` copies the whole state of the original
+(loader, locale, fallback, loaded lines, parsed keys, the `determineLocalesUsing` callback, the
+missing-key callbacks) and is only built for exactly `Illuminate\Translation\Translator`: a
+subclass may override what `get()` does, and a replacement we cannot decorate is something we
+cannot see, so it marks the test `*`. What a test does to the translator afterwards is checked
+when it ends (`TranslationTracker::verify()`, from `beforeApplicationDestroyed()`): `Lang::swap()`,
+a mock or `instance('translator', …)` also mark it `*`. The package stays free of `illuminate/*`:
+the class is autoloaded only after `class_exists(Translator::class)`.
+
+**Why every locale of the chain is recorded.** A lookup for `es` is served from `en` when the
+`es` file lacks the key (`fallback_locale`, and whatever `determineLocalesUsing()` adds:
+`localeArray()`). The text the test sees then depends on the `en` line, so a test that asked for
+`es` must be selected when only `en` changes. Recording only the requested locale is a false
+green; recording the chain costs one extra entry per lookup, and the over-selection it causes
+(an `es` test selected by an `en` change to a key it did resolve in `es`) is the price of not
+guessing which locale served it. Entries are `<locale>:<key>`, split at the **first** `:` because
+a locale never contains one and a key may (`pkg::messages.title`).
+
+**Why the analysis of PHP language files is static, and never executes anything.** The selection
+runs in the wrapper, in the developer's or CI's process, against two versions of a file, one of
+which only exists as `git show` output. Running a project file there means running project code
+outside the application that was written to run it (`env()`, a helper, a `__()` call, a database
+read), and the base version cannot be `require`d without writing it somewhere first. So a file
+is read with `nikic/php-parser` and accepted only when it is `return <array literal>;` (after an
+optional `declare(...)`) whose keys and leaves `ConstExprEvaluator` can evaluate from literals:
+no function, constant, variable, `include` or interpolation. Anything else, a syntax error
+included, is not comparable. Two entries that flatten to one key (`'a.b'` and `'a' => ['b']`) are
+not comparable either: which one wins depends on PHP, not on the file.
+
+**Why what cannot be compared falls back to the broad rule for that file only.** The failure
+mode that matters is a false green, a changed string that a test depends on and does not run,
+so narrowing is only claimed where it can be shown: a vendor package's translations
+(`lang/vendor/**`), a file under a language root that is not a translation file, a file that does
+not flatten, one created or deleted since the base, no base, or a graph that recorded no key yet
+select every test (`ResiduePatterns::targetsFor()`), plus every test file that resolved any
+translation, wherever it lives. The same applies to the tests recorded as `*`, for any key change.
+It is the previous behaviour, applied to the one file that earns it: the other language files of
+the same change stay narrowed, which is why this is not an all-or-nothing switch on the whole
+change. `translations => 'conservative'` is the all-or-nothing version, for a project whose
+translations the tracker cannot see.
+
+**What that costs elsewhere, accepted.** A coverage edge to a language file defeats the rule, so
+`LaravelIntegration::augment()` drops it before it reaches the graph, except for a PHP group file
+a test loaded without its translator resolving any key of that group (it reads the file some
+other way, and keeps today's per-file behaviour for it). `Select\NonEdgeInputs` mirrors the rule
+(`trans@1`, `lang@1`, `lang:uncomparable@1`, version `n5`) so a test's digest moves exactly when
+the rule selects it: a digest that moved for a test the rule left out would stop serving a result
+for nothing, and one that did not move for a test it selected would serve a stale one. The
+structural fingerprint gains `translations`, because a graph recorded without the keys reads "no
+entry" as "used no translation": one full re-record after updating, and on a mode switch. There is
+no environment override, like `migrations`. Known limits, not detected: keys resolved in a
+provider's `register()` before arming, values cached in a static between tests (the union across
+recordings converges), reads through the loader itself.
+
+Contracts in docs/INTERNALS.md ("Laravel", "Cache\Fingerprint"), measured effect in CHANGELOG
+"Unreleased".
